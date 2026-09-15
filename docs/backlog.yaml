@@ -605,6 +605,9 @@ epics:
     - docs/PERF.md has the draw latency numbers.
     verify:
     - scripts/qa.sh
+    verified: true
+    note: merged to main 2026-09-14; scripts/qa.sh 13/13 and 198 tests green on main after conflict resolution
+      with T4.1
 - id: E4
   title: E4 Connections in the TUI
   description: 'Opening, watching and closing database connections from the shell, with passwords resolved
