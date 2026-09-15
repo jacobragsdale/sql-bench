@@ -40,6 +40,43 @@ fn body(terminal: &Terminal<TestBackend>, row: u16) -> String {
         .to_owned()
 }
 
+/// One result set of one column and one row, which is what the inspector
+/// tests open on.
+fn one_cell(name: &str, type_name: &str, cell: Cell) -> Results {
+    let mut results = Results::default();
+    results.start(Instant::now(), 0, 1, false);
+    results.apply(QueryEvent::Columns(vec![Column {
+        name: name.to_owned(),
+        type_name: type_name.to_owned(),
+    }]));
+    results.apply(QueryEvent::Rows(vec![vec![cell]]));
+    results
+}
+
+/// Where the inspector's overlay sits on a 120-column frame: 72 wide and
+/// centred, which is nowhere near a pane's own border.
+const INSPECT_X: u16 = 24;
+const INSPECT_WIDE: u16 = 72;
+
+/// The rows of the overlay, border and all, with the padding trimmed off the
+/// right of each.
+fn overlay(terminal: &Terminal<TestBackend>) -> Vec<String> {
+    let buffer = terminal.backend().buffer();
+    let row = |y: u16| {
+        (INSPECT_X..INSPECT_X + INSPECT_WIDE)
+            .map(|x| buffer[(x, y)].symbol())
+            .collect::<String>()
+            .trim_end()
+            .to_owned()
+    };
+    let corner = |glyph: &str| {
+        (0..buffer.area.height)
+            .find(|y| buffer[(INSPECT_X, *y)].symbol() == glyph)
+            .unwrap_or_else(|| panic!("no {glyph} where the overlay is"))
+    };
+    (corner("╭")..=corner("╰")).map(row).collect()
+}
+
 /// A theme token as [`painted`] reports it: a cell always has a foreground,
 /// even when the style that painted it named none.
 fn as_painted(style: Style) -> Style {
@@ -200,5 +237,149 @@ fn a_hundred_thousand_rows_draw_inside_the_five_millisecond_budget() {
     assert!(
         drew < Duration::from_millis(5),
         "a release draw of 100,000 rows took {drew:?}"
+    );
+}
+
+#[test]
+fn the_inspector_wraps_a_long_value_and_says_how_long_it_is() {
+    // 100 repeats of ten characters: the row the replay script opens, in
+    // miniature, and a length with a comma in it.
+    let body = "Lorem ipsu".repeat(100);
+    let mut app = showing(one_cell("body", "nvarchar(max)", Cell::Text(body.clone())));
+    app.handle(Event::Key(key("Enter")));
+    let lines = overlay(&frame(120, 40, &app));
+    assert_eq!(
+        lines[0],
+        format!("╭ body · nvarchar(max) · 1,000 chars {}╮", "─".repeat(34))
+    );
+    assert_eq!(
+        lines[1],
+        format!("│ {} │", body.chars().take(68).collect::<String>())
+    );
+    assert_eq!(
+        lines[2],
+        format!("│ {} │", body.chars().skip(68).take(68).collect::<String>())
+    );
+    // Fifteen lines of value, plus the two of border.
+    assert_eq!(lines.len(), 1_000_usize.div_ceil(68) + 2);
+    assert_eq!(lines[15], format!("│ {:<68} │", &body[68 * 14..]));
+}
+
+#[test]
+fn a_value_taller_than_the_screen_scrolls_inside_the_tab_bar_and_the_footer() {
+    // Five hundred lines that say which one they are, so a scroll is not
+    // just the same glyph one row up.
+    let body: Vec<String> = (0..500).map(|line| format!("line {line}")).collect();
+    let app = &mut showing(one_cell(
+        "body",
+        "nvarchar(max)",
+        Cell::Text(body.join("\n")),
+    ));
+    app.handle(Event::Key(key("Enter")));
+    let terminal = frame(120, 40, app);
+    let lines = overlay(&terminal);
+    assert_eq!(
+        lines.len(),
+        38,
+        "the tab bar and the footer are not covered"
+    );
+    assert_eq!(line(&terminal, 0), " 1 local-mssql ○  2 local-oracle ○");
+    assert_eq!(lines[1], format!("│ {:<68} │", "line 0"));
+
+    app.handle(Event::Key(key("j")));
+    let lines = overlay(&frame(120, 40, app));
+    assert_eq!(lines[1], format!("│ {:<68} │", "line 1"));
+
+    // Past the end is as far as it goes, and what shows is the last page.
+    for _ in 0..200 {
+        app.handle(Event::Key(key("PageDown")));
+    }
+    let lines = overlay(&frame(120, 40, app));
+    assert_eq!(lines[1], format!("│ {:<68} │", "line 464"));
+    assert_eq!(lines[36], format!("│ {:<68} │", "line 499"));
+    assert_eq!(lines[37], format!("╰{}╯", "─".repeat(70)));
+}
+
+#[test]
+fn the_inspector_draws_bytes_as_a_hex_dump_with_the_printable_ones_beside_it() {
+    let mut data: Vec<u8> = b"Lorem ipsum dolor sit".to_vec();
+    data.push(0);
+    let mut app = showing(one_cell("data", "varbinary(max)", Cell::Bytes(data)));
+    app.handle(Event::Key(key("Enter")));
+    let lines = overlay(&frame(120, 40, &app));
+    assert!(
+        lines[0].starts_with("╭ data · varbinary(max) · 22 bytes "),
+        "{:?}",
+        lines[0]
+    );
+    assert_eq!(
+        lines[1],
+        format!(
+            "│ {:<68} │",
+            "000000  4c6f7265 6d206970 73756d20 646f6c6f  Lorem ipsum dolo"
+        )
+    );
+    assert_eq!(
+        lines[2],
+        format!(
+            "│ {:<68} │",
+            "000010  72207369 7400                        r sit."
+        ),
+        "a short last line pads, and a byte no font has is a dot"
+    );
+}
+
+#[test]
+fn the_inspector_says_null_for_a_null_and_nothing_for_an_empty_string() {
+    let mut app = showing(one_cell("body", "nvarchar(max)", Cell::Null));
+    app.handle(Event::Key(key("Enter")));
+    let lines = overlay(&frame(120, 40, &app));
+    assert_eq!(
+        lines[0],
+        format!("╭ body · nvarchar(max) · NULL {}╮", "─".repeat(41))
+    );
+    assert_eq!(lines[1], format!("│ {:<68} │", "NULL"));
+    assert_eq!(lines.len(), 3);
+
+    let mut app = showing(one_cell("body", "nvarchar(max)", Cell::Text(String::new())));
+    app.handle(Event::Key(key("Enter")));
+    let lines = overlay(&frame(120, 40, &app));
+    assert!(lines[0].starts_with("╭ body · nvarchar(max) · 0 chars "));
+    assert_eq!(lines.len(), 3, "one empty line, not none and not two");
+}
+
+#[test]
+fn a_value_with_line_breaks_keeps_them() {
+    let mut app = showing(one_cell(
+        "body",
+        "nvarchar(max)",
+        Cell::Text("one\r\ntwo\n\nfour".to_owned()),
+    ));
+    app.handle(Event::Key(key("Enter")));
+    let lines = overlay(&frame(120, 40, &app));
+    assert_eq!(
+        lines[1..5],
+        ["one", "two", "", "four"].map(|text| format!("│ {text:<68} │"))
+    );
+}
+
+#[test]
+fn the_export_prompt_is_the_footer_with_a_cursor_on_it() {
+    let mut app = showing(filled(3, 2));
+    app.handle(Event::Key(key("e")));
+    let terminal = frame(120, 40, &app);
+    let footer = line(&terminal, 39);
+    let path = app.shell.prompt.as_ref().expect("the prompt").text.clone();
+    assert!(
+        footer.starts_with(&format!(" Export to: {path} ")),
+        "{footer:?}"
+    );
+    assert!(footer.ends_with("○ disconnected"), "{footer:?}");
+    // The cursor is the cell past the end of the path, where the next
+    // character goes.
+    let at = u16::try_from(" Export to: ".len() + path.chars().count()).expect("a column");
+    assert_eq!(
+        painted(&terminal, at, 39),
+        as_painted(Theme::new(false).cursor)
     );
 }

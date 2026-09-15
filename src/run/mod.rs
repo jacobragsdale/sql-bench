@@ -13,6 +13,7 @@ mod tests;
 pub use replay::replay;
 pub use runtime::{Pending, Runtime, startup_tabs};
 
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -22,9 +23,11 @@ use crossterm::terminal::{EnterAlternateScreen, enable_raw_mode};
 use ratatui::Terminal;
 use ratatui::backend::Backend;
 
+use crate::app::results::grouped;
 use crate::app::{Action, App, SPIN_EVERY};
 use crate::cli::Cli;
 use crate::config::Config;
+use crate::export;
 use crate::run::state::Store;
 use crate::trace::Trace;
 use crate::ui;
@@ -406,6 +409,7 @@ impl Driver {
             Action::OpenEditor { tab } => self.open_editor(terminal, app, tab)?,
             Action::SaveScratch { tab } => self.save_scratch(app, tab),
             Action::Copy(text) => self.copy(&text),
+            Action::Export { tab, path } => self.export(app, tab, &path),
         }
         Ok(())
     }
@@ -480,6 +484,38 @@ impl Driver {
         Ok(())
     }
 
+    /// The result set on screen, written where the prompt said: JSON for a
+    /// `.json` name and CSV for anything else, because a person who typed a
+    /// file name has already said what they wanted.
+    ///
+    /// Every row that was fetched goes, not the ones on screen — and the cap
+    /// that stopped the scan is still the cap, which is what the title says.
+    fn export(&mut self, app: &mut App, tab: usize, path: &str) {
+        let Some(open) = app.tabs.get(tab) else {
+            return;
+        };
+        let results = &open.results;
+        let path = expand(path);
+        let json = path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("json"));
+        let text = if json {
+            export::json(results.columns(), results.rows())
+        } else {
+            export::csv(results.columns(), results.rows())
+        };
+        let rows = grouped(results.rows().len());
+        match std::fs::write(&path, text) {
+            Ok(()) => {
+                app.shell.status = format!("exported {rows} rows to {}", path.display());
+            }
+            Err(error) => {
+                app.shell.error = Some(format!("export failed: {error}"));
+            }
+        }
+        self.dirty = true;
+    }
+
     /// The selection into the terminal's own clipboard, through OSC 52. It
     /// is a best effort: a terminal that ignores the escape leaves the text
     /// in the app's clipboard and nobody any worse off.
@@ -491,6 +527,20 @@ impl Driver {
         let mut out = std::io::stdout();
         let _ = write!(out, "\x1b]52;c;{}\x07", base64(text.as_bytes()));
         let _ = out.flush();
+    }
+}
+
+/// A leading `~` is the one thing a person typing a path expects a program
+/// to know. Nothing else is expanded: a shell did that before the argument
+/// ever arrived, and a prompt is not a shell.
+fn expand(path: &str) -> PathBuf {
+    let rest = match path.strip_prefix('~') {
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => rest.trim_start_matches('/'),
+        _ => return PathBuf::from(path),
+    };
+    match std::env::var_os("HOME") {
+        Some(home) => PathBuf::from(home).join(rest),
+        None => PathBuf::from(path),
     }
 }
 

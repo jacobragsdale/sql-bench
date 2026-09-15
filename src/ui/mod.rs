@@ -13,6 +13,8 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph, Wrap};
 
+use crate::app::prompt::Prompt;
+use crate::app::results::{INSPECT_WIDTH, Inspector, inspect_title};
 use crate::app::scratch::Scratch;
 use crate::app::{App, Focus, TabState, keys_for};
 use theme::Theme;
@@ -84,6 +86,11 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
     scratch_pane(frame, app, theme, scratch);
     results::render(frame, app, theme, results);
     frame.render_widget(footer_line(app, theme, area.width), footer);
+    if let Some(inspector) = &app.shell.inspector {
+        render_inspector(frame, area, app, inspector, theme);
+    }
+    // The help goes over the inspector, because Esc closes them in that
+    // order too.
     if app.shell.help {
         render_help(frame, area, app, theme);
     }
@@ -260,13 +267,22 @@ fn footer_line(app: &App, theme: &Theme, width: u16) -> Line<'static> {
         },
     );
     let budget = usize::from(width).saturating_sub(right.width() + 1);
-    let left = match (&app.shell.error, app.shell.status.as_str()) {
-        (Some(error), _) => Span::styled(cut(error, budget), theme.error),
-        (None, "") => Span::styled(hints(app.shell.focus, budget), theme.dim),
-        (None, status) => Span::raw(cut(status, budget)),
+    let left = match (
+        &app.shell.prompt,
+        &app.shell.error,
+        app.shell.status.as_str(),
+    ) {
+        (Some(prompt), ..) => prompt_spans(prompt, theme),
+        (None, Some(error), _) => vec![Span::styled(cut(error, budget), theme.error)],
+        (None, None, "") => vec![Span::styled(hints(app.shell.focus, budget), theme.dim)],
+        (None, None, status) => vec![Span::raw(cut(status, budget))],
     };
-    let gap = usize::from(width).saturating_sub(left.width() + right.width());
-    Line::from(vec![left, Span::raw(" ".repeat(gap)), right])
+    let used: usize = left.iter().map(Span::width).sum();
+    let gap = usize::from(width).saturating_sub(used + right.width());
+    let mut spans = left;
+    spans.push(Span::raw(" ".repeat(gap)));
+    spans.push(right);
+    Line::from(spans)
 }
 
 /// ` text`, cut to `budget` columns with an ellipsis. The footer's right end
@@ -279,6 +295,31 @@ fn cut(text: &str, budget: usize) -> String {
     }
     let kept: String = text.chars().take(room.saturating_sub(1)).collect();
     format!(" {kept}…")
+}
+
+/// ` Export to: ` and the path being typed, the cursor painted the way the
+/// scratch pad's is — a `TestBackend` has no terminal cursor, so a prompt
+/// whose cursor were the real one could not be tested at all.
+fn prompt_spans(prompt: &Prompt, theme: &Theme) -> Vec<Span<'static>> {
+    let characters: Vec<char> = prompt.text.chars().collect();
+    vec![
+        Span::styled(" Export to: ".to_owned(), theme.accent),
+        Span::raw(characters.iter().take(prompt.cursor).collect::<String>()),
+        Span::styled(
+            characters
+                .get(prompt.cursor)
+                .copied()
+                .unwrap_or(' ')
+                .to_string(),
+            theme.cursor,
+        ),
+        Span::raw(
+            characters
+                .iter()
+                .skip(prompt.cursor + 1)
+                .collect::<String>(),
+        ),
+    ]
 }
 
 /// As many of this pane's keys as fit, in the order [`KEYS`] lists them.
@@ -336,6 +377,47 @@ fn render_help(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     frame.render_widget(Clear, overlay);
     frame.render_widget(
         Paragraph::new(lines).block(titled(&title, theme.accent, theme.accent)),
+        overlay,
+    );
+}
+
+/// The whole of one cell over the grid: the column, its type and how much of
+/// it there is in the title, and the value under it, scrolled by j and k.
+///
+/// The cell is read here rather than copied when Enter opened the overlay, so
+/// what is on screen is what the grid holds and nothing is kept twice.
+fn render_inspector(
+    frame: &mut Frame,
+    area: Rect,
+    app: &App,
+    inspector: &Inspector,
+    theme: &Theme,
+) {
+    let Some(results) = app.tab().map(|tab| &tab.results) else {
+        return;
+    };
+    let (Some(column), Some(cell)) = (results.column(), results.cell()) else {
+        return;
+    };
+    let lines = app.inspect_lines();
+    let height = u16::try_from(lines.len())
+        .unwrap_or(u16::MAX)
+        .saturating_add(2)
+        .min(area.height.saturating_sub(2));
+    let overlay = centered(area, INSPECT_WIDTH as u16 + 4, height);
+    let showing = usize::from(height.saturating_sub(2));
+    let top = inspector.scroll.min(lines.len().saturating_sub(showing));
+    let body: Vec<Line> = lines[top..(top + showing).min(lines.len())]
+        .iter()
+        .map(|line| Line::raw(line.clone()))
+        .collect();
+    frame.render_widget(Clear, overlay);
+    frame.render_widget(
+        Paragraph::new(body).block(titled(
+            &format!(" {} ", inspect_title(column, cell)),
+            theme.accent,
+            theme.accent,
+        )),
         overlay,
     );
 }

@@ -161,3 +161,84 @@ fn osc_52_carries_the_selection_as_base64() {
     assert_eq!(super::base64(b"s"), "cw==");
     assert_eq!(super::base64(b""), "");
 }
+
+/// One export through the loop's own `act`, and what it wrote.
+fn exported(app: &mut App, name: &str, directory: &std::path::Path) -> String {
+    let path = directory.join(name);
+    driver()
+        .act(
+            &mut terminal(),
+            app,
+            Action::Export {
+                tab: 0,
+                path: path.to_string_lossy().into_owned(),
+            },
+        )
+        .expect("the export");
+    std::fs::read_to_string(&path).expect("the exported file")
+}
+
+#[test]
+fn an_export_writes_the_same_bytes_the_headless_formatters_do() {
+    let directory = tempfile::tempdir().expect("a directory");
+    let mut app = two_tabs();
+    app.tabs[0].results = crate::app::tests::filled(3, 4);
+    let columns = app.tabs[0].results.columns().to_vec();
+    let rows = app.tabs[0].results.rows().to_vec();
+
+    assert_eq!(
+        exported(&mut app, "rows.csv", directory.path()),
+        crate::export::csv(&columns, &rows)
+    );
+    assert_eq!(app.shell.status, {
+        let path = directory.path().join("rows.csv");
+        format!("exported 3 rows to {}", path.display())
+    });
+    // The extension is what picks the format, whatever its case.
+    assert_eq!(
+        exported(&mut app, "rows.JSON", directory.path()),
+        crate::export::json(&columns, &rows)
+    );
+    assert!(app.shell.error.is_none());
+}
+
+#[test]
+fn an_export_that_cannot_be_written_says_so_in_the_footer() {
+    let directory = tempfile::tempdir().expect("a directory");
+    let mut app = two_tabs();
+    app.tabs[0].results = crate::app::tests::filled(1, 2);
+    let missing = directory.path().join("no").join("such").join("out.csv");
+    driver()
+        .act(
+            &mut terminal(),
+            &mut app,
+            Action::Export {
+                tab: 0,
+                path: missing.to_string_lossy().into_owned(),
+            },
+        )
+        .expect("the export");
+    let error = app.shell.error.expect("the failure in the footer");
+    assert!(error.starts_with("export failed: "), "{error}");
+    assert!(app.shell.status.is_empty());
+}
+
+#[test]
+fn a_leading_tilde_is_the_home_directory_and_nothing_else_is_expanded() {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    assert_eq!(
+        home.map(|home| home.join("sql-bench.csv")),
+        Some(super::expand("~/sql-bench.csv"))
+    );
+    assert_eq!(
+        super::expand("/tmp/a.csv"),
+        std::path::Path::new("/tmp/a.csv")
+    );
+    assert_eq!(super::expand("out.csv"), std::path::Path::new("out.csv"));
+    // Not a home directory: `~other` is somebody else's, and this is not a
+    // shell.
+    assert_eq!(
+        super::expand("~other/a.csv"),
+        std::path::Path::new("~other/a.csv")
+    );
+}
