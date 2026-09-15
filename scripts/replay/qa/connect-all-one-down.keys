@@ -1,0 +1,19 @@
+# T4.2 case 5: `--connect-all` at startup with the SQL Server container
+# stopped. Both connects are started once the first frame is up, so the help
+# overlay opening before `wait busy` is the app answering a key while they run.
+key ?
+expect ╭ Help
+key Esc
+expect-not ╭ Help
+
+wait busy
+expect 1 local-mssql ✗  2 local-oracle ●
+frame connect-all
+key 1
+expect cannot connect
+expect c to retry
+frame connect-all-failed-tab
+key 2
+expect-not c to retry
+frame connect-all-live-tab
+key q

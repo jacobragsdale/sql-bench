@@ -1,0 +1,30 @@
+# T4.2 case 3b: the database is back, and `c` on the failed tab connects.
+key c
+wait busy
+expect ●
+expect connected in
+frame reconnected
+
+# The transition has settled, so the spinner has to be still.
+wait 100
+wait 100
+wait 100
+wait 100
+wait 100
+wait 100
+wait 100
+wait 100
+wait 100
+wait 100
+wait 100
+wait 100
+wait 100
+wait 100
+wait 100
+wait 100
+wait 100
+wait 100
+wait 100
+wait 100
+frame reconnected-idle
+key q

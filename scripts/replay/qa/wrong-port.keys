@@ -1,0 +1,12 @@
+# T4.2 case 2: nothing is listening on the port the config names.
+#
+# A refusal comes back from the kernel, so this is the one failure that is
+# immediate; the runner times the whole run to say so.
+key c
+wait busy
+expect ✗
+expect localhost:1:
+expect cannot connect
+expect c to retry
+frame wrong-port
+key q

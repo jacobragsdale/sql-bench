@@ -249,6 +249,29 @@ mod tests {
         assert!(runtime.connection(0).is_none());
     }
 
+    /// T4.2: `C` on a tab whose `password_cmd` is sleeping has to be the end
+    /// of that attempt — including the answer it sends a second later, which
+    /// would otherwise put a tab the person disconnected back on `Failed`.
+    #[test]
+    fn a_disconnect_abandons_an_attempt_and_the_late_answer_is_dropped() {
+        let mut config = refused("s3cret");
+        // Long enough to abandon the attempt while the thread is still in it.
+        config.connections[0].password = Some(Password::Command("sleep 1".to_owned()));
+        let mut app = App::new(&config);
+        let mut runtime = Runtime::new(&config);
+        runtime.connect(&mut app, 0);
+        assert_eq!(app.tabs[0].state, TabState::Connecting);
+
+        runtime.disconnect(&mut app, 0);
+        assert_eq!(app.tabs[0].state, TabState::Disconnected);
+        let deadline = Instant::now() + Duration::from_millis(1800);
+        while Instant::now() < deadline {
+            assert!(!runtime.poll_connections(&mut app), "a dropped attempt");
+            assert_eq!(app.tabs[0].state, TabState::Disconnected);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     #[test]
     fn one_request_waits_for_a_connection_and_a_second_takes_its_place() {
         let config = two_connections();
