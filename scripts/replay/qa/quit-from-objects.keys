@@ -3,7 +3,7 @@
 # the ? before it, which does, is the proof that the check can fail.
 
 key ?
-expect ╭ Help ─
+expect ╭ Help · Objects ─
 key Esc
 key Ctrl-Q
 key ?

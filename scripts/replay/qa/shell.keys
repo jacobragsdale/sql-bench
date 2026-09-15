@@ -9,18 +9,35 @@ expect ╭ Results ─
 expect ○ disconnected
 
 key ?
-expect ╭ Help ─
-expect Tab       not Scratch next pane
-expect Ctrl-Q    anywhere    quit
+expect ╭ Help · Objects ─
+expect Tab        next pane
+expect Ctrl-Q     quit
 key Esc
 expect-not ╭ Help
 
+# The Scratch pad's keys are more than a 60x15 screen holds, so the overlay
+# scrolls: the last of them is one PageDown away at every size, and a list
+# clipped instead of scrolled fails here.
+key Tab
+key ?
+expect ╭ Help · Scratch
+expect Ctrl-R        run the statement
+key PageDown
+expect Ctrl-Q        quit
+key Esc
+key Shift-Tab
+expect-not ╭ Help
+
 # Round the three panes and back the other way; the layout survives either.
-key Tab
-key Tab
+# Shift-Tab is the way round that never types, Tab being the pad's own key.
+key Shift-Tab
+key Shift-Tab
+key Shift-Tab
 key Tab
 key Shift-Tab
 expect ╭ Objects ─
 expect ╭ Scratch ─
 expect ╭ Results ─
 expect ○ disconnected
+# Nothing above typed into the pad — the overlay's scroll keys least of all.
+expect-not [modified]

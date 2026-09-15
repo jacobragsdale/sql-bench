@@ -65,6 +65,11 @@ pub const SPINNER: [&str; 4] = ["⠋", "⠙", "⠹", "⠸"];
 /// enough that a connecting app costs ten frames a second and not more.
 pub const SPIN_EVERY: Duration = Duration::from_millis(100);
 
+/// How far PageUp and PageDown move the help overlay. The app never sees
+/// the terminal, so this is a page of the smallest one it supports; the
+/// overlay clamps the offset to the rows it can actually show.
+const HELP_PAGE: usize = 10;
+
 /// The rows of [`KEYS`] that work while `focus` has the focus.
 pub fn keys_for(
     focus: Focus,
@@ -222,6 +227,9 @@ pub struct Shell {
     pub size: Size,
     /// Whether the help overlay is open.
     pub help: bool,
+    /// The first row of [`keys_for`] the open overlay shows. `?` and Esc put
+    /// it back to the top.
+    pub help_scroll: usize,
     /// Which frame of [`SPINNER`] a connecting tab is showing.
     pub spinner: usize,
     /// What Ctrl-C last copied. The terminal's own clipboard is a best
@@ -382,6 +390,9 @@ impl App {
     }
 
     fn key(&mut self, key: KeyEvent) -> Vec<Action> {
+        if self.shell.help && self.help_key(key) {
+            return Vec::new();
+        }
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         // The scratch pad types every key the shell does not keep for
         // itself, which is why the shell's keys are matched first.
@@ -395,10 +406,14 @@ impl App {
             }
             KeyCode::Tab if !typing => self.shell.focus = self.shell.focus.next(),
             KeyCode::BackTab => self.shell.focus = self.shell.focus.previous(),
-            KeyCode::Char('?') => self.shell.help = !self.shell.help,
+            KeyCode::Char('?') => {
+                self.shell.help = !self.shell.help;
+                self.shell.help_scroll = 0;
+            }
             KeyCode::Esc => {
                 if self.shell.help {
                     self.shell.help = false;
+                    self.shell.help_scroll = 0;
                 } else {
                     self.shell.error = None;
                 }
@@ -421,6 +436,24 @@ impl App {
             _ => {}
         }
         Vec::new()
+    }
+
+    /// The keys the open overlay keeps for itself — the pane under it never
+    /// sees them — and whether this was one of them.
+    fn help_key(&mut self, key: KeyEvent) -> bool {
+        // Past the last row is as far as it goes, so an offset the overlay
+        // clamps away does not have to be scrolled back through.
+        let last = keys_for(self.shell.focus).count().saturating_sub(1);
+        let scroll = &mut self.shell.help_scroll;
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => *scroll += 1,
+            KeyCode::Char('k') | KeyCode::Up => *scroll = scroll.saturating_sub(1),
+            KeyCode::PageDown => *scroll += HELP_PAGE,
+            KeyCode::PageUp => *scroll = scroll.saturating_sub(HELP_PAGE),
+            _ => return false,
+        }
+        *scroll = (*scroll).min(last);
+        true
     }
 
     /// A key the pad handles, and what the run loop owes it afterwards.

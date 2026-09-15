@@ -19,9 +19,9 @@ expect-not sql-bench needs 60x15
 
 # The overlay follows the layout through a resize too.
 key ?
-expect ╭ Help ─
+expect ╭ Help · Objects ─
 resize 60x15
-expect ╭ Help ─
-expect Ctrl-Q    anywhere    quit
+expect ╭ Help · Objects ─
+expect Ctrl-Q     quit
 resize 120x40
-expect ╭ Help ─
+expect ╭ Help · Objects ─

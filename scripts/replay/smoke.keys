@@ -6,8 +6,8 @@ expect 1 local-mssql ○  2 local-oracle ○
 frame shell
 
 key ?
-expect ╭ Help
-expect Ctrl-T    anywhere    next tab
+expect ╭ Help · Objects ─
+expect Ctrl-T     next tab
 frame help
 key Esc
 expect-not ╭ Help

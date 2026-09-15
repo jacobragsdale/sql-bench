@@ -1,13 +1,17 @@
 # 120x40, where the footer has room for every key of one pane but not for
-# both lists: the hints follow the focus.
+# both lists: the hints follow the focus. Shift-Tab is the way round that
+# never types, Tab being the pad's own key once it has the focus.
 
 expect 1-9 select tab
-key Tab
-expect-not 1-9 select tab
-expect Ctrl-Q quit
-key Tab
+key Shift-Tab
 expect 1-9 select tab
 key Shift-Tab
+expect-not 1-9 select tab
+expect Ctrl-R run the statement
+key Shift-Tab
+expect 1-9 select tab
+expect-not Ctrl-R run the statement
+key Tab
 expect-not 1-9 select tab
 key Shift-Tab
 expect 1-9 select tab
