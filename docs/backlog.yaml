@@ -460,6 +460,8 @@ epics:
     - Password grep returns nothing.
     verify:
     - SQL_BENCH_TEST_DBS=1 cargo test --all-targets
+    verified: true
+    note: merged to main 2026-09-14; 196 tests green on main, containers healthy after the outage script
 - id: E3
   title: E3 TUI shell and replay verification
   description: 'The terminal application frame: the event loop that never blocks, tabs, focus, footer,
