@@ -9,6 +9,7 @@
 //! nothing better, Oracle breaks the call OCI is inside — but either way the
 //! connection is spent and the next query opens a new one.
 
+pub mod catalog;
 pub mod model;
 mod mssql;
 mod oracle;
