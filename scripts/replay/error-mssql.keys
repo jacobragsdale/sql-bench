@@ -1,0 +1,13 @@
+# T5.2: a statement the server says no to shows the server's own words.
+
+key c
+wait busy
+
+key Tab
+type select * from bench.nope_not_here
+key Ctrl-R
+wait busy
+
+expect Invalid object name
+frame error-mssql
+key Ctrl-Q

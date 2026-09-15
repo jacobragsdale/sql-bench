@@ -1,0 +1,204 @@
+//! The grid: what a result set looks like on a frame, and what one frame of
+//! it costs whatever the scan returned.
+
+use std::time::{Duration, Instant};
+
+use super::*;
+use crate::app::Focus;
+use crate::app::results::Results;
+use crate::app::tests::filled;
+use crate::db::model::{Cell, Column, DbError, QueryEvent};
+
+/// The two-tab app with this result set on the tab showing, focused so the
+/// cell cursor is the one the grid paints.
+fn showing(results: Results) -> App {
+    let mut app = two_tabs();
+    app.shell.focus = Focus::Results;
+    app.tabs[0].results = results;
+    app
+}
+
+/// The inside of the results pane: the lowest pane corner, plus the border
+/// and the padding.
+fn pane(terminal: &Terminal<TestBackend>) -> (u16, u16) {
+    let (x, y) = corners(terminal)
+        .into_iter()
+        .max_by_key(|(_, y)| *y)
+        .expect("the results pane");
+    (x + 2, y + 1)
+}
+
+/// One row of the pane's inside, as text: from the padding to the border on
+/// the far side of it.
+fn body(terminal: &Terminal<TestBackend>, row: u16) -> String {
+    let (x, y) = pane(terminal);
+    let buffer = terminal.backend().buffer();
+    (x..buffer.area.width - 2)
+        .map(|column| buffer[(column, y + row)].symbol())
+        .collect::<String>()
+        .trim_end()
+        .to_owned()
+}
+
+/// A theme token as [`painted`] reports it: a cell always has a foreground,
+/// even when the style that painted it named none.
+fn as_painted(style: Style) -> Style {
+    style.fg(ratatui::style::Color::Reset)
+}
+
+#[test]
+fn the_grid_is_a_header_a_type_row_and_the_columns_that_fit() {
+    let app = showing(filled(50, 20));
+    let terminal = frame(120, 40, &app);
+    let screen = text(&terminal);
+    assert!(
+        screen.contains("╭ Results · 50 rows · 42 ms "),
+        "the title says what the run cost:\n{screen}"
+    );
+    // Four of the twenty columns fit across the pane: the header is as wide
+    // as its own type name, and a long value stops at forty characters.
+    assert_eq!(
+        body(&terminal, 0),
+        format!(
+            "{:<8}  {:<40}  {:<11}  {:<8}",
+            "column_0", "column_1", "column_2", "column_3"
+        )
+        .trim_end()
+    );
+    assert_eq!(
+        body(&terminal, 1),
+        format!(
+            "{:<8}  {:<40}  {:<11}  {:<8}",
+            "int", "varchar(40)", "varchar(40)", "int"
+        )
+        .trim_end()
+    );
+    let first = body(&terminal, 2);
+    assert!(
+        first.starts_with("       0  row 0 of a value far too long for one c…"),
+        "numbers to the right, a long value cut at forty: {first:?}"
+    );
+    assert!(first.contains("NULL"), "{first:?}");
+    assert_eq!(
+        body(&terminal, 20),
+        "      18  row 18 of a value far too long for one …  NULL         c3r18",
+        "the last row that fits, and nothing below it"
+    );
+}
+
+#[test]
+fn the_cell_cursor_is_reversed_and_a_null_is_dim() {
+    let mut app = showing(filled(50, 20));
+    let theme = Theme::new(false);
+    let terminal = frame(120, 40, &app);
+    let (x, y) = pane(&terminal);
+    assert_eq!(
+        painted(&terminal, x, y + 2),
+        as_painted(theme.cursor),
+        "the first cell"
+    );
+    // Column 2 is the NULL one: eight and forty characters of column, and
+    // the two spaces between each.
+    assert_eq!(painted(&terminal, x + 52, y + 2), theme.dim);
+
+    // The cursor moves with the keys, and the column it lands in with it.
+    app.handle(Event::Key(key("j")));
+    app.handle(Event::Key(key("l")));
+    let terminal = frame(120, 40, &app);
+    assert_eq!(painted(&terminal, x, y + 2), as_painted(Style::default()));
+    assert_eq!(painted(&terminal, x + 10, y + 3), as_painted(theme.cursor));
+}
+
+#[test]
+fn a_short_pane_gives_the_rows_the_row_the_types_would_have_had() {
+    let app = showing(filled(50, 4));
+    // At fifteen rows the results pane is eight high, which is the line the
+    // types are dropped at.
+    let terminal = frame(120, 15, &app);
+    assert!(body(&terminal, 0).starts_with("column_0"));
+    assert!(
+        body(&terminal, 1).starts_with("       0"),
+        "the first row, not the types: {:?}",
+        body(&terminal, 1)
+    );
+}
+
+#[test]
+fn a_failure_is_the_servers_own_message_with_the_line_it_names() {
+    let mut app = showing(Results::default());
+    app.tabs[0].results.start(Instant::now(), 0, 1, false);
+    app.tabs[0].results.apply(QueryEvent::Error(DbError::Query {
+        message: "Invalid object name 'bench.nope'.".to_owned(),
+        line: Some(2),
+    }));
+    let terminal = frame(120, 40, &app);
+    assert_eq!(
+        body(&terminal, 0),
+        "line 2: Invalid object name 'bench.nope'."
+    );
+    let (x, y) = pane(&terminal);
+    assert_eq!(painted(&terminal, x, y), Theme::new(false).error);
+}
+
+#[test]
+fn a_run_of_several_statements_ends_with_the_summary_line() {
+    let mut results = Results::default();
+    for statement in 0..2 {
+        results.start(Instant::now(), statement, 2, false);
+        results.apply(QueryEvent::Columns(vec![Column {
+            name: "n".to_owned(),
+            type_name: "int".to_owned(),
+        }]));
+        results.apply(QueryEvent::Rows(vec![vec![Cell::Int(1)]]));
+        results.apply(QueryEvent::Done {
+            rows: 1,
+            truncated: false,
+            connect_ms: 0,
+            first_row_ms: 1,
+            total_ms: 4,
+        });
+    }
+    let terminal = frame(120, 40, &showing(results));
+    let screen = text(&terminal);
+    assert!(
+        screen.contains("2 statements, 2 result sets, 0 rows affected"),
+        "{screen}"
+    );
+}
+
+/// One draw of a hundred thousand rows, the second one so that nothing is
+/// being allocated for the first time.
+fn one_draw() -> Duration {
+    let app = showing(filled(100_000, 8));
+    let theme = Theme::new(false);
+    let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("a test terminal");
+    terminal
+        .draw(|frame| render(frame, &app, &theme))
+        .expect("a frame");
+    let at = Instant::now();
+    terminal
+        .draw(|frame| render(frame, &app, &theme))
+        .expect("a frame");
+    at.elapsed()
+}
+
+#[test]
+fn a_hundred_thousand_rows_cost_one_window_to_draw() {
+    let drew = one_draw();
+    assert!(
+        drew < Duration::from_millis(20),
+        "a debug draw of 100,000 rows took {drew:?}, which is the whole \
+         key-to-frame budget; the release budget is checked by \
+         `cargo test --release -- --ignored`"
+    );
+}
+
+#[test]
+#[ignore = "release timing: cargo test --release -- --ignored"]
+fn a_hundred_thousand_rows_draw_inside_the_five_millisecond_budget() {
+    let drew = one_draw();
+    assert!(
+        drew < Duration::from_millis(5),
+        "a release draw of 100,000 rows took {drew:?}"
+    );
+}

@@ -8,28 +8,42 @@
 //! module reaching into its state.
 
 use std::sync::mpsc::{self, Receiver, TryRecvError};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
+use crate::app::results::MORE_ROWS;
 use crate::app::{App, RuntimeEvent};
 use crate::cli::Cli;
 use crate::config::Config;
+use crate::db::model::{QueryEvent, QueryOptions};
 use crate::db::{self, Connection};
+use crate::trace::Trace;
 
-/// What a tab was asked to do while it was still connecting, kept until the
-/// connection is up. E5 gives it a shape; the slot is what T4.1 owes it.
-pub type Pending = String;
+/// How many rows the driver reports at a time. Small enough that the grid
+/// fills while the scan runs, big enough that a million rows are not a
+/// million channel messages.
+const BATCH: usize = 500;
+
+/// What a tab was asked to run while it was still connecting, kept until the
+/// connection is up.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Pending {
+    Statement(String),
+    All(Vec<String>),
+}
 
 /// Every tab's connection, in the order the tabs are in.
 #[derive(Debug, Default)]
 pub struct Runtime {
     config: Config,
     tabs: Vec<TabRuntime>,
+    /// What `--max-rows` said, which is every tab's cap until `m` raises it.
+    max_rows: usize,
 }
 
-/// One tab's connection, the attempt that may be in flight, and the one
-/// request waiting on it.
+/// One tab's connection, the attempt that may be in flight, the one request
+/// waiting on it and the query it is running.
 #[derive(Debug, Default)]
 pub struct TabRuntime {
     connection: Option<Connection>,
@@ -39,16 +53,63 @@ pub struct TabRuntime {
     /// The query or browse that asked for this connection. One slot: a
     /// person who asks twice while a connection opens means the second one.
     queued: Option<Pending>,
+    /// The query in flight, if there is one.
+    running: Option<Running>,
+    /// The cap this tab's queries run with; `m` raises it by [`MORE_ROWS`].
+    cap: usize,
+    /// The last statement run, so `m` can run it again for more of it.
+    last: Option<String>,
+}
+
+/// What one statement is being started as: the SQL, what follows it in a
+/// run-all, and where it is in that run.
+#[derive(Debug)]
+struct Start {
+    sql: String,
+    rest: Vec<String>,
+    statement: usize,
+    of: usize,
+    /// `m` asking for more rows of the same statement, which keeps the grid
+    /// where the person left it.
+    keep_view: bool,
+}
+
+/// One query in flight: where its events arrive, what is still to run after
+/// it, and what it has cost so far.
+#[derive(Debug)]
+struct Running {
+    events: Receiver<QueryEvent>,
+    /// The statements of a run-all still to come, in order.
+    rest: Vec<String>,
+    statement: usize,
+    of: usize,
+    started: Instant,
+    rows: usize,
+    batches: usize,
+    first_batch: Option<Duration>,
 }
 
 impl Runtime {
     #[must_use]
     pub fn new(config: &Config) -> Self {
+        let max_rows = QueryOptions::default().max_rows.unwrap_or(10_000);
         Self {
             config: config.clone(),
             tabs: (0..config.connections.len())
-                .map(|_| TabRuntime::default())
+                .map(|_| TabRuntime {
+                    cap: max_rows,
+                    ..TabRuntime::default()
+                })
                 .collect(),
+            max_rows,
+        }
+    }
+
+    /// What `--max-rows` asked for, before anything has been run.
+    pub fn set_max_rows(&mut self, max_rows: usize) {
+        self.max_rows = max_rows;
+        for tab in &mut self.tabs {
+            tab.cap = max_rows;
         }
     }
 
@@ -101,6 +162,7 @@ impl Runtime {
         runtime.pending = None;
         runtime.started = None;
         runtime.queued = None;
+        runtime.running = None;
         app.apply(RuntimeEvent::Disconnected { tab });
     }
 
@@ -142,8 +204,224 @@ impl Runtime {
             };
             app.apply(event);
             dirty = true;
+            if let Some(request) = self
+                .tabs
+                .get_mut(tab)
+                .filter(|runtime| runtime.connection.is_some())
+                .and_then(|runtime| runtime.queued.take())
+            {
+                self.start(app, tab, request);
+            }
         }
         dirty
+    }
+
+    /// Run this request on the tab, or connect first and run it when the
+    /// connection is up.
+    pub fn run(&mut self, app: &mut App, tab: usize, request: Pending) {
+        if self.connection(tab).is_some() {
+            self.start(app, tab, request);
+        } else {
+            self.connect(app, tab);
+            self.queue(app, tab, request);
+        }
+    }
+
+    /// The first statement of a request; a run-all keeps the rest for when
+    /// this one is done.
+    fn start(&mut self, app: &mut App, tab: usize, request: Pending) {
+        let (sql, rest) = match request {
+            Pending::Statement(sql) => (sql, Vec::new()),
+            Pending::All(mut statements) => {
+                if statements.is_empty() {
+                    return;
+                }
+                let rest = statements.split_off(1);
+                (statements.remove(0), rest)
+            }
+        };
+        let of = rest.len() + 1;
+        self.begin(
+            app,
+            tab,
+            Start {
+                sql,
+                rest,
+                statement: 0,
+                of,
+                keep_view: false,
+            },
+        );
+    }
+
+    /// Hand one statement to the driver and tell the app it is running.
+    fn begin(&mut self, app: &mut App, tab: usize, start: Start) {
+        let Start {
+            sql,
+            rest,
+            statement,
+            of,
+            keep_view,
+        } = start;
+        let Some(runtime) = self.tabs.get_mut(tab) else {
+            return;
+        };
+        let Some(connection) = runtime.connection.as_ref() else {
+            // Disconnected between the key and the turn: say so rather than
+            // leave a pane that says `Running` for ever.
+            app.apply(RuntimeEvent::Query {
+                tab,
+                event: QueryEvent::Error(db::model::DbError::Connect("not connected".to_owned())),
+            });
+            return;
+        };
+        let events = connection.query(
+            &sql,
+            QueryOptions {
+                batch_size: BATCH,
+                max_rows: Some(runtime.cap),
+            },
+        );
+        let started = Instant::now();
+        runtime.last = Some(sql);
+        runtime.running = Some(Running {
+            events,
+            rest,
+            statement,
+            of,
+            started,
+            rows: 0,
+            batches: 0,
+            first_batch: None,
+        });
+        app.apply(RuntimeEvent::QueryStarted {
+            tab,
+            at: started,
+            statement,
+            of,
+            keep_view,
+        });
+    }
+
+    /// Everything the running queries have reported since the last turn, in
+    /// one go: the loop paints once for however many batches arrived.
+    pub fn poll_queries(&mut self, app: &mut App, trace: &Trace) -> bool {
+        let mut dirty = false;
+        for tab in 0..self.tabs.len() {
+            let mut next = None;
+            let mut finished = false;
+            if let Some(runtime) = self.tabs.get_mut(tab)
+                && let Some(running) = runtime.running.as_mut()
+            {
+                loop {
+                    let event = match running.events.try_recv() {
+                        Ok(event) => event,
+                        Err(TryRecvError::Empty) => break,
+                        // Only a panicked worker ends the channel without
+                        // saying why, and a grid waiting for ever is worse.
+                        Err(TryRecvError::Disconnected) => {
+                            QueryEvent::Error(db::model::DbError::Connect(
+                                "the connection's worker has stopped".to_owned(),
+                            ))
+                        }
+                    };
+                    dirty = true;
+                    match &event {
+                        QueryEvent::Rows(batch) => {
+                            running.rows += batch.len();
+                            running.batches += 1;
+                            running.first_batch =
+                                running.first_batch.or(Some(running.started.elapsed()));
+                        }
+                        QueryEvent::Done { .. } => finished = true,
+                        QueryEvent::Error(_) => {
+                            finished = true;
+                            // A statement that failed stops the run: the
+                            // ones after it were written to follow it.
+                            running.rest.clear();
+                        }
+                        _ => {}
+                    }
+                    let last = finished;
+                    app.apply(RuntimeEvent::Query { tab, event });
+                    if last {
+                        if trace.is_on() {
+                            trace.event(
+                                "results",
+                                &[
+                                    ("rows", &running.rows.to_string()),
+                                    ("batches", &running.batches.to_string()),
+                                    (
+                                        "first_batch_ms",
+                                        &format!(
+                                            "{:.3}",
+                                            running.first_batch.unwrap_or_default().as_secs_f64()
+                                                * 1000.0
+                                        ),
+                                    ),
+                                ],
+                            );
+                        }
+                        if !running.rest.is_empty() {
+                            let sql = running.rest.remove(0);
+                            next = Some(Start {
+                                sql,
+                                rest: std::mem::take(&mut running.rest),
+                                statement: running.statement + 1,
+                                of: running.of,
+                                keep_view: false,
+                            });
+                        }
+                        break;
+                    }
+                }
+            }
+            if finished && let Some(runtime) = self.tabs.get_mut(tab) {
+                runtime.running = None;
+            }
+            if let Some(start) = next {
+                self.begin(app, tab, start);
+            }
+        }
+        dirty
+    }
+
+    /// Esc: stop the query this tab is running. The driver answers with
+    /// [`db::model::DbError::Cancelled`] through the channel it is already
+    /// reporting on, so nothing else has to be unwound here.
+    pub fn cancel(&mut self, tab: usize) {
+        if let Some(runtime) = self.tabs.get(tab)
+            && runtime.running.is_some()
+            && let Some(connection) = runtime.connection.as_ref()
+        {
+            connection.cancel();
+        }
+    }
+
+    /// `m`: the same statement again with [`MORE_ROWS`] more rows allowed.
+    ///
+    // ponytail: a re-run, not a server cursor — the decision `docs/DESIGN.md`
+    // logs. The rows already on screen are fetched twice; a cursor per tab
+    // held open across turns is what it would cost to fetch them once.
+    pub fn more_rows(&mut self, app: &mut App, tab: usize) {
+        let Some(runtime) = self.tabs.get_mut(tab) else {
+            return;
+        };
+        let Some(sql) = runtime.last.clone() else {
+            return;
+        };
+        runtime.cap += MORE_ROWS;
+        self.begin(
+            app,
+            tab,
+            Start {
+                sql,
+                rest: Vec::new(),
+                statement: 0,
+                of: 1,
+                keep_view: true,
+            },
+        );
     }
 
     /// Where the failure was, and what the driver said — never the password,
@@ -176,6 +454,12 @@ impl Runtime {
     #[must_use]
     pub fn queued(&self, tab: usize) -> Option<&Pending> {
         self.tabs.get(tab)?.queued.as_ref()
+    }
+
+    /// The cap this tab's next query runs with, which `m` has raised.
+    #[must_use]
+    pub fn cap(&self, tab: usize) -> Option<usize> {
+        Some(self.tabs.get(tab)?.cap)
     }
 }
 
@@ -277,14 +561,17 @@ mod tests {
         let config = two_connections();
         let mut app = App::new(&config);
         let mut runtime = Runtime::new(&config);
-        runtime.queue(&mut app, 0, "select 1".to_owned());
-        assert_eq!(runtime.queued(0), Some(&"select 1".to_owned()));
-        assert_eq!(app.shell.status, "connecting… then running");
-
-        runtime.queue(&mut app, 0, "select 2".to_owned());
+        runtime.queue(&mut app, 0, Pending::Statement("select 1".to_owned()));
         assert_eq!(
             runtime.queued(0),
-            Some(&"select 2".to_owned()),
+            Some(&Pending::Statement("select 1".to_owned()))
+        );
+        assert_eq!(app.shell.status, "connecting… then running");
+
+        runtime.queue(&mut app, 0, Pending::Statement("select 2".to_owned()));
+        assert_eq!(
+            runtime.queued(0),
+            Some(&Pending::Statement("select 2".to_owned())),
             "one slot, and the newest request has it"
         );
         assert_eq!(runtime.queued(1), None, "one tab's queue is its own");

@@ -38,7 +38,7 @@ fn the_help_lists_the_keys_of_the_focused_pane_and_no_others() {
     }
 
     app.handle(Event::Key(key("Esc")));
-    assert!(!text(&frame(120, 40, &app)).contains("╭ Help "));
+    assert!(!text(&frame(120, 60, &app)).contains("╭ Help "));
 }
 
 #[test]

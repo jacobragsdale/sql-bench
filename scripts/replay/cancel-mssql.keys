@@ -1,0 +1,24 @@
+# T5.2: Esc stops a query that is still thinking, and the connection is good
+# for the next one straight after it.
+
+key c
+wait busy
+
+key Tab
+type waitfor delay '00:00:10'
+key Ctrl-R
+wait 300
+key Esc
+wait busy
+expect cancelled after
+
+# The next statement runs on the same tab, which is what a cancel has to
+# leave behind: the driver opens a new connection for it.
+key Ctrl-A
+key Ctrl-K
+type select 42 as answer
+key Ctrl-R
+wait busy
+expect answer
+frame cancel-mssql
+key Ctrl-Q

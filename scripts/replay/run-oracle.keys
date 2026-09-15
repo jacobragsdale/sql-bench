@@ -1,0 +1,19 @@
+# T5.2: run a statement and read a cell out of the grid. The container
+# `scripts/db-up.sh` starts has to be up. Run it with a state directory of
+# its own — scripts/qa/run-queries.sh does — or the pad starts with whatever
+# the last run typed into it.
+
+key 2
+key c
+wait busy
+expect ● local-oracle
+
+key Tab
+type select id, name, country from bench.customers order by id
+key Ctrl-R
+wait busy
+
+expect Zoë Bauer
+expect ╭ Results ·
+frame run-oracle
+key Ctrl-Q

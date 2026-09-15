@@ -11,7 +11,7 @@ pub mod state;
 mod tests;
 
 pub use replay::replay;
-pub use runtime::{Runtime, startup_tabs};
+pub use runtime::{Pending, Runtime, startup_tabs};
 
 use std::time::{Duration, Instant};
 
@@ -112,6 +112,7 @@ pub fn run(config: &Config, args: &Cli, panic_after: Option<Duration>) -> Result
     // many key presses, which is what makes it one undo and one redraw.
     let _ = execute!(std::io::stdout(), EnableBracketedPaste);
     let mut driver = Driver::new(Theme::from_env(), config);
+    driver.set_max_rows(args.max_rows);
     driver.restore_scratch(&mut app);
     driver.connect_at_startup(startup);
     run_loop(
@@ -244,6 +245,11 @@ impl Driver {
         }
     }
 
+    /// The cap every query runs with, from `--max-rows`.
+    pub fn set_max_rows(&mut self, max_rows: usize) {
+        self.runtime.set_max_rows(max_rows);
+    }
+
     /// Keep the pads somewhere other than `$SQL_BENCH_STATE_DIR` says, which
     /// is what a test does.
     pub fn keep_scratch_in(&mut self, store: Store) {
@@ -289,10 +295,16 @@ impl Driver {
             return Ok(false);
         }
         self.dirty |= self.runtime.poll_connections(app);
+        // Every batch that has arrived since the last turn, and then one
+        // frame: a scan reporting five hundred rows at a time is not five
+        // hundred redraws.
+        self.dirty |= self.runtime.poll_queries(app, trace);
         for action in app.settle(Instant::now()) {
             self.act(terminal, app, action)?;
         }
-        let spinning = app.connecting();
+        // A running query animates its title the way a connecting tab
+        // animates its mark, so both keep the loop ticking.
+        let spinning = app.busy();
         self.dirty |= app.shell.tick(Instant::now(), spinning);
         let mut drew = Duration::ZERO;
         if self.dirty {
@@ -383,10 +395,14 @@ impl Driver {
             }
             Action::Connect(tab) => self.runtime.connect(app, tab),
             Action::Disconnect(tab) => self.runtime.disconnect(app, tab),
-            // T5.2 runs these; until then the footer says why nothing did.
-            Action::RunStatement { .. } | Action::RunAll { .. } => {
-                app.shell.status = "no query runner yet".to_owned();
+            Action::RunStatement { tab, sql } => {
+                self.runtime.run(app, tab, Pending::Statement(sql));
             }
+            Action::RunAll { tab, statements } => {
+                self.runtime.run(app, tab, Pending::All(statements));
+            }
+            Action::Cancel(tab) => self.runtime.cancel(tab),
+            Action::MoreRows { tab } => self.runtime.more_rows(app, tab),
             Action::OpenEditor { tab } => self.open_editor(terminal, app, tab)?,
             Action::SaveScratch { tab } => self.save_scratch(app, tab),
             Action::Copy(text) => self.copy(&text),

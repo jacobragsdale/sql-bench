@@ -2,6 +2,8 @@
 
 use super::*;
 use crate::config::{Config, Connection};
+use crate::db::model::{Cell, Column, QueryEvent};
+use results::Results;
 
 /// The two connections `config.local.toml` names, which is what the dev loop
 /// and every test has.
@@ -25,6 +27,50 @@ pub(crate) fn two_connections() -> Config {
         ],
         ..Config::default()
     }
+}
+
+/// A result set of `rows` × `columns`: the first column counts, the second
+/// is text long enough to be cut, the third is NULL and the rest are short
+/// text — which is every way the grid draws a cell.
+pub(crate) fn filled(rows: usize, columns: usize) -> Results {
+    let mut results = Results::default();
+    results.start(Instant::now(), 0, 1, false);
+    results.apply(QueryEvent::Columns(
+        (0..columns)
+            .map(|column| Column {
+                name: format!("column_{column}"),
+                type_name: if column % 3 == 0 {
+                    "int".to_owned()
+                } else {
+                    "varchar(40)".to_owned()
+                },
+            })
+            .collect(),
+    ));
+    results.apply(QueryEvent::Rows(
+        (0..rows)
+            .map(|row| {
+                (0..columns)
+                    .map(|column| match column {
+                        0 => Cell::Int(row as i64),
+                        1 => {
+                            Cell::Text(format!("row {row} of a value far too long for one column"))
+                        }
+                        2 => Cell::Null,
+                        _ => Cell::Text(format!("c{column}r{row}")),
+                    })
+                    .collect()
+            })
+            .collect(),
+    ));
+    results.apply(QueryEvent::Done {
+        rows,
+        truncated: false,
+        connect_ms: 1,
+        first_row_ms: 2,
+        total_ms: 42,
+    });
+    results
 }
 
 pub(crate) fn two_tabs() -> App {
@@ -99,6 +145,28 @@ fn ready(focus: Focus) -> App {
     // so Ctrl-C has something to copy.
     scratch.handle(key("x"));
     scratch.handle(key("Shift-Left"));
+    // A grid with somewhere to move in every direction, a second set for
+    // `[` and `]`, and a cap that stopped it so `m` has more to fetch.
+    let results = &mut app.tabs[1].results;
+    *results = filled(50, 4);
+    results.apply(QueryEvent::Columns(vec![Column {
+        name: "second".to_owned(),
+        type_name: "int".to_owned(),
+    }]));
+    results.apply(QueryEvent::Rows(vec![vec![Cell::Int(1)]]));
+    results.apply(QueryEvent::Done {
+        rows: 1,
+        truncated: true,
+        connect_ms: 1,
+        first_row_ms: 2,
+        total_ms: 3,
+    });
+    // Back to the first set, which is the one with rows to move about in.
+    results.key(key("["));
+    for _ in 0..20 {
+        results.key(key("j"));
+    }
+    results.key(key("l"));
     app
 }
 
@@ -109,6 +177,7 @@ fn every_key_the_help_lists_is_handled_where_it_says_it_works() {
             let elsewhere = match *place {
                 NOT_SCRATCH => focus == Focus::Scratch,
                 SCRATCH => focus != Focus::Scratch,
+                RESULTS => focus != Focus::Results,
                 _ => false,
             };
             if elsewhere {
@@ -360,4 +429,136 @@ fn the_keys_of_a_pane_are_its_own_and_the_ones_that_work_anywhere() {
         !objects.contains(&"Ctrl-R"),
         "no pane is offered another pane's keys: {objects:?}"
     );
+}
+
+#[test]
+fn the_grids_keys_move_the_cell_cursor_and_ask_for_what_the_app_cannot_do() {
+    let mut app = ready(Focus::Results);
+    let selected = app.tabs[1].results.selected();
+    press(&mut app, "G");
+    assert_eq!(app.tabs[1].results.selected().0, 49, "the last row");
+    press(&mut app, "g");
+    press(&mut app, "0");
+    assert_eq!(app.tabs[1].results.selected(), (0, 0));
+    press(&mut app, "$");
+    assert_eq!(app.tabs[1].results.selected().1, 3, "the last column");
+    assert_ne!(app.tabs[1].results.selected(), selected);
+
+    // The two keys that are not the grid's to answer.
+    assert_eq!(press(&mut app, "m"), vec![Action::MoreRows { tab: 1 }]);
+    assert_eq!(press(&mut app, "Enter"), vec![]);
+    assert_eq!(app.shell.status, "inspector arrives in T5.3");
+
+    // A tab is still a tab and a digit is still a tab, in the grid too.
+    assert_eq!(press(&mut app, "c"), vec![Action::Connect(1)]);
+    press(&mut app, "1-9");
+    assert_eq!(app.shell.active_tab, 0);
+}
+
+#[test]
+fn esc_stops_a_running_query_before_it_closes_an_error() {
+    let mut app = two_tabs();
+    app.shell.error = Some("boom".to_owned());
+    app.apply(RuntimeEvent::QueryStarted {
+        tab: 0,
+        at: Instant::now(),
+        statement: 0,
+        of: 1,
+        keep_view: false,
+    });
+    assert!(app.busy(), "a running query is a busy app");
+    assert_eq!(press(&mut app, "Esc"), vec![Action::Cancel(0)]);
+    assert_eq!(
+        app.shell.error.as_deref(),
+        Some("boom"),
+        "the error waits its turn"
+    );
+
+    app.apply(RuntimeEvent::Query {
+        tab: 0,
+        event: QueryEvent::Error(crate::db::model::DbError::Cancelled),
+    });
+    assert!(!app.busy());
+    assert_eq!(press(&mut app, "Esc"), vec![]);
+    assert_eq!(app.shell.error, None);
+}
+
+#[test]
+fn a_statement_the_server_said_no_to_is_flagged_in_the_pad_until_the_next_edit() {
+    let mut app = two_tabs();
+    app.shell.focus = Focus::Scratch;
+    app.tabs[0]
+        .scratch
+        .set_text("select 1;\n\nselect * from nope;");
+    press(&mut app, "Down");
+    press(&mut app, "Down");
+    assert_eq!(
+        press(&mut app, "Ctrl-R"),
+        vec![Action::RunStatement {
+            tab: 0,
+            sql: "select * from nope;".to_owned()
+        }]
+    );
+
+    app.apply(RuntimeEvent::QueryStarted {
+        tab: 0,
+        at: Instant::now(),
+        statement: 0,
+        of: 1,
+        keep_view: false,
+    });
+    assert_eq!(app.shell.status, "running…");
+    app.apply(RuntimeEvent::Query {
+        tab: 0,
+        event: QueryEvent::Error(crate::db::model::DbError::Query {
+            message: "Invalid object name 'nope'.".to_owned(),
+            line: Some(1),
+        }),
+    });
+    assert_eq!(
+        app.tabs[0].scratch.flagged(),
+        Some(&(2..3)),
+        "the lines the statement was on"
+    );
+
+    press(&mut app, "x");
+    assert_eq!(app.tabs[0].scratch.flagged(), None, "an edit clears it");
+}
+
+#[test]
+fn f5_runs_every_statement_and_a_failure_says_which_one_it_was() {
+    let mut app = two_tabs();
+    app.shell.focus = Focus::Scratch;
+    app.tabs[0]
+        .scratch
+        .set_text("select 1;\n\nselect 2;\n\nselect 3;");
+    assert_eq!(
+        press(&mut app, "F5"),
+        vec![Action::RunAll {
+            tab: 0,
+            statements: vec![
+                "select 1;".to_owned(),
+                "select 2;".to_owned(),
+                "select 3;".to_owned()
+            ]
+        }]
+    );
+
+    app.apply(RuntimeEvent::QueryStarted {
+        tab: 0,
+        at: Instant::now(),
+        statement: 1,
+        of: 3,
+        keep_view: false,
+    });
+    assert_eq!(app.shell.status, "running statement 2 of 3");
+    app.apply(RuntimeEvent::Query {
+        tab: 0,
+        event: QueryEvent::Error(crate::db::model::DbError::Query {
+            message: "no".to_owned(),
+            line: None,
+        }),
+    });
+    assert_eq!(app.shell.status, "statement 2 of 3 failed");
+    assert_eq!(app.tabs[0].scratch.flagged(), Some(&(2..3)));
 }

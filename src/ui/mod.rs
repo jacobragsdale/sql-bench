@@ -1,6 +1,7 @@
 //! Rendering: state in, a `ratatui::Frame` out, and the theme the frame is
 //! drawn with. Never reads a database and never decides anything.
 
+mod results;
 pub mod theme;
 
 #[cfg(test)]
@@ -81,14 +82,7 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
         vec![placeholder("press c to connect", theme)],
     );
     scratch_pane(frame, app, theme, scratch);
-    pane(
-        frame,
-        app,
-        theme,
-        Focus::Results,
-        results,
-        results_body(app, theme),
-    );
+    results::render(frame, app, theme, results);
     frame.render_widget(footer_line(app, theme, area.width), footer);
     if app.shell.help {
         render_help(frame, area, app, theme);
@@ -110,18 +104,6 @@ fn tab_bar(app: &App, theme: &Theme) -> Line<'static> {
         ));
     }
     Line::from(spans)
-}
-
-/// What the results pane has to say: the failure a connection ended in, or
-/// the line that says nothing has run.
-fn results_body(app: &App, theme: &Theme) -> Vec<Line<'static>> {
-    match app.tab().map(|tab| &tab.state) {
-        Some(TabState::Failed(message)) => vec![
-            Line::from(Span::styled(message.clone(), theme.error)),
-            Line::from(Span::styled("c to retry", theme.dim)),
-        ],
-        _ => vec![placeholder("nothing has run yet", theme)],
-    }
 }
 
 /// The scratch pad: a line number gutter, the text with the cursor cell and
@@ -177,6 +159,7 @@ fn scratch_lines(
     let (top, left) = scratch.window(height, width);
     let (cursor_line, cursor_column) = scratch.cursor();
     let selection = scratch.selection();
+    let flagged = scratch.flagged();
     lines
         .iter()
         .enumerate()
@@ -189,6 +172,9 @@ fn scratch_lines(
             let mut last = characters.len();
             if focused && number == cursor_line {
                 last = last.max(cursor_column + 1);
+            }
+            if flagged.is_some_and(|lines| lines.contains(&number)) {
+                last = last.max(left + width);
             }
             if let Some((_, (end_line, end_column))) = selection
                 && number == end_line
@@ -208,6 +194,8 @@ fn scratch_lines(
                     .is_some_and(|(from, to)| (number, column) >= from && (number, column) < to)
                 {
                     theme.selection
+                } else if flagged.is_some_and(|lines| lines.contains(&number)) {
+                    theme.flagged
                 } else {
                     Style::default()
                 };

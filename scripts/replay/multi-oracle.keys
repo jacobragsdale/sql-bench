@@ -1,0 +1,18 @@
+# T5.2: F5 runs the whole pad, one statement after another, and the pane
+# says what the run did.
+
+key 2
+key c
+wait busy
+
+key Tab
+type select 1 as one from dual
+key Enter
+key Enter
+type select 2 as two from dual
+key F5
+wait busy
+
+expect 2 statements, 2 result sets, 0 rows affected
+frame multi-oracle
+key Ctrl-Q

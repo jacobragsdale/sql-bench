@@ -1,0 +1,24 @@
+# T5.2: Esc stops a query that is still thinking, and the connection is good
+# for the next one straight after it. Oracle's ten second statement is a
+# cross join nobody wants the answer to.
+
+key 2
+key c
+wait busy
+
+key Tab
+type select count(*) from bench.events e1, bench.events e2
+key Ctrl-R
+wait 300
+key Esc
+wait busy
+expect cancelled after
+
+key Ctrl-A
+key Ctrl-K
+type select 42 as answer from dual
+key Ctrl-R
+wait busy
+expect answer
+frame cancel-oracle
+key Ctrl-Q

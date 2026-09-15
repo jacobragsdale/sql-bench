@@ -80,6 +80,8 @@ pub struct Options {
     /// Where the scratch pads are loaded from and saved to; a test points it
     /// at a directory of its own.
     pub store: Store,
+    /// The row cap `--max-rows` asked for.
+    pub max_rows: usize,
 }
 
 impl Default for Options {
@@ -93,6 +95,9 @@ impl Default for Options {
             text_timeout: TEXT_TIMEOUT,
             connect: Vec::new(),
             store: Store::from_env(),
+            max_rows: crate::db::model::QueryOptions::default()
+                .max_rows
+                .unwrap_or(10_000),
         }
     }
 }
@@ -108,6 +113,7 @@ impl Options {
             size: args.size.unwrap_or(defaults.size),
             frames: args.frames_dir.clone().unwrap_or(defaults.frames),
             styles: args.frame_styles,
+            max_rows: args.max_rows,
             ..defaults
         }
     }
@@ -347,6 +353,7 @@ struct Replay {
 impl Replay {
     fn new(mut app: App, config: &Config, options: &Options) -> Result<Self> {
         let mut driver = Driver::new(options.theme, config);
+        driver.set_max_rows(options.max_rows);
         driver.keep_scratch_in(options.store.clone());
         // A replay owns no terminal, so Ctrl-E says so rather than handing
         // over a screen it cannot take back.
@@ -806,7 +813,7 @@ mod tests {
              key Ctrl-C\n\
              expect copied 1 characters\n\
              key Ctrl-R\n\
-             expect no query runner yet\n\
+             expect connecting… then running\n\
              key Ctrl-E\n\
              expect editor unavailable in replay\n\
              key Ctrl-Q\n",
