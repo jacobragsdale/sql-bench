@@ -320,6 +320,9 @@ epics:
     verify:
     - cargo clippy --all-targets --all-features -- -D warnings
     - SQL_BENCH_TEST_DBS=1 cargo test --test oracle
+    verified: true
+    note: merged to main 2026-09-14; acceptance re-run by the coordinator (Oracle suite green with client_lib_dir
+      alone after the run-path patch)
   - id: T2.3
     tag: dev
     title: T2.3 Catalog queries and the headless subcommands query/objects/source
@@ -512,6 +515,9 @@ epics:
     verify:
     - cargo test --all-targets
     - cargo clippy --all-targets --all-features -- -D warnings
+    verified: true
+    note: merged to main 2026-09-14; acceptance re-run by the coordinator (Oracle suite green with client_lib_dir
+      alone after the run-path patch)
   - id: T3.2
     tag: dev
     title: 'T3.2 Replay mode: drive the real loop from a key script and dump frames as text'
