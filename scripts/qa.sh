@@ -68,6 +68,7 @@ for case in "${CASES[@]}"; do
 done
 check "NO_COLOR=1 paints nothing" no_color
 check "the terminal after a panic" scripts/qa/panic-restore.sh "$BIN"
+check "the terminal after stdin ran out" scripts/qa/stdin-eof.sh "$BIN"
 check "draw latency" scripts/qa/draw-latency.sh "$BIN" 16
 check "the scratch pad frame and its persistence" scripts/qa/scratch-frame.sh
 

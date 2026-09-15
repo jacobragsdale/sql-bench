@@ -666,7 +666,7 @@ impl App {
     /// The scroll keys of the open inspector, which the grid under it never
     /// sees — the same bargain the help overlay strikes.
     fn inspector_key(&mut self, key: KeyEvent) -> bool {
-        let last = self.inspect_lines().len().saturating_sub(1);
+        let last = self.inspect_height().saturating_sub(1);
         let Some(inspector) = self.shell.inspector.as_mut() else {
             return false;
         };
@@ -683,14 +683,23 @@ impl App {
         true
     }
 
-    /// Every line of the cell the inspector is open on. The renderer draws
-    /// this and the scroll keys clamp against it, so both agree on how far
-    /// down the value goes.
+    /// How many lines the cell the inspector is open on comes to. The
+    /// overlay is sized by this and the scroll keys clamp against it, so
+    /// both agree on how far down the value goes.
     #[must_use]
-    pub fn inspect_lines(&self) -> Vec<String> {
+    pub fn inspect_height(&self) -> usize {
         self.tab()
             .and_then(|tab| tab.results.cell())
-            .map(results::inspect_lines)
+            .map_or(0, results::inspect_height)
+    }
+
+    /// The `count` lines of it from `top`, which is what the overlay draws
+    /// and all it ever formats.
+    #[must_use]
+    pub fn inspect_lines(&self, top: usize, count: usize) -> Vec<String> {
+        self.tab()
+            .and_then(|tab| tab.results.cell())
+            .map(|cell| results::inspect_lines(cell, top, count))
             .unwrap_or_default()
     }
 
