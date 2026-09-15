@@ -320,6 +320,13 @@ impl Objects {
                 self.filtering = true;
                 Hit::Moved
             }
+            // A filter Enter committed is still a filter, and Esc is the way
+            // out of one whether or not it is being typed into.
+            KeyCode::Esc if !self.filter.is_empty() => {
+                self.filter.clear();
+                self.show_cursor();
+                Hit::Moved
+            }
             _ => Hit::Ignored,
         }
     }

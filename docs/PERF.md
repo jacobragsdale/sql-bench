@@ -138,3 +138,43 @@ error occured during the attempt of performing I/O` on SQL Server,
 hanging, and a Ctrl-R on a disconnected tab afterwards connected and returned
 rows in 65 ms and 111 ms. The whole script, both backends and both outages,
 is 35 s.
+
+## Object browser (T6.2)
+
+`scripts/qa/objects.sh`, release build, 2026-09-15, on the machine above.
+The script creates a throwaway schema of 1,000 tables on each backend —
+`qa1000` on SQL Server, a `QA_T%` prefix inside `BENCH` on Oracle, where a
+second account would need grants before this login could see one of them —
+opens it in the tree, scrolls the branch with 90 `PageDown`, 60 `j` and `G`,
+and drops everything again.
+
+**Opening the branch**: the trace's own clock, from the last `frame` before
+the catalog query the `l` started to the first `frame` after it — the key
+press to the thousand rows on screen. Four runs, with the other QA scripts
+running against the same two containers:
+
+| backend | rows in the branch | open | budget |
+|---|---|---|---|
+| local-mssql | 1,000 | 82 / 61 / 61 / 81 ms | 2,000 ms |
+| local-oracle | 1,007 | 22 / 21 / 41 / 102 ms | 2,000 ms |
+
+Nearly all of it is the one catalog query — 21 ms for the 1,000 rows on SQL
+Server and 18 ms for the 1,007 on Oracle, off the trace's `query` line — so
+the branch costs a listing and not a row per table.
+
+**Scrolling it**: `draw_ms` of the 152 frames after that query, one per key,
+with the cursor walking the thousand rows.
+
+| backend | p50 | p95 | max | budget |
+|---|---|---|---|---|
+| local-mssql | 0.177 | 0.295 | 0.823 | 5 |
+| local-oracle | 0.181 | 0.304 | 0.771 | 5 |
+
+Which is the same fraction of a millisecond the placeholder shell draws in,
+because the pane formats its window and not the branch: a thousand rows under
+the cursor cost the sixty that fit.
+
+The source `s` shows is compared line for line against the `source`
+subcommand for every seeded procedure, function and package. The longest is
+Oracle's `ORDER_PKG` at 20 lines, and the results pane shows 33 at 200x60, so
+nothing in the seed needs scrolling to be read whole.
