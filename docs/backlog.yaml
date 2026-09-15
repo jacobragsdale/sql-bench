@@ -1017,6 +1017,9 @@ epics:
     verify:
     - scripts/perf.sh
     - cargo test --release -- --ignored
+    verified: true
+    note: merged to main 2026-09-15; all seven budgets pass in perf.sh, stdin-EOF fixed, 287 tests + 4
+      release perf tests
   - id: T7.2
     tag: dev
     title: 'T7.2 Documentation: README, DESIGN, config example, keys'
