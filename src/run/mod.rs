@@ -187,7 +187,7 @@ impl Driver {
         if app.shell.should_quit {
             return Ok(false);
         }
-        self.dirty |= self.runtime.poll_connections(app, trace);
+        self.dirty |= self.runtime.poll_connections(app);
         let spinning = app.connecting();
         self.dirty |= app.shell.tick(Instant::now(), spinning);
         let mut drew = Duration::ZERO;
@@ -202,7 +202,7 @@ impl Driver {
             // After the first frame and never before: a connection takes up
             // to ten seconds and nobody should watch a blank terminal for it.
             for tab in std::mem::take(&mut self.startup) {
-                self.runtime.connect(app, tab, trace);
+                self.runtime.connect(app, tab);
             }
         }
         let timeout = if spinning { SPIN_EVERY } else { IDLE_TIMEOUT };
@@ -227,7 +227,7 @@ impl Driver {
             for action in app.handle(this) {
                 match action {
                     Action::Quit => app.shell.should_quit = true,
-                    Action::Connect(tab) => self.runtime.connect(app, tab, trace),
+                    Action::Connect(tab) => self.runtime.connect(app, tab),
                     Action::Disconnect(tab) => self.runtime.disconnect(app, tab),
                 }
             }

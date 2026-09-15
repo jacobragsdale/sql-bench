@@ -16,7 +16,6 @@ use crate::app::{App, RuntimeEvent};
 use crate::cli::Cli;
 use crate::config::Config;
 use crate::db::{self, Connection};
-use crate::trace::Trace;
 
 /// What a tab was asked to do while it was still connecting, kept until the
 /// connection is up. E5 gives it a shape; the slot is what T4.1 owes it.
@@ -58,7 +57,7 @@ impl Runtime {
     /// Re-connecting drops the connection that is there, which cancels
     /// whatever it was running. A second `c` while one is already in flight
     /// is ignored: the attempt has its own ten second timeout.
-    pub fn connect(&mut self, app: &mut App, tab: usize, trace: &Trace) {
+    pub fn connect(&mut self, app: &mut App, tab: usize) {
         let (Some(runtime), Some(spec)) =
             (self.tabs.get_mut(tab), self.config.connections.get(tab))
         else {
@@ -88,7 +87,6 @@ impl Runtime {
                 message: format!("no connect thread: {why}"),
             }),
         }
-        trace.event("connect", &[("tab", &tab.to_string()), ("state", "start")]);
     }
 
     /// Close this tab's connection, and forget an attempt still in flight.
@@ -108,7 +106,7 @@ impl Runtime {
 
     /// Collect whatever the connect threads have finished, and say whether
     /// the screen has to be painted again.
-    pub fn poll_connections(&mut self, app: &mut App, trace: &Trace) -> bool {
+    pub fn poll_connections(&mut self, app: &mut App) -> bool {
         let mut dirty = false;
         for tab in 0..self.tabs.len() {
             let Some(runtime) = self.tabs.get_mut(tab) else {
@@ -142,16 +140,7 @@ impl Runtime {
                     }
                 }
             };
-            let failure = matches!(event, RuntimeEvent::Failed { .. });
             app.apply(event);
-            trace.event(
-                "connect",
-                &[
-                    ("tab", &tab.to_string()),
-                    ("state", if failure { "failed" } else { "connected" }),
-                    ("ms", &connect_ms.to_string()),
-                ],
-            );
             dirty = true;
         }
         dirty
@@ -238,7 +227,7 @@ mod tests {
     fn settle(runtime: &mut Runtime, app: &mut App) {
         let deadline = Instant::now() + Duration::from_secs(20);
         while app.busy() && Instant::now() < deadline {
-            runtime.poll_connections(app, &Trace::new(None));
+            runtime.poll_connections(app);
             std::thread::sleep(Duration::from_millis(5));
         }
     }
@@ -248,7 +237,7 @@ mod tests {
         let config = refused("s3cret");
         let mut app = App::new(&config);
         let mut runtime = Runtime::new(&config);
-        runtime.connect(&mut app, 0, &Trace::new(None));
+        runtime.connect(&mut app, 0);
         assert_eq!(app.tabs[0].state, TabState::Connecting);
         settle(&mut runtime, &mut app);
 
@@ -258,30 +247,6 @@ mod tests {
         assert!(message.contains("127.0.0.1:1"), "{message}");
         assert!(!message.contains("s3cret"), "{message}");
         assert!(runtime.connection(0).is_none());
-    }
-
-    #[test]
-    fn a_connect_line_is_traced_for_every_attempt() {
-        let directory = tempfile::tempdir().expect("a directory");
-        let path = directory.path().join("trace.tsv");
-        let trace = Trace::new(Some(path.clone()));
-        let config = refused("s3cret");
-        let mut app = App::new(&config);
-        let mut runtime = Runtime::new(&config);
-        runtime.connect(&mut app, 0, &trace);
-        let deadline = Instant::now() + Duration::from_secs(20);
-        while app.busy() && Instant::now() < deadline {
-            runtime.poll_connections(&mut app, &trace);
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        let written = std::fs::read_to_string(&path).expect("a trace file");
-        let lines: Vec<&str> = written
-            .lines()
-            .filter(|line| line.split('\t').nth(1) == Some("connect"))
-            .collect();
-        assert_eq!(lines.len(), 2, "one start, one answer:\n{written}");
-        assert!(lines[0].contains("state=start"), "{written}");
-        assert!(lines[1].contains("state=failed"), "{written}");
     }
 
     #[test]
