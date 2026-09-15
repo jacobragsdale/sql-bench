@@ -384,6 +384,8 @@ epics:
     - SQL_BENCH_CONFIG=config.local.toml cargo run -- query --conn local-mssql --format json "select top
       2 * from bench.all_types"
     - SQL_BENCH_CONFIG=config.local.toml cargo run -- objects --conn local-oracle --schema BENCH
+    verified: true
+    note: merged to main 2026-09-14; full DB suite and smoke replay re-run by the coordinator
   - id: T2.4
     tag: dev
     title: T2.4 Trace instrument and the bench subcommand
@@ -566,6 +568,8 @@ epics:
     verify:
     - cargo test --all-targets
     - cargo run -- --replay scripts/replay/smoke.keys --size 120x40 --frames-dir /tmp/sql-bench-frames
+    verified: true
+    note: merged to main 2026-09-14; full DB suite and smoke replay re-run by the coordinator
   - id: T3.3
     tag: qa
     title: 'T3.3 QA: shell behaviour across sizes, themes and terminals'
