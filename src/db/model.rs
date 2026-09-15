@@ -96,6 +96,27 @@ pub enum DbError {
     Unsupported(String),
 }
 
+impl std::fmt::Display for DbError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Connect(why) => write!(f, "cannot connect: {why}"),
+            Self::Query {
+                message,
+                line: Some(line),
+            } => write!(f, "line {line}: {message}"),
+            Self::Query {
+                message,
+                line: None,
+            } => f.write_str(message),
+            Self::Cancelled => f.write_str("cancelled"),
+            Self::Timeout => f.write_str("timed out"),
+            Self::Unsupported(what) => write!(f, "not supported: {what}"),
+        }
+    }
+}
+
+impl std::error::Error for DbError {}
+
 /// How much of a result set to fetch, and how often to report it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct QueryOptions {
@@ -138,6 +159,36 @@ mod tests {
     fn text_is_borrowed_not_copied() {
         let cell = Cell::Text("a long value the grid draws every frame".to_owned());
         assert!(matches!(cell.display(), Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn every_failure_says_what_it_was() {
+        assert_eq!(
+            DbError::Connect("no route to host".to_owned()).to_string(),
+            "cannot connect: no route to host"
+        );
+        assert_eq!(
+            DbError::Query {
+                message: "Invalid column name 'nope'.".to_owned(),
+                line: Some(3),
+            }
+            .to_string(),
+            "line 3: Invalid column name 'nope'."
+        );
+        assert_eq!(
+            DbError::Query {
+                message: "Invalid column name 'nope'.".to_owned(),
+                line: None,
+            }
+            .to_string(),
+            "Invalid column name 'nope'."
+        );
+        assert_eq!(DbError::Cancelled.to_string(), "cancelled");
+        assert_eq!(DbError::Timeout.to_string(), "timed out");
+        assert_eq!(
+            DbError::Unsupported("oracle".to_owned()).to_string(),
+            "not supported: oracle"
+        );
     }
 
     #[test]
