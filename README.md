@@ -18,17 +18,13 @@ Oracle connections load the Oracle Instant Client at runtime; point
 `[oracle] client_lib_dir` in the config at it, or set
 `SQL_BENCH_ORACLE_CLIENT_DIR`. Nothing is needed at build time.
 
-A zip Instant Client ships without a run path, so the operating system also
-has to be able to find `libclntsh.so`'s own libraries — `client_lib_dir` says
-where the client is, not where its dependencies are. Once per machine:
-
-```sh
-echo "$HOME/.local/opt/oracle/instantclient_23_26" | sudo tee /etc/ld.so.conf.d/oracle.conf
-sudo ldconfig
-```
-
-or export `LD_LIBRARY_PATH` before running (`cargo test` included). Without
-it every Oracle connection fails with *Oracle client library not found*.
+On Linux, `scripts/oracle-client.sh` downloads the free basiclite client to
+`~/.local/opt/oracle` and, with `patchelf` on the path (or `uvx`), gives it
+the run path a zip install lacks, so `client_lib_dir` alone is enough.
+Without patchelf the client's own libraries still have to be findable: put
+the directory in `/etc/ld.so.conf.d/` and run `ldconfig`, or export
+`LD_LIBRARY_PATH` (for `cargo test` too). Either way every Oracle connection
+otherwise fails with *Oracle client library not found*. Arch needs `libaio`.
 
 ## Local databases
 
