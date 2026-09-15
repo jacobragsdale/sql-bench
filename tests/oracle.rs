@@ -394,3 +394,152 @@ fn a_refused_login_is_a_connect_error() {
     };
     assert!(message.starts_with("ORA-01017"), "{message}");
 }
+
+#[test]
+fn a_refused_login_never_repeats_the_password() {
+    let Some((config, mut spec)) = local() else {
+        return;
+    };
+    const SECRET: &str = "Sup3rSecret_Wrong!";
+    spec.password = Some(config::Password::Literal(SECRET.to_owned()));
+    let failure = Connection::open(&spec, &config).expect_err("bench has a password");
+    assert!(
+        !failure.to_string().contains(SECRET),
+        "the password came back in the message: {failure}"
+    );
+}
+
+#[test]
+fn an_unreachable_host_gives_up_inside_the_connect_timeout() {
+    let Some((config, mut spec)) = local() else {
+        return;
+    };
+    // A black hole rather than a closed port: a refusal comes back at once and
+    // would prove nothing about the timeout.
+    spec.host = "10.255.255.1".to_owned();
+    let started = Instant::now();
+    let failure = Connection::open(&spec, &config).expect_err("nothing answers there");
+    let elapsed = started.elapsed();
+    eprintln!("an unreachable host failed in {elapsed:?}: {failure}");
+    let DbError::Connect(message) = &failure else {
+        panic!("a host that never answers is a connect failure: {failure:?}");
+    };
+    assert!(message.starts_with("ORA-12170"), "{message}");
+    assert!(
+        elapsed < Duration::from_secs(12),
+        "the ten second timeout let it run for {elapsed:?}"
+    );
+}
+
+#[test]
+fn a_procedure_that_returns_nothing_has_no_columns_and_no_rows() {
+    let connection = connection!();
+    // The procedure commits, so the block puts the status back itself rather
+    // than trusting a rollback that has nothing left to undo.
+    let events = run(
+        &connection,
+        "begin \
+           bench.mark_shipped(1); \
+           update bench.orders set status = 'PAID' where id = 1; \
+           commit; \
+         end;",
+    );
+    assert!(columns(&events).is_empty(), "{events:?}");
+    assert!(rows(&events).is_empty(), "{events:?}");
+    assert_eq!(events[0], QueryEvent::RowsAffected(0));
+    assert_eq!(done(&events), (0, false));
+
+    assert_eq!(
+        rows(&run(
+            &connection,
+            "select status from bench.orders where id = 1"
+        )),
+        [[Cell::Text("PAID".to_owned())]],
+        "the block put the order back"
+    );
+}
+
+#[test]
+fn three_hundred_columns_all_arrive() {
+    let connection = connection!();
+    let select: Vec<String> = (1..=300).map(|n| format!("{n} as c{n}")).collect();
+    let events = run(
+        &connection,
+        &format!("select {} from dual", select.join(", ")),
+    );
+    let header = &columns(&events)[0];
+    assert_eq!(header.len(), 300);
+    assert_eq!(header[299].name, "C300");
+    assert_eq!(rows(&events)[0].len(), 300);
+    assert_eq!(rows(&events)[0][299], Cell::Decimal("300".to_owned()));
+}
+
+#[test]
+fn a_column_name_may_have_spaces_and_letters_no_keyboard_has() {
+    let connection = connection!();
+    let events = run(&connection, "select 1 as \"Größe des Kunden\" from dual");
+    assert_eq!(columns(&events)[0][0].name, "Größe des Kunden");
+    assert_eq!(rows(&events), [[Cell::Decimal("1".to_owned())]]);
+}
+
+#[test]
+fn two_columns_of_the_same_name_both_arrive() {
+    let connection = connection!();
+    let events = run(&connection, "select 1 as a, 2 as a from dual");
+    let header = &columns(&events)[0];
+    assert_eq!(
+        header.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+        ["A", "A"],
+        "the driver reports what the server said, twice"
+    );
+    assert_eq!(
+        rows(&events),
+        [[Cell::Decimal("1".to_owned()), Cell::Decimal("2".to_owned())]]
+    );
+}
+
+/// The password `compose.yaml` gives SYSTEM, which is the only way to end
+/// somebody else's session — `bench` has no ALTER SYSTEM of its own.
+const SYSTEM_PASSWORD: &str = "Bench_Pass1!";
+
+#[test]
+fn a_session_the_server_ends_is_opened_again_for_the_next_query() {
+    let Some((config, spec)) = local() else {
+        return;
+    };
+    let connection = Connection::open(&spec, &config).expect("the container is up");
+    // Whatever the column type, the number is what it reads as.
+    let one = |events: &[QueryEvent]| rows(events)[0][0].display().into_owned();
+    let sid = one(&run(
+        &connection,
+        "select sys_context('userenv', 'sid') as sid from dual",
+    ));
+
+    // A second connection, because a session cannot end itself: this is what
+    // a database going away looks like without stopping the container.
+    let mut dba = spec.clone();
+    dba.user = "system".to_owned();
+    dba.password = Some(config::Password::Literal(SYSTEM_PASSWORD.to_owned()));
+    let dba = Connection::open(&dba, &config).expect("SYSTEM is the compose password");
+    let serial = one(&run(
+        &dba,
+        &format!("select serial# as s from v$session where sid = {sid}"),
+    ));
+    run(
+        &dba,
+        &format!("alter system disconnect session '{sid},{serial}' immediate"),
+    );
+
+    // The dead session answers once with the server's complaint...
+    let events = run(&connection, "select 1 as one from dual");
+    assert!(
+        matches!(events[0], QueryEvent::Error(_)),
+        "the session is gone: {events:?}"
+    );
+    // ...and then the handle has to open a new one rather than keep it.
+    assert_eq!(
+        rows(&run(&connection, "select 1 as one from dual")),
+        [[Cell::Decimal("1".to_owned())]],
+        "the next query has to open a new session, not reuse the dead one"
+    );
+}

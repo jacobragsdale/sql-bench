@@ -53,3 +53,28 @@ is the one connect each run of `bench` makes, `rows/s` is over every run.
 | customers, top 100 | 50 | 38 | 0 | 0 | 0 | 0 | 333333 |
 | events, 10k cap | 10000 | 38 | 0 | 0 | 8 | 10 | 1242236 |
 | events, 100k cap | 100000 | 38 | 0 | 1 | 77 | 102 | 1216545 |
+
+## Driver conformance (T2.5)
+
+`scripts/qa/max-rows-timing.sh`, release build, 2026-09-14. Wall clock of a
+whole `sql-bench query --max-rows N --format csv 'select * from bench.events'`
+— process start, connect, fetch and formatting — against the 1,000,000 row
+table, best of three runs each:
+
+| backend | 10,000 rows (budget 2 s) | 100,000 rows (budget 8 s) | the whole table, for contrast |
+|---|---|---|---|
+| local-mssql | 21 ms | 128 ms | 1256 ms |
+| local-oracle | 57 ms | 161 ms | 1428 ms |
+
+Ten times the cap costs ten times the wall clock once the fixed cost of
+starting a process and connecting is out of the way — 128 ms to 1256 ms on
+SQL Server, 161 ms to 1428 ms on Oracle — which is what it looks like when
+the cap stops the fetch rather than the printing. Rows past `max_rows` are
+never pulled off the socket: SQL Server drops the connection outright and
+Oracle closes the cursor.
+
+Unreachable host, `10.255.255.1:1433` and `:1521` (measured the same way):
+SQL Server gives up after **10.0 s** and Oracle after **10.05 s**, both
+inside the ten second budget — the assertion lives in
+`an_unreachable_host_gives_up_inside_the_connect_timeout` in `tests/mssql.rs`
+and `tests/oracle.rs`.

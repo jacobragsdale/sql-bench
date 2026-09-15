@@ -120,7 +120,15 @@ impl Backend {
         let opened = runtime.block_on(async {
             match tokio::time::timeout(CONNECT_TIMEOUT, open_driver(config)).await {
                 Ok(result) => result,
-                Err(_elapsed) => Err(DbError::Timeout),
+                // A `Timeout` here would print as a bare "timed out" — and, on
+                // the reconnect a truncated scan forces, would be read as the
+                // *query* timing out. Saying which host stopped answering is
+                // the same thing Oracle's own ORA-12170 says.
+                Err(_elapsed) => Err(DbError::Connect(format!(
+                    "no answer from {} within {}s",
+                    config.get_addr(),
+                    CONNECT_TIMEOUT.as_secs()
+                ))),
             }
         })?;
         *client = Some(opened);
@@ -357,12 +365,28 @@ fn decimal(value: tiberius::numeric::Numeric) -> String {
     )
 }
 
+/// The severity at which SQL Server closes the connection after saying what
+/// went wrong, rather than carrying on. Books Online: 20 and up is fatal.
+const FATAL_CLASS: u8 = 20;
+
 fn failure(why: TiberiusError) -> DbError {
     match why {
+        // The session did not come through this one, so it is a `Connect` and
+        // not a complaint: `run` throws the client away for everything that is
+        // not a complaint, and a dead client would answer nothing for ever.
+        TiberiusError::Server(token) if token.class() >= FATAL_CLASS => {
+            DbError::Connect(token.message().to_owned())
+        }
         TiberiusError::Server(token) => DbError::Query {
             message: token.message().to_owned(),
             line: Some(token.line()),
         },
+        // Not the server saying no but the socket, the handshake or the
+        // protocol going wrong — a database stopped under a running query
+        // arrives here — and none of those leave anything to run on.
+        why @ (TiberiusError::Io { .. } | TiberiusError::Protocol(_) | TiberiusError::Tls(_)) => {
+            DbError::Connect(why.to_string())
+        }
         other => DbError::Query {
             message: other.to_string(),
             line: None,
