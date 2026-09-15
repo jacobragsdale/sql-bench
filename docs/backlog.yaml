@@ -968,6 +968,9 @@ epics:
     - Defects fixed with regression tests; numbers in docs/PERF.md.
     verify:
     - scripts/qa/objects.sh
+    verified: true
+    note: merged to main 2026-09-15; 45 checks green on both backends, Esc-clears-filter defect fixed,
+      286 tests
 - id: E7
   title: E7 Performance, documentation and release
   description: 'Prove the budgets, write the docs a stranger needs, and publish.
