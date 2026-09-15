@@ -78,20 +78,20 @@ pub enum Command {
         /// How to print the rows
         #[arg(long, value_enum, default_value_t = Format::Table)]
         format: Format,
-        /// Stop after this many rows
+        /// Stop the fetch after this many rows
         #[arg(long, value_name = "N", default_value_t = 10_000)]
         max_rows: usize,
         /// Give up and cancel after this many seconds
         #[arg(long, value_name = "SECONDS", default_value_t = 30)]
         timeout: u64,
-        /// Print whole cells instead of cutting them at 60 characters
+        /// Print whole cells instead of cutting them at 60 terminal columns
         #[arg(long)]
         full: bool,
         /// The statement to run, or `-` to read it from stdin
         #[arg(value_name = "SQL")]
         sql: String,
     },
-    /// List the tables, views and procedures of a connection
+    /// List the tables, views, procedures, functions, packages and sequences of a connection
     Objects {
         /// Connection name from config.toml
         #[arg(long, value_name = "NAME")]
@@ -106,7 +106,7 @@ pub enum Command {
         #[arg(value_name = "PATTERN")]
         pattern: Option<String>,
     },
-    /// Print the source of a procedure, view or function
+    /// Print the source of one object, or the columns of a table
     Source {
         /// Connection name from config.toml
         #[arg(long, value_name = "NAME")]
@@ -123,8 +123,8 @@ pub enum Command {
         /// How many times to run it
         #[arg(long, value_name = "N", default_value_t = 20, value_parser = clap::value_parser!(u32).range(1..))]
         runs: u32,
-        /// Stop after this many rows
-        #[arg(long, value_name = "M")]
+        /// Stop the fetch after this many rows
+        #[arg(long, value_name = "N")]
         max_rows: Option<usize>,
         /// The statement to time, or `-` to read it from stdin
         #[arg(value_name = "SQL")]

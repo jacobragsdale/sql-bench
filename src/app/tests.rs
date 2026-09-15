@@ -1166,3 +1166,41 @@ fn a_connection_that_comes_or_goes_empties_the_tree() {
     assert!(app.tabs[1].objects.is_empty());
     assert!(!app.busy(), "and nothing is still waited on");
 }
+
+/// The README's key tables and [`KEYS`] are one list.
+///
+/// The README is where somebody who has never run this looks, so a key the
+/// app grew and the README did not is a key nobody outside the app is told
+/// about, and a key the README still lists after the app dropped it is a
+/// promise the build does not keep. The tables are the ones headed
+/// `| Key | Does |`; every other table in the file is left alone.
+#[test]
+fn the_readme_lists_every_key_and_no_others() {
+    const README: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/README.md"));
+    let mut listed: Vec<(&str, &str)> = Vec::new();
+    let mut in_table = false;
+    for line in README.lines() {
+        if line == "| Key | Does |" {
+            in_table = true;
+        } else if !line.starts_with('|') {
+            in_table = false;
+        } else if in_table && let Some(row) = line.strip_prefix("| `") {
+            let (key, does) = row
+                .split_once("` | ")
+                .unwrap_or_else(|| panic!("not a key row: {line}"));
+            listed.push((key, does.trim_end().trim_end_matches('|').trim_end()));
+        }
+    }
+    assert!(!listed.is_empty(), "the README has no key tables in it");
+    listed.sort_unstable();
+    listed.dedup();
+
+    let mut handled: Vec<(&str, &str)> = KEYS.iter().map(|(key, _, does)| (*key, *does)).collect();
+    handled.sort_unstable();
+    handled.dedup();
+
+    assert_eq!(
+        listed, handled,
+        "README.md and app::KEYS disagree about the keys"
+    );
+}

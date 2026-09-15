@@ -1,0 +1,49 @@
+# The README frame: connect to SQL Server, open bench → Tables in the tree,
+# type a statement in the pad and run it. `scripts/readme-frame.sh` replays
+# this at 100x28 and writes the frame it names into README.md, so the picture
+# in the README is output and never a drawing. The container
+# `scripts/db-up.sh` starts has to be up, and the pad needs a state directory
+# of its own or it starts with whatever the last run typed.
+
+key c
+wait busy
+expect ● local-mssql
+
+# dbo is the schema a login lands in and is open already, so bench — the one
+# the seed wrote into — is six rows below it: counted from the top rather
+# than from the bottom, since a schema somebody else leaves behind sorts
+# after it and G would land on that instead.
+key g
+key j
+key j
+key j
+key j
+key j
+key j
+key l
+expect ▾ bench
+key j
+key l
+wait busy
+expect customers
+
+key Tab
+type select id, name, country, credit_limit
+key Enter
+type from bench.customers where country in ('DE', 'NO', 'IE')
+
+# A frame is dumped one terminal cell per character, so a glyph drawn two
+# cells wide comes out as itself and a space and the columns after it lean.
+# The countries here are the ones whose names are narrow, which keeps the
+# picture in the README straight; scripts/qa/query-workflow.sh is where the
+# wide ones are checked.
+
+# Long enough for the pad to be written, so the title is not [modified].
+wait 600
+key Ctrl-R
+wait busy
+expect ╭ Results ·
+expect Zoë Bauer
+
+frame readme
+key Ctrl-Q

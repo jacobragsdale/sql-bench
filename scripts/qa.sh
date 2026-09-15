@@ -81,4 +81,5 @@ if [ "${SQL_BENCH_TEST_DBS:-}" = 1 ]; then
     check "the query workflow" scripts/qa/query-workflow.sh
     check "the object browser" scripts/qa/objects.sh
     check "database outage" scripts/qa/db-outage.sh
+    check "the README frame" scripts/readme-frame.sh --check
 fi

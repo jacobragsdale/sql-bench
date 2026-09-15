@@ -1,34 +1,51 @@
 # sql-bench reads ~/.config/sql-bench/config.toml, or whatever
-# $SQL_BENCH_CONFIG names. Copy this file there and edit it. A missing file
-# is not an error — it is a configuration with no connections in it.
+# $SQL_BENCH_CONFIG names, or whatever --config names. Copy this file there
+# and edit it. A missing file is not an error — it is a configuration with no
+# connections in it.
+#
+# Everything here is checked when the file is read, except the passwords:
+# those are resolved when a connection is opened, so a file with ten
+# password_cmd lines does not run ten commands to answer --help.
 
 [oracle]
-# Where the Oracle Instant Client is. Optional: without it the driver looks
-# wherever the system linker does. A leading ~ is your home directory.
+# Where the Oracle Instant Client is, for connections of kind "oracle".
+# Optional: without it the driver looks wherever the system linker does, and
+# $SQL_BENCH_ORACLE_CLIENT_DIR overrides both. A leading ~ is your home
+# directory. Nothing here is read by an mssql connection.
 client_lib_dir = "~/.local/opt/oracle/instantclient_23_26"
 
-# One [[connection]] per database. `name` is unique and is what `--conn`
-# and the tab bar show.
+# One [[connection]] per database, in the order the tabs appear.
 [[connection]]
+# Unique, and what --conn and the tab bar say.
 name = "reporting"
-kind = "mssql"        # "mssql" or "oracle"
+# "mssql" or "oracle"; it picks the driver and the SQL dialect the scratch
+# pad splits statements by.
+kind = "mssql"
 host = "sql01.example.com"
-port = 1433           # left out: 1433 for mssql, 1521 for oracle
-database = "Reporting"  # mssql only, and required for it
+# Left out: 1433 for mssql, 1521 for oracle.
+port = 1433
+# mssql only, and required for it: the database the session starts in.
+database = "Reporting"
 user = "svc_reports"
-password_env = "REPORTING_PASSWORD"  # read when the connection is opened
-trust_cert = false    # mssql only; true accepts a self-signed certificate
-encrypt = true        # mssql only; the default
+# One password source per connection, and at most one:
+#   password     = "in the file"
+#   password_env = "VARIABLE"          read from the environment
+#   password_cmd = "pass show ledger"  run through sh -c, trailing newline dropped
+# A password is never written to a trace file and never drawn on the screen.
+password_env = "REPORTING_PASSWORD"
+# mssql only, default false: true accepts a self-signed certificate, which is
+# what a development container hands out.
+trust_cert = false
+# mssql only, default true. The connection is encrypted unless this says
+# otherwise, and a server too old to encrypt is the only reason to say so.
+encrypt = true
 
 [[connection]]
 name = "ledger"
 kind = "oracle"
 host = "ora01.example.com"
 port = 1521
-service = "LEDGER"    # oracle only, and required for it
+# oracle only, and required for it: the service name, not the SID.
+service = "LEDGER"
 user = "bench"
-# One password source per connection, and only one:
-#   password     = "in the file, for a database nobody cares about"
-#   password_env = "VARIABLE"          read from the environment
-#   password_cmd = "pass show ledger"  run through sh -c, trailing newline dropped
 password_cmd = "pass show ledger"
