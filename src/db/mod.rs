@@ -21,6 +21,7 @@ use std::thread::JoinHandle;
 use std::time::Instant;
 
 use crate::config::{self, Kind};
+use crate::trace::Trace;
 use model::{Cell, Column, DbError, QueryEvent, QueryOptions};
 
 /// How often a backend that is waiting on a server looks at the cancel flag.
@@ -69,7 +70,9 @@ impl Connection {
         let spec = spec.clone();
         let config = config.clone();
         let (name, kind) = (spec.name.clone(), spec.kind);
-        Self::spawn(name, kind, move || Backend::open(&spec, password, &config))
+        Self::spawn(name, kind, Trace::from_env(), move || {
+            Backend::open(&spec, password, &config)
+        })
     }
 
     /// Runs `sql` and reports through the returned channel until
@@ -116,15 +119,17 @@ impl Connection {
     fn spawn(
         name: String,
         kind: Kind,
+        trace: Trace,
         open: impl FnOnce() -> Result<Backend, DbError> + Send + 'static,
     ) -> Result<Self, DbError> {
         let (requests, inbox) = mpsc::channel();
         let (ready, opened) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&cancel);
+        let traced = name.clone();
         let worker = std::thread::Builder::new()
             .name(format!("db {name}"))
-            .spawn(move || work(open, &inbox, &flag, &ready))
+            .spawn(move || work(&traced, &trace, open, &inbox, &flag, &ready))
             .map_err(|why| DbError::Connect(format!("no worker thread: {why}")))?;
         match opened.recv() {
             Ok(Ok(())) => Ok(Self {
@@ -158,13 +163,27 @@ impl Drop for Connection {
 }
 
 /// The worker thread: open once, then serve requests until the handle goes.
+///
+/// It is also where the trace is written from, because it is the only place
+/// that sees a whole connect and a whole query: one `connect` line and one
+/// `query` line each, and no clock read at all when nothing is being traced.
 fn work(
+    name: &str,
+    trace: &Trace,
     open: impl FnOnce() -> Result<Backend, DbError>,
     inbox: &Receiver<Request>,
     cancel: &Arc<AtomicBool>,
     ready: &Sender<Result<(), DbError>>,
 ) {
-    let mut backend = match open() {
+    let connecting = trace.is_on().then(Instant::now);
+    let opened = open();
+    if let Some(connecting) = connecting {
+        trace.event(
+            "connect",
+            &[("conn", name), ("ms", &millis(connecting).to_string())],
+        );
+    }
+    let mut backend = match opened {
         Ok(backend) => {
             let _ = ready.send(Ok(()));
             backend
@@ -183,9 +202,22 @@ fn work(
                 reply,
             } => {
                 let mut sink = Sink::new(reply, Arc::clone(cancel), options);
-                match backend.run(&sql, &mut sink) {
+                let timing = match backend.run(&sql, &mut sink) {
                     Ok(()) => sink.finish(),
                     Err(error) => sink.fail(error),
+                };
+                if trace.is_on() {
+                    trace.event(
+                        "query",
+                        &[
+                            ("conn", name),
+                            ("rows", &timing.rows.to_string()),
+                            ("truncated", if timing.truncated { "true" } else { "false" }),
+                            ("connect_ms", &timing.connect_ms.to_string()),
+                            ("first_row_ms", &timing.first_row_ms.to_string()),
+                            ("total_ms", &timing.total_ms.to_string()),
+                        ],
+                    );
                 }
             }
         }
@@ -339,22 +371,46 @@ impl Sink {
         }
     }
 
-    fn finish(mut self) {
+    fn finish(mut self) -> Timing {
         self.flush();
-        let total_ms = millis(self.started);
+        let timing = self.timing();
         let _ = self.reply.send(QueryEvent::Done {
+            rows: timing.rows,
+            truncated: timing.truncated,
+            connect_ms: timing.connect_ms,
+            first_row_ms: timing.first_row_ms,
+            total_ms: timing.total_ms,
+        });
+        timing
+    }
+
+    fn fail(self, error: DbError) -> Timing {
+        let timing = self.timing();
+        let _ = self.reply.send(QueryEvent::Error(error));
+        timing
+    }
+
+    fn timing(&self) -> Timing {
+        let total_ms = millis(self.started);
+        Timing {
             rows: self.rows,
             truncated: self.truncated,
             connect_ms: self.connect_ms,
             // A query with no rows took as long as it took to answer at all.
             first_row_ms: self.first_row_ms.unwrap_or(total_ms),
             total_ms,
-        });
+        }
     }
+}
 
-    fn fail(self, error: DbError) {
-        let _ = self.reply.send(QueryEvent::Error(error));
-    }
+/// What one query cost: the numbers `QueryEvent::Done` carries, kept after
+/// it has been sent so the worker can trace them.
+struct Timing {
+    rows: usize,
+    truncated: bool,
+    connect_ms: u32,
+    first_row_ms: u32,
+    total_ms: u32,
 }
 
 fn millis(since: Instant) -> u32 {
@@ -459,9 +515,13 @@ mod tests {
     /// A connection whose server is the script in [`fake`], and the counter
     /// of rows that script has produced.
     fn fake() -> (Connection, Arc<AtomicUsize>) {
+        traced(Trace::default())
+    }
+
+    fn traced(trace: Trace) -> (Connection, Arc<AtomicUsize>) {
         let emitted = Arc::new(AtomicUsize::new(0));
         let counter = Arc::clone(&emitted);
-        let connection = Connection::spawn("fake".to_owned(), Kind::Mssql, move || {
+        let connection = Connection::spawn("fake".to_owned(), Kind::Mssql, trace, move || {
             Ok(Backend::Fake(fake::Backend { emitted: counter }))
         })
         .expect("the fake backend always opens");
@@ -663,6 +723,52 @@ mod tests {
             "{} rows were produced for a reader that had gone",
             emitted.load(Ordering::SeqCst)
         );
+    }
+
+    #[test]
+    fn a_traced_connection_writes_one_connect_line_and_one_line_per_query() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("trace.tsv");
+        let (connection, _) = traced(Trace::new(Some(path.clone())));
+        collect(&connection.query(
+            "rows:3",
+            QueryOptions {
+                batch_size: 500,
+                max_rows: Some(2),
+            },
+        ));
+        collect(&connection.query("boom", QueryOptions::default()));
+        drop(connection);
+
+        let written = std::fs::read_to_string(&path).unwrap();
+        let kinds: Vec<&str> = written
+            .lines()
+            .map(|line| line.split('\t').nth(1).unwrap())
+            .collect();
+        assert_eq!(kinds, ["connect", "query", "query"], "{written}");
+        let fields: Vec<&str> = written
+            .lines()
+            .nth(1)
+            .unwrap()
+            .split('\t')
+            .skip(2)
+            .collect();
+        assert_eq!(
+            fields[..4],
+            ["conn=fake", "rows=2", "truncated=true", "connect_ms=1"]
+        );
+        assert!(
+            fields[4].starts_with("first_row_ms=") && fields[5].starts_with("total_ms="),
+            "{fields:?}"
+        );
+        let failed: Vec<&str> = written
+            .lines()
+            .nth(2)
+            .unwrap()
+            .split('\t')
+            .skip(2)
+            .collect();
+        assert_eq!(failed[..3], ["conn=fake", "rows=0", "truncated=false"]);
     }
 
     #[test]

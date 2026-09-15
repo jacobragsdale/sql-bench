@@ -33,14 +33,21 @@ fn an_unknown_connection_lists_the_ones_there_are() {
 }
 
 #[test]
-fn a_verb_that_is_not_built_yet_is_not_a_failure() {
-    let output = sql_bench(&["bench", "--conn", "local-mssql", "select 1"]);
-    assert_eq!(
-        output.status.code(),
-        Some(2),
-        "not 1: a script tells them apart"
-    );
-    assert!(output.stdout.is_empty());
+fn a_bench_prints_one_row_per_phase_and_a_rate() {
+    if std::env::var_os("SQL_BENCH_TEST_DBS").is_none() {
+        eprintln!("skipped: set SQL_BENCH_TEST_DBS=1 with the containers up");
+        return;
+    }
+    let output = sql_bench(&["bench", "--conn", "local-mssql", "--runs", "3", "select 1"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let phases: Vec<&str> = stdout
+        .lines()
+        .skip(2)
+        .filter_map(|line| line.split_whitespace().next())
+        .collect();
+    assert_eq!(phases[..3], ["connect", "first_row", "total"], "{stdout}");
+    assert!(stdout.ends_with("rows/s over 3 runs\n"), "{stdout}");
 }
 
 #[test]

@@ -102,7 +102,13 @@ pub enum Command {
         /// Connection name from config.toml
         #[arg(long, value_name = "NAME")]
         conn: String,
-        /// The statement to time
+        /// How many times to run it
+        #[arg(long, value_name = "N", default_value_t = 20, value_parser = clap::value_parser!(u32).range(1..))]
+        runs: u32,
+        /// Stop after this many rows
+        #[arg(long, value_name = "M")]
+        max_rows: Option<usize>,
+        /// The statement to time, or `-` to read it from stdin
         #[arg(value_name = "SQL")]
         sql: String,
     },
@@ -178,7 +184,12 @@ pub fn run(cli: &Cli, config: &Config) -> Result<ExitCode> {
             pattern.as_deref(),
         )),
         Some(Command::Source { conn, object }) => Ok(source(config, conn, object)),
-        Some(Command::Bench { .. }) => not_implemented("bench"),
+        Some(Command::Bench {
+            conn,
+            runs,
+            max_rows,
+            sql,
+        }) => bench(config, conn, sql, *runs, *max_rows),
         None => Ok(ExitCode::SUCCESS),
     }
 }
@@ -243,8 +254,101 @@ fn query(
     } else {
         String::new()
     };
-    eprintln!("{} rows{cap} in {} ms", answer.rows, answer.ms);
+    eprintln!("{} rows{cap} in {} ms", answer.rows, answer.total_ms);
     Ok(ExitCode::SUCCESS)
+}
+
+/// Long enough for the slowest thing anyone benches on purpose — a million
+/// row scan is budgeted at eight seconds — and short enough that a wedged
+/// server is not a wedged afternoon.
+const BENCH_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// Runs the statement `runs` times on one connection and prints what each
+/// phase cost. Sequential and through the ordinary [`Connection`], so what is
+/// measured is what the TUI does, warm cache and all.
+fn bench(
+    config: &Config,
+    conn: &str,
+    sql: &str,
+    runs: u32,
+    max_rows: Option<usize>,
+) -> Result<ExitCode> {
+    let sql = statement(sql)?;
+    let connecting = Instant::now();
+    let Some(connection) = open(config, conn) else {
+        return Ok(ExitCode::FAILURE);
+    };
+    // The one connect there is: every later run reuses this connection, which
+    // is why the phase has a single sample.
+    let mut connect = vec![millis(connecting)];
+    let options = QueryOptions {
+        max_rows,
+        ..QueryOptions::default()
+    };
+    let mut first_row = Vec::new();
+    let mut total = Vec::new();
+    let mut rows = 0;
+    for _ in 0..runs {
+        match collect(&connection, &sql, options, BENCH_TIMEOUT) {
+            Ok(answer) => {
+                rows = answer.rows;
+                first_row.push(answer.first_row_ms);
+                total.push(answer.total_ms);
+            }
+            Err(error) => {
+                eprintln!("{error}");
+                return Ok(ExitCode::FAILURE);
+            }
+        }
+    }
+
+    let phases = vec![
+        phase("connect", &mut connect),
+        phase("first_row", &mut first_row),
+        phase("total", &mut total),
+    ];
+    print!(
+        "{}",
+        export::table(
+            &headings(&["phase", "min", "p50", "p95", "max"]),
+            &phases,
+            None
+        )
+    );
+    // Over the whole run rather than off the median, so a query too fast to
+    // register a millisecond still divides by something.
+    let elapsed: u64 = total.iter().map(|ms| u64::from(*ms)).sum::<u64>().max(1);
+    let per_second = rows as u64 * u64::from(runs) * 1000 / elapsed;
+    println!("{rows} rows, {per_second} rows/s over {runs} runs");
+    Ok(ExitCode::SUCCESS)
+}
+
+/// One row of the phase table. `samples` is sorted in place, which is what
+/// the percentiles want anyway.
+fn phase(name: &str, samples: &mut [u32]) -> Vec<Cell> {
+    samples.sort_unstable();
+    let at = |p| i64::from(percentile(samples, p));
+    vec![
+        Cell::Text(name.to_owned()),
+        Cell::Int(at(0)),
+        Cell::Int(at(50)),
+        Cell::Int(at(95)),
+        Cell::Int(at(100)),
+    ]
+}
+
+/// Nearest-rank: the sample at `ceil(p/100 * n)`, counting from one. No
+/// interpolation, no floats, and at twenty runs the answer is a number that
+/// was actually measured.
+///
+/// Panics on no samples, which `--runs` will not allow.
+fn percentile(sorted: &[u32], p: u32) -> u32 {
+    let rank = (p as usize * sorted.len()).div_ceil(100).max(1);
+    sorted[rank - 1]
+}
+
+fn millis(since: Instant) -> u32 {
+    u32::try_from(since.elapsed().as_millis()).unwrap_or(u32::MAX)
 }
 
 fn print_sets(sets: &[ResultSet], format: impl Fn(&ResultSet) -> String) {
@@ -425,7 +529,8 @@ struct Answer {
     affected: Vec<u64>,
     rows: usize,
     truncated: bool,
-    ms: u32,
+    first_row_ms: u32,
+    total_ms: u32,
 }
 
 /// Runs the statement and waits for it, cancelling if it takes longer than
@@ -445,7 +550,8 @@ fn collect(
         affected: Vec::new(),
         rows: 0,
         truncated: false,
-        ms: 0,
+        first_row_ms: 0,
+        total_ms: 0,
     };
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
@@ -459,12 +565,14 @@ fn collect(
             Ok(QueryEvent::Done {
                 rows,
                 truncated,
+                first_row_ms,
                 total_ms,
                 ..
             }) => {
                 answer.rows = rows;
                 answer.truncated = truncated;
-                answer.ms = total_ms;
+                answer.first_row_ms = first_row_ms;
+                answer.total_ms = total_ms;
                 return Ok(answer);
             }
             Ok(QueryEvent::Error(error)) => return Err(error),
@@ -553,6 +661,81 @@ mod tests {
         assert_eq!(timeout, 2);
         assert!(full);
         assert_eq!(sql, "-", "the statement comes from stdin");
+    }
+
+    #[test]
+    fn a_bench_takes_a_run_count_and_a_cap_and_has_defaults() {
+        let cli = Cli::parse_from(["sql-bench", "bench", "--conn", "x", "select 1"]);
+        let Some(Command::Bench {
+            conn,
+            runs,
+            max_rows,
+            sql,
+        }) = cli.command
+        else {
+            panic!("expected a bench, got {:?}", cli.command);
+        };
+        assert_eq!(
+            (conn.as_str(), runs, max_rows, sql.as_str()),
+            ("x", 20, None, "select 1")
+        );
+
+        let cli = Cli::parse_from([
+            "sql-bench",
+            "bench",
+            "--conn",
+            "x",
+            "--runs",
+            "5",
+            "--max-rows",
+            "100",
+            "select 1",
+        ]);
+        let Some(Command::Bench { runs, max_rows, .. }) = cli.command else {
+            panic!("expected a bench");
+        };
+        assert_eq!((runs, max_rows), (5, Some(100)));
+        assert!(
+            Cli::try_parse_from([
+                "sql-bench",
+                "bench",
+                "--conn",
+                "x",
+                "--runs",
+                "0",
+                "select 1"
+            ])
+            .is_err(),
+            "zero runs has nothing to report"
+        );
+    }
+
+    #[test]
+    fn a_percentile_is_the_nearest_rank_sample() {
+        let five = [10, 20, 30, 40, 50];
+        assert_eq!(percentile(&five, 0), 10, "the minimum");
+        assert_eq!(percentile(&five, 50), 30, "ceil(2.5) is the third");
+        assert_eq!(percentile(&five, 95), 50, "ceil(4.75) is the fifth");
+        assert_eq!(percentile(&five, 100), 50, "the maximum");
+        assert_eq!(percentile(&[7], 95), 7, "one sample is every percentile");
+        let twenty: Vec<u32> = (1..=20).collect();
+        assert_eq!(percentile(&twenty, 50), 10);
+        assert_eq!(percentile(&twenty, 95), 19);
+    }
+
+    #[test]
+    fn a_phase_row_is_the_name_and_its_four_numbers() {
+        let mut samples = [4, 1, 9, 2, 3];
+        assert_eq!(
+            phase("total", &mut samples),
+            vec![
+                Cell::Text("total".to_owned()),
+                Cell::Int(1),
+                Cell::Int(3),
+                Cell::Int(9),
+                Cell::Int(9),
+            ]
+        );
     }
 
     #[test]
