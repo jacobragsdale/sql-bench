@@ -980,12 +980,19 @@ epics:
         string formatting each tick.'
       - A `#[ignore]` perf test suite runnable with `cargo test --release -- --ignored` asserting the
         budgets with a 2x margin, so a regression is a test failure not a doc drift.
+      - 'Robustness finding from T3.3: `sql-bench </dev/null` (stdin at EOF, or a pty nobody writes to
+        again) blocks forever inside crossterm''s event::read holding raw mode and the alternate screen.
+        Fix: read terminal input on its own thread feeding an mpsc channel (TerminalInput becomes a receiver
+        with timeout); EOF on that thread ends the loop cleanly. Regression test: run the binary with
+        stdin from /dev/null under `script` and assert it exits within 2 s with the terminal restored
+        (extend scripts/qa/panic-restore.sh or add scripts/qa/stdin-eof.sh).'
       out:
       - Async rendering, GPU, anything clever.
     acceptance:
     - docs/PERF.md has a dated block with every budget and its measured value, all within budget, with
       the commit hash.
     - '`cargo test --release -- --ignored` passes.'
+    - '`sql-bench </dev/null` exits within 2 s with the terminal restored (QA script in scripts/qa.sh).'
     verify:
     - scripts/perf.sh
     - cargo test --release -- --ignored
