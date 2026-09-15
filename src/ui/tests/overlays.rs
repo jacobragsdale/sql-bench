@@ -58,3 +58,29 @@ fn no_connections_is_one_pane_saying_where_the_config_goes() {
     }
     assert!(!screen.contains("Objects"), "no layout to show:\n{screen}");
 }
+
+#[test]
+fn the_footer_hints_and_the_help_are_the_same_table() {
+    let mut app = two_tabs();
+    app.shell.help = true;
+    // Wide enough that the footer shows the whole list and not as much of it
+    // as fits, so a key missing from it is a key missing from it.
+    let help = text(&frame(200, 60, &app));
+    app.shell.help = false;
+    for focus in [Focus::Objects, Focus::Scratch, Focus::Results] {
+        app.shell.focus = focus;
+        let footer = line(&frame(200, 60, &app), 59);
+        for (spec, place, does) in KEYS {
+            assert!(
+                help.contains(&format!(" {spec:<10}{place:<12}{does}")),
+                "the help does not list {spec} ({place}: {does}):\n{help}"
+            );
+            let works_here = keys_for(focus).any(|(other, ..)| other == spec);
+            assert_eq!(
+                footer.contains(&format!(" {spec} {does}")),
+                works_here,
+                "{spec} ({place}: {does}) with {focus:?} focused, hinted:\n{footer}"
+            );
+        }
+    }
+}

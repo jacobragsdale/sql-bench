@@ -197,6 +197,33 @@ expect-not ╭ Help
 key q
 ```
 
+### QA scripts
+
+`scripts/qa.sh` runs every check that needs no database, one line each: the
+QA replay scripts in `scripts/replay/qa/` at 60x15, 80x24, 120x40, 200x60 and
+40x10, a resize mid-run, the quit keys from every pane, `NO_COLOR` against a
+`--frame-styles` dump, the terminal restore below and the draw latency. CI
+runs it.
+
+### Terminal restore
+
+Three ways out of a run, and all three give the terminal back. A quit (`q`,
+`Ctrl-Q`) returns from the loop and an error returns `Err` up to `main`: both
+drop the `Restore` guard in `src/run/mod.rs`. A panic runs the hook
+`ratatui::try_init` installed. Guard and hook do the same two things — raw
+mode off, then the alternate screen left — and the terminal's own `Drop`
+shows the cursor after them. The hook restores *before* it prints, so a panic
+message lands on the normal screen and not on the one about to be thrown
+away.
+
+A replay never takes the terminal at all, so QA checks this on a real pty:
+`scripts/qa/panic-restore.sh` runs a debug build under `script` with
+`--panic-after-ms` — a hidden flag that exists only under
+`cfg(debug_assertions)`, and that panics where the loop waits for a key, so
+no key has to arrive for it to fire — and asserts that the capture has the
+shell drawn on it, that the run exits 101, and that `\e[?1049l\e[?25h` comes
+after the panic message and is the last thing written.
+
 ## Trace format
 
 `SQL_BENCH_TRACE=<file>` appends one line per event: `unix_ms\tkind\tk=v...`.

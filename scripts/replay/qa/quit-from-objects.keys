@@ -1,0 +1,10 @@
+# Ctrl-Q with the Objects pane focused. A quit app is never handed another
+# event, so a ? that does not open the help is the proof that it quit — and
+# the ? before it, which does, is the proof that the check can fail.
+
+key ?
+expect ╭ Help ─
+key Esc
+key Ctrl-Q
+key ?
+expect-not ╭ Help

@@ -1,0 +1,26 @@
+# The shell at whatever --size scripts/qa.sh runs this at: every pane title
+# whole, the footer saying where the connection is, and the help overlay
+# whole. Each title is expected with the space and the first border dash
+# after it, so a title cut off at the pane's right edge fails here.
+
+expect ╭ Objects ─
+expect ╭ Scratch ─
+expect ╭ Results ─
+expect ○ disconnected
+
+key ?
+expect ╭ Help ─
+expect Tab       anywhere    next pane
+expect Ctrl-Q    anywhere    quit
+key Esc
+expect-not ╭ Help
+
+# Round the three panes and back the other way; the layout survives either.
+key Tab
+key Tab
+key Tab
+key Shift-Tab
+expect ╭ Objects ─
+expect ╭ Scratch ─
+expect ╭ Results ─
+expect ○ disconnected

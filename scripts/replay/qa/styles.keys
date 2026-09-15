@@ -1,0 +1,7 @@
+# One frame with every coloured thing on it — the tab showing, the tabs not
+# showing, a focused border, the placeholders and the help overlay — for the
+# NO_COLOR check in scripts/qa.sh to read the styles of.
+
+key ?
+expect ╭ Help ─
+frame styles

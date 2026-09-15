@@ -27,4 +27,8 @@ jobs:
       # The replay smoke test: the real loop on a TestBackend, no terminal and
       # no database, which is how rule 3 is kept honest on a runner.
       - run: SQL_BENCH_CONFIG=config.local.toml cargo run -- --replay scripts/replay/smoke.keys --size 120x40 --frames-dir /tmp/frames
+      # Every QA check that needs no database: the shell at five sizes, a
+      # resize mid-run, the quit keys, NO_COLOR, the terminal restored after
+      # a panic (which needs `script`, from util-linux) and the draw latency.
+      - run: scripts/qa.sh
       - run: cargo build --release

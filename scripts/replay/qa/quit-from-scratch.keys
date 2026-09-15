@@ -1,0 +1,12 @@
+# The scratch pad is where q is a character and not a quit: the help still
+# opens after one. Ctrl-Q quits from here like everywhere else.
+
+key Tab
+key q
+key ?
+expect ╭ Help ─
+key Esc
+expect-not ╭ Help
+key Ctrl-Q
+key ?
+expect-not ╭ Help

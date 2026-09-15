@@ -178,12 +178,24 @@ fn footer_line(app: &App, theme: &Theme, width: u16) -> Line<'static> {
     );
     let budget = usize::from(width).saturating_sub(right.width() + 1);
     let left = match (&app.shell.error, app.shell.status.as_str()) {
-        (Some(error), _) => Span::styled(format!(" {error}"), theme.error),
+        (Some(error), _) => Span::styled(cut(error, budget), theme.error),
         (None, "") => Span::styled(hints(app.shell.focus, budget), theme.dim),
-        (None, status) => Span::raw(format!(" {status}")),
+        (None, status) => Span::raw(cut(status, budget)),
     };
     let gap = usize::from(width).saturating_sub(left.width() + right.width());
     Line::from(vec![left, Span::raw(" ".repeat(gap)), right])
+}
+
+/// ` text`, cut to `budget` columns with an ellipsis. The footer's right end
+/// says where the connection is, and a message long enough to push it off
+/// the screen has taken the footer over rather than used it.
+fn cut(text: &str, budget: usize) -> String {
+    let room = budget.saturating_sub(1);
+    if text.chars().count() <= room {
+        return format!(" {text}");
+    }
+    let kept: String = text.chars().take(room.saturating_sub(1)).collect();
+    format!(" {kept}…")
 }
 
 /// As many of this pane's keys as fit, in the order [`KEYS`] lists them.

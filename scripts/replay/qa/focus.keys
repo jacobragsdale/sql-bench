@@ -1,0 +1,13 @@
+# 120x40, where the footer has room for every key of one pane but not for
+# both lists: the hints follow the focus.
+
+expect 1-9 select tab
+key Tab
+expect-not 1-9 select tab
+expect Ctrl-Q quit
+key Tab
+expect 1-9 select tab
+key Shift-Tab
+expect-not 1-9 select tab
+key Shift-Tab
+expect 1-9 select tab

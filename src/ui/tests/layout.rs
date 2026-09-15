@@ -176,3 +176,35 @@ fn the_focused_pane_is_the_one_with_the_accent_border() {
         app.handle(Event::Key(key("Tab")));
     }
 }
+
+#[test]
+fn a_long_message_is_cut_rather_than_pushing_the_connection_off_the_footer() {
+    let mut app = two_tabs();
+    app.shell.error =
+        Some("could not connect to local-mssql: login failed for user 'sa' after 10 s".to_owned());
+    for width in [60, 80, 120] {
+        let terminal = frame(width, 15, &app);
+        let footer = line(&terminal, 14);
+        assert!(footer.ends_with("○ disconnected"), "{width}: {footer}");
+        assert!(
+            footer.starts_with(" could not connect"),
+            "{width}: {footer}"
+        );
+        assert_eq!(
+            footer.chars().count(),
+            usize::from(width) - 1,
+            "{width}: {footer}"
+        );
+    }
+    assert!(
+        line(&frame(60, 15, &app), 14).contains('…'),
+        "a message that does not fit says so"
+    );
+
+    // A status is the same footer, and a short one is not cut at all.
+    app.shell.error = None;
+    app.shell.status = "1 row in 3 ms".to_owned();
+    let footer = line(&frame(60, 15, &app), 14);
+    assert!(footer.starts_with(" 1 row in 3 ms "), "{footer}");
+    assert!(footer.ends_with("○ disconnected"), "{footer}");
+}

@@ -52,6 +52,11 @@ pub trait InputSource {
 }
 
 /// The keyboard, through crossterm.
+// ponytail: a terminal whose input side reaches end of file — `sql-bench
+// </dev/null`, or a pty nobody writes to again — leaves crossterm waiting in
+// `event::read` for bytes that never come, and the app hangs holding the
+// terminal with no key left to quit it. Reading input on a thread is the fix
+// if anyone meets it outside a test harness.
 #[derive(Debug, Default)]
 pub struct TerminalInput {
     idle: bool,
@@ -79,7 +84,10 @@ impl InputSource for TerminalInput {
 }
 
 /// Opens the TUI on this terminal and gives it back when the app quits.
-pub fn run(config: &Config, args: &Cli) -> Result<()> {
+///
+/// `panic_after` is `--panic-after-ms`, which only a debug build has: it is
+/// how QA gets a panic out of a loop that is holding the terminal.
+pub fn run(config: &Config, args: &Cli, panic_after: Option<Duration>) -> Result<()> {
     let mut app = App::new(config);
     let startup = startup_tabs(config, args)?;
     // `try_init` takes raw mode and the alternate screen and installs the
@@ -97,6 +105,7 @@ pub fn run(config: &Config, args: &Cli) -> Result<()> {
         &mut TerminalInput::default(),
         &Trace::from_env(),
         &mut driver,
+        panic_after,
     )
 }
 
@@ -122,12 +131,45 @@ pub fn run_loop<B: Backend>(
     input: &mut dyn InputSource,
     trace: &Trace,
     driver: &mut Driver,
+    panic_after: Option<Duration>,
 ) -> Result<()>
 where
     B::Error: std::error::Error + Send + Sync + 'static,
 {
+    let mut panicking;
+    let input = match panic_after {
+        Some(after) => {
+            panicking = PanicAfter {
+                inner: input,
+                at: Instant::now() + after,
+            };
+            &mut panicking as &mut dyn InputSource
+        }
+        None => input,
+    };
     while driver.turn(terminal, app, input, trace)? {}
     Ok(())
+}
+
+/// What `--panic-after-ms` wraps the input in: a panic raised where the loop
+/// is about to wait, rather than between turns.
+///
+/// It has to be here and not around the `while`, because a loop waiting for a
+/// key that never comes never gets between two turns — which is exactly the
+/// state QA panics it out of.
+struct PanicAfter<'a> {
+    inner: &'a mut dyn InputSource,
+    at: Instant,
+}
+
+impl InputSource for PanicAfter<'_> {
+    fn next(&mut self, timeout: Duration) -> Result<Option<Event>> {
+        assert!(
+            Instant::now() < self.at,
+            "--panic-after-ms: the deliberate panic QA checks the terminal is given back after"
+        );
+        self.inner.next(timeout)
+    }
 }
 
 /// What one turn of the loop carries over to the next, so the loop can be
@@ -254,6 +296,9 @@ impl Driver {
     }
 }
 
+/// Milliseconds with the fraction kept. A draw is a fraction of one, so
+/// whole milliseconds cannot say whether a p95 is a tenth of the budget or
+/// most of it — and a budget nothing can be measured against is not one.
 fn millis(elapsed: Duration) -> String {
-    elapsed.as_millis().to_string()
+    format!("{:.3}", elapsed.as_secs_f64() * 1000.0)
 }

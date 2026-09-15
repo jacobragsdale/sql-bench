@@ -1,0 +1,10 @@
+# Ctrl-Q with the Results pane focused, two panes along from the first.
+
+key Tab
+key Tab
+key ?
+expect ╭ Help ─
+key Esc
+key Ctrl-Q
+key ?
+expect-not ╭ Help
