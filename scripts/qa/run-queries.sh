@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# T5.2: running statements, cancelling them and failing them, against both
-# containers. One replay per script per backend, each with a state directory
+# T5.2 and T5.3: running statements, cancelling them, failing them and
+# exporting them, against both containers. One replay per script per backend, each with a state directory
 # of its own so the scratch pad starts empty. Exits non-zero on the first
 # script that does not end at 0.
 #
@@ -30,4 +30,27 @@ for script in run cancel error multi; do
         fi
     done
 done
+
+# T5.3: the inspector, the export prompt and the file it wrote. SQL Server
+# only — bench.big_text is where the 100 kB row is.
+out=/tmp/sql-bench-inspect.csv
+rm -f "$out"
+start=$(date +%s%3N)
+if SQL_BENCH_STATE_DIR="$work/inspect" "$bin" --replay scripts/replay/inspect.keys \
+    --size 120x40 --frames-dir "$work/frames" >"$work/inspect.log" 2>&1; then
+    # The header and the three rows, counted by a reader that knows a quoted
+    # field can hold a line break of its own.
+    rows=$(python3 -c 'import csv,sys; print(sum(1 for _ in csv.reader(open(sys.argv[1], newline=""))))' "$out")
+    if [ "$rows" = 4 ]; then
+        printf 'ok   %-14s %6sms  %s rows exported\n' inspect "$(($(date +%s%3N) - start))" "$rows"
+    else
+        printf 'FAIL %-14s %s CSV rows in %s, wanted 4\n' inspect "$rows" "$out" >&2
+        fail=1
+    fi
+else
+    printf 'FAIL %-14s exit %s\n' inspect "$?" >&2
+    cat "$work/inspect.log" >&2
+    fail=1
+fi
+
 exit "$fail"

@@ -39,9 +39,32 @@ pub enum Hit {
     Moved,
     /// `m`: run the same statement again with a higher cap.
     MoreRows,
-    /// Enter: the cell inspector, which is T5.3's.
+    /// Enter: open the whole of the selected cell.
     Inspect,
+    /// `y`: the selected cell, as text.
+    CopyCell,
+    /// `Y`: the whole row, tab-separated.
+    CopyRow,
+    /// `e`: ask where to write the result set.
+    Export,
 }
+
+/// The open cell inspector: an overlay showing one whole value.
+///
+/// The cell is read from the grid when the overlay is drawn rather than
+/// copied when it opens, so a hundred kilobyte value costs an overlay and
+/// not a second copy of itself.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Inspector {
+    /// The first line of the value that is showing.
+    pub scroll: usize,
+}
+
+/// How wide the inspector wraps its value, which is the inside of an overlay
+/// four columns wider: two of border, two of padding. The app wraps and the
+/// renderer draws, so both have to mean the same width — and a hex dump line
+/// is what fixes it, being as wide as sixteen bytes make it.
+pub const INSPECT_WIDTH: usize = 68;
 
 /// Where a query is.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -255,6 +278,9 @@ impl Results {
             KeyCode::Char(']') => self.switch_set(1),
             KeyCode::Char('m') => Hit::MoreRows,
             KeyCode::Enter => Hit::Inspect,
+            KeyCode::Char('y') => Hit::CopyCell,
+            KeyCode::Char('Y') => Hit::CopyRow,
+            KeyCode::Char('e') => Hit::Export,
             _ => Hit::Ignored,
         }
     }
@@ -325,6 +351,34 @@ impl Results {
     #[must_use]
     pub const fn selected(&self) -> (usize, usize) {
         self.selected
+    }
+
+    /// The cell the cursor is on, which is what Enter inspects and `y`
+    /// copies. [`None`] when the set has no rows.
+    #[must_use]
+    pub fn cell(&self) -> Option<&Cell> {
+        self.rows().get(self.selected.0)?.get(self.selected.1)
+    }
+
+    /// The column that cell is in, for the inspector's title.
+    #[must_use]
+    pub fn column(&self) -> Option<&Column> {
+        self.columns().get(self.selected.1)
+    }
+
+    /// The row the cursor is on, tab-separated — which is what a spreadsheet
+    /// pastes into columns. A NULL is nothing, the way an export writes it.
+    #[must_use]
+    pub fn row_text(&self) -> Option<String> {
+        let row = self.rows().get(self.selected.0)?;
+        let mut text = String::new();
+        for (index, cell) in row.iter().enumerate() {
+            if index > 0 {
+                text.push('\t');
+            }
+            text.push_str(&cell.display());
+        }
+        Some(text)
     }
 
     #[must_use]
@@ -508,6 +562,93 @@ fn short_hex(bytes: &[u8]) -> String {
         text.push('…');
     }
     text
+}
+
+/// `body · nvarchar(max) · 102,400 chars`: what the inspector is showing,
+/// and how much of it there is. Bytes are counted in bytes and everything
+/// else in characters, because that is the unit each was stored in.
+#[must_use]
+pub fn inspect_title(column: &Column, cell: &Cell) -> String {
+    let size = match cell {
+        Cell::Null => "NULL".to_owned(),
+        Cell::Bytes(bytes) => format!("{} bytes", grouped(bytes.len())),
+        other => format!("{} chars", grouped(other.display().chars().count())),
+    };
+    format!("{} · {} · {size}", column.name, column.type_name)
+}
+
+// ponytail: every line of the value is built on every key and every frame,
+// so the 1 MiB a LOB stops at is 1 MiB formatted per keystroke. Cheap enough
+// for a value a person opened on purpose; window it if a megabyte of hex ever
+// shows up in a trace.
+/// The whole of one cell, a line at a time: text wrapped at
+/// [`INSPECT_WIDTH`] with its own line breaks kept, bytes as a hex dump, and
+/// NULL as the word the grid shows.
+#[must_use]
+pub fn inspect_lines(cell: &Cell) -> Vec<String> {
+    match cell {
+        Cell::Null => vec!["NULL".to_owned()],
+        Cell::Bytes(bytes) => bytes
+            .chunks(HEX_PER_LINE)
+            .enumerate()
+            .map(|(line, chunk)| hex_line(line * HEX_PER_LINE, chunk))
+            .collect(),
+        other => wrapped(&other.display()),
+    }
+}
+
+/// How many bytes one hex dump line holds.
+const HEX_PER_LINE: usize = 16;
+
+/// `000000  4c6f7265 6d206970 73756d20 4c6f7265  Lorem ipsum Lore`: the
+/// offset, the bytes in fours, and the printable ones again on the right.
+fn hex_line(offset: usize, chunk: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut text = format!("{offset:06x}  ");
+    for group in 0..HEX_PER_LINE / 4 {
+        if group > 0 {
+            text.push(' ');
+        }
+        for index in group * 4..group * 4 + 4 {
+            match chunk.get(index) {
+                Some(byte) => {
+                    let _ = write!(text, "{byte:02x}");
+                }
+                None => text.push_str("  "),
+            }
+        }
+    }
+    text.push_str("  ");
+    for byte in chunk {
+        text.push(if byte.is_ascii_graphic() || *byte == b' ' {
+            char::from(*byte)
+        } else {
+            '.'
+        });
+    }
+    text
+}
+
+/// The text in lines of [`INSPECT_WIDTH`] characters, cut where it is too
+/// long and broken where it breaks itself.
+fn wrapped(text: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    for paragraph in text.split('\n') {
+        let mut characters = paragraph
+            .strip_suffix('\r')
+            .unwrap_or(paragraph)
+            .chars()
+            .peekable();
+        loop {
+            lines.push(characters.by_ref().take(INSPECT_WIDTH).collect::<String>());
+            // A paragraph exactly as wide as the overlay is one line and not
+            // one line and an empty one.
+            if characters.peek().is_none() {
+                break;
+            }
+        }
+    }
+    lines
 }
 
 /// A cell cut to `width` characters, the last of which says there was more.

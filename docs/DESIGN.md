@@ -145,9 +145,28 @@ background until the next edit.
 | Home End Ctrl-A, Ctrl-U Ctrl-K Ctrl-W, Ctrl-arrows, Shift-arrows | Scratch | move, cut, jump a word, select |
 | j k h l, Enter, /, r, s, i, y | Objects | move, expand, filter, reload, source, columns, copy name |
 | j k h l, arrows, PageUp/Down, Ctrl-D Ctrl-U, g G, 0 $ | Results | move the cell cursor |
-| Enter, y Y, e, m, [ ] | Results | inspect *(T5.3)*, copy, export, 10,000 more rows, switch result set |
+| Enter, y Y, e, m, [ ] | Results | inspect, copy, export, 10,000 more rows, switch result set |
 | ? | anywhere | help |
 | q / Ctrl-Q | not Scratch / anywhere | quit |
+
+Enter opens the cell inspector over the layout: a 72-column overlay, inside
+the tab bar and the footer the way the help is, titled `body · nvarchar ·
+102,400 chars` — the column, its type, and the value in characters, or in
+bytes for a `Bytes`. Text is wrapped at the overlay's width with its own line
+breaks kept, a `Bytes` is a hex dump of sixteen bytes a line with the
+printable ones beside it, and a NULL is the word. j k, the arrows and
+PageUp/PageDown scroll it, which the grid under it does not see; Esc closes
+it, after the help and before a running query.
+
+`y` copies the cell and `Y` the row, tab-separated with a NULL as nothing,
+into the app's clipboard and out through OSC 52; the footer says `copied 1
+cell`. `e` opens a one-line prompt in the footer, `Export to: ` prefilled
+with `~/sql-bench-<connection>-<YYYYmmdd-HHMMSS>.csv`, which takes every key
+while it is open — insert, Backspace, Left, Right, Home, End and Ctrl-U, and
+Esc to give up. Enter writes every fetched row of the set on screen: JSON for
+a `.json` name and CSV for anything else, through the same `src/export.rs`
+the headless subcommands use, so a file is the same bytes whichever door it
+left by. The footer says `exported 1,234 rows to <path>`, or what stopped it.
 
 `?` opens the help over the layout: `<key>  <what it does>` for the keys of
 the focused pane only — `Help · Scratch` — with the key column as wide as the

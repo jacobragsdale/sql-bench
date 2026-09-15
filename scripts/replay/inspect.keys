@@ -1,0 +1,40 @@
+# T5.3: read the whole of a 100 kB cell, then export the set to a file. The
+# container `scripts/db-up.sh` starts has to be up. Run it with a state
+# directory of its own — scripts/qa/run-queries.sh does — or the pad starts
+# with whatever the last run typed into it.
+
+key c
+wait busy
+expect ● local-mssql
+
+key Tab
+type select id, body from bench.big_text order by id
+key Ctrl-R
+wait busy
+expect ╭ Results · 3 rows
+
+# Out of the pad and into the grid: Tab is two spaces while the pad has it.
+key Shift-Tab
+key Shift-Tab
+
+# The third row is the 102,400-character one, and the second column is it.
+key j
+key j
+key l
+key Enter
+expect body · nvarchar · 102,400 chars
+expect Lorem ipsuLorem
+frame inspect
+key Esc
+expect-not 102,400 chars
+
+# The prompt opens prefilled with ~/sql-bench-local-mssql-<stamp>.csv, and
+# Ctrl-U from the end of it is how that is typed over.
+key e
+expect Export to: ~/sql-bench-local-mssql-
+key Ctrl-U
+type /tmp/sql-bench-inspect.csv
+key Enter
+expect exported 3 rows to /tmp/sql-bench-inspect.csv
+frame exported
+key Ctrl-Q

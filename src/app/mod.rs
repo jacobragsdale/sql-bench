@@ -3,6 +3,7 @@
 //! event goes in, a state change and a list of [`Action`]s come out, which is
 //! what makes the whole app testable without either.
 
+pub mod prompt;
 pub mod results;
 pub mod scratch;
 
@@ -17,7 +18,8 @@ use ratatui::layout::Size;
 
 use crate::config::{Config, Kind};
 use crate::db::model::QueryEvent;
-use results::{Hit, Results};
+use prompt::Prompt;
+use results::{Hit, Inspector, Results};
 use scratch::{Outcome, Scratch};
 
 /// Every key this build handles: the key, where it works, what it does.
@@ -70,6 +72,9 @@ pub const KEYS: &[(&str, &str, &str)] = &[
     ("]", RESULTS, "next result set"),
     ("m", RESULTS, "10,000 more rows"),
     ("Enter", RESULTS, "inspect the cell"),
+    ("y", RESULTS, "copy the cell"),
+    ("Y", RESULTS, "copy the row"),
+    ("e", RESULTS, "export the result set"),
 ];
 
 pub const ANYWHERE: &str = "anywhere";
@@ -145,6 +150,12 @@ pub enum Action {
     },
     /// Best effort, into the terminal's clipboard.
     Copy(String),
+    /// Write the result set on screen where the prompt said: JSON for a
+    /// `.json` name, CSV for anything else.
+    Export {
+        tab: usize,
+        path: String,
+    },
 }
 
 /// What the run loop reports back about a connection. The app never opens
@@ -284,6 +295,11 @@ pub struct Shell {
     pub size: Size,
     /// Whether the help overlay is open.
     pub help: bool,
+    /// The open cell inspector, if Enter opened one.
+    pub inspector: Option<Inspector>,
+    /// The open footer prompt, if `e` opened one. While it is there every
+    /// key is a key it is being typed with.
+    pub prompt: Option<Prompt>,
     /// The first row of [`keys_for`] the open overlay shows. `?` and Esc put
     /// it back to the top.
     pub help_scroll: usize,
@@ -500,7 +516,15 @@ impl App {
     }
 
     fn key(&mut self, key: KeyEvent) -> Vec<Action> {
+        // An open prompt is being typed into, so it takes every key before
+        // anything else can claim one — `?` and `q` included.
+        if self.shell.prompt.is_some() {
+            return self.prompt_key(key);
+        }
         if self.shell.help && self.help_key(key) {
+            return Vec::new();
+        }
+        if self.shell.inspector.is_some() && self.inspector_key(key) {
             return Vec::new();
         }
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -524,6 +548,8 @@ impl App {
                 if self.shell.help {
                     self.shell.help = false;
                     self.shell.help_scroll = 0;
+                } else if self.shell.inspector.is_some() {
+                    self.shell.inspector = None;
                 } else if self.tab().is_some_and(|tab| tab.results.running()) {
                     return vec![Action::Cancel(self.shell.active_tab)];
                 } else {
@@ -569,6 +595,64 @@ impl App {
         true
     }
 
+    /// The scroll keys of the open inspector, which the grid under it never
+    /// sees — the same bargain the help overlay strikes.
+    fn inspector_key(&mut self, key: KeyEvent) -> bool {
+        let last = self.inspect_lines().len().saturating_sub(1);
+        let Some(inspector) = self.shell.inspector.as_mut() else {
+            return false;
+        };
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => inspector.scroll += 1,
+            KeyCode::Char('k') | KeyCode::Up => {
+                inspector.scroll = inspector.scroll.saturating_sub(1);
+            }
+            KeyCode::PageDown => inspector.scroll += HELP_PAGE,
+            KeyCode::PageUp => inspector.scroll = inspector.scroll.saturating_sub(HELP_PAGE),
+            _ => return false,
+        }
+        inspector.scroll = inspector.scroll.min(last);
+        true
+    }
+
+    /// Every line of the cell the inspector is open on. The renderer draws
+    /// this and the scroll keys clamp against it, so both agree on how far
+    /// down the value goes.
+    #[must_use]
+    pub fn inspect_lines(&self) -> Vec<String> {
+        self.tab()
+            .and_then(|tab| tab.results.cell())
+            .map(results::inspect_lines)
+            .unwrap_or_default()
+    }
+
+    /// A key the open prompt is being typed with. Enter is what it was
+    /// opened for and Esc is the way out of it; everything else is editing.
+    fn prompt_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        match key.code {
+            KeyCode::Enter => {
+                let path = self.shell.prompt.take().map(|prompt| prompt.text);
+                match path.filter(|path| !path.trim().is_empty()) {
+                    Some(path) => vec![Action::Export {
+                        tab: self.shell.active_tab,
+                        path,
+                    }],
+                    None => Vec::new(),
+                }
+            }
+            KeyCode::Esc => {
+                self.shell.prompt = None;
+                Vec::new()
+            }
+            _ => {
+                if let Some(prompt) = self.shell.prompt.as_mut() {
+                    prompt.handle(key);
+                }
+                Vec::new()
+            }
+        }
+    }
+
     /// A key the result grid handles, and what it asks the run loop for.
     fn results_key(&mut self, key: KeyEvent) -> Vec<Action> {
         let tab = self.shell.active_tab;
@@ -583,10 +667,32 @@ impl App {
                 Vec::new()
             }
             Hit::Inspect => {
-                self.shell.status = "inspector arrives in T5.3".to_owned();
+                if open.results.cell().is_some() {
+                    self.shell.inspector = Some(Inspector::default());
+                }
+                Vec::new()
+            }
+            Hit::CopyCell => match open.results.cell().map(|cell| cell.display().into_owned()) {
+                Some(text) => self.copied(text, "1 cell"),
+                None => Vec::new(),
+            },
+            Hit::CopyRow => match open.results.row_text() {
+                Some(text) => self.copied(text, "1 row"),
+                None => Vec::new(),
+            },
+            Hit::Export => {
+                self.shell.prompt = Some(Prompt::new(prompt::export_path(&open.name)));
                 Vec::new()
             }
         }
+    }
+
+    /// Into the app's own clipboard, and out to the terminal's if it takes
+    /// the escape — `copied 1 cell` either way, because the app cannot know.
+    fn copied(&mut self, text: String, what: &str) -> Vec<Action> {
+        self.shell.status = format!("copied {what}");
+        self.shell.clipboard = text.clone();
+        vec![Action::Copy(text)]
     }
 
     /// A key the pad handles, and what the run loop owes it afterwards.

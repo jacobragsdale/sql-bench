@@ -444,10 +444,12 @@ fn the_grids_keys_move_the_cell_cursor_and_ask_for_what_the_app_cannot_do() {
     assert_eq!(app.tabs[1].results.selected().1, 3, "the last column");
     assert_ne!(app.tabs[1].results.selected(), selected);
 
-    // The two keys that are not the grid's to answer.
+    // The keys that are not the grid's to answer.
     assert_eq!(press(&mut app, "m"), vec![Action::MoreRows { tab: 1 }]);
     assert_eq!(press(&mut app, "Enter"), vec![]);
-    assert_eq!(app.shell.status, "inspector arrives in T5.3");
+    assert!(app.shell.inspector.is_some(), "Enter opens the inspector");
+    press(&mut app, "Esc");
+    assert!(app.shell.inspector.is_none());
 
     // A tab is still a tab and a digit is still a tab, in the grid too.
     assert_eq!(press(&mut app, "c"), vec![Action::Connect(1)]);
@@ -561,4 +563,127 @@ fn f5_runs_every_statement_and_a_failure_says_which_one_it_was() {
     });
     assert_eq!(app.shell.status, "statement 2 of 3 failed");
     assert_eq!(app.tabs[0].scratch.flagged(), Some(&(2..3)));
+}
+
+#[test]
+fn y_copies_the_cell_and_shift_y_the_row_with_a_null_as_nothing() {
+    let mut app = ready(Focus::Results);
+    // The cursor is on row 20, column 1: the long text one.
+    assert_eq!(app.tabs[1].results.selected(), (20, 1));
+    let cell = "row 20 of a value far too long for one column";
+    assert_eq!(
+        press(&mut app, "y"),
+        vec![Action::Copy(cell.to_owned())],
+        "the whole value, not the forty characters the grid drew"
+    );
+    assert_eq!(app.shell.clipboard, cell);
+    assert_eq!(app.shell.status, "copied 1 cell");
+
+    assert_eq!(
+        press(&mut app, "Y"),
+        vec![Action::Copy(format!("20\t{cell}\t\tc3r20"))],
+        "tab-separated, and the NULL column is empty"
+    );
+    assert_eq!(app.shell.status, "copied 1 row");
+
+    // A result set with no rows has no cell to copy and nothing to say.
+    app.tabs[1].results = Results::default();
+    assert_eq!(press(&mut app, "y"), vec![]);
+    assert_eq!(press(&mut app, "Y"), vec![]);
+    assert_eq!(press(&mut app, "Enter"), vec![]);
+    assert!(app.shell.inspector.is_none(), "nothing to inspect");
+}
+
+#[test]
+fn the_open_inspector_takes_the_scroll_keys_and_esc_closes_it_before_an_error() {
+    let mut app = ready(Focus::Results);
+    let row = app.tabs[1].results.selected().0;
+    press(&mut app, "Enter");
+    assert!(app.shell.inspector.is_some());
+
+    for spec in ["j", "Down", "PageDown"] {
+        press(&mut app, spec);
+    }
+    // The cell is 44 characters, so the whole value is one line and the
+    // scroll is clamped to it.
+    assert_eq!(app.shell.inspector.map(|open| open.scroll), Some(0));
+    assert_eq!(
+        app.tabs[1].results.selected().0,
+        row,
+        "the grid never saw the scroll keys"
+    );
+
+    // Esc closes the inspector first; the error waits its turn.
+    press(&mut app, "Esc");
+    assert!(app.shell.inspector.is_none());
+    assert_eq!(app.shell.error.as_deref(), Some("boom"));
+    press(&mut app, "Esc");
+    assert_eq!(app.shell.error, None);
+}
+
+#[test]
+fn the_inspector_scrolls_a_value_longer_than_the_overlay() {
+    let mut app = two_tabs();
+    app.shell.focus = Focus::Results;
+    let mut results = Results::default();
+    results.start(Instant::now(), 0, 1, false);
+    results.apply(QueryEvent::Columns(vec![Column {
+        name: "body".to_owned(),
+        type_name: "nvarchar(max)".to_owned(),
+    }]));
+    results.apply(QueryEvent::Rows(vec![vec![Cell::Text("x".repeat(1_000))]]));
+    app.tabs[0].results = results;
+
+    press(&mut app, "Enter");
+    assert_eq!(app.inspect_lines().len(), 1_000_usize.div_ceil(68));
+    for _ in 0..40 {
+        press(&mut app, "j");
+    }
+    assert_eq!(
+        app.shell.inspector.map(|open| open.scroll),
+        Some(14),
+        "as far as the last line and no further"
+    );
+    press(&mut app, "PageUp");
+    assert_eq!(app.shell.inspector.map(|open| open.scroll), Some(4));
+}
+
+#[test]
+fn e_opens_the_export_prompt_which_then_takes_every_key() {
+    let mut app = ready(Focus::Results);
+    assert_eq!(press(&mut app, "e"), vec![]);
+    let prompt = app.shell.prompt.clone().expect("the prompt");
+    assert!(
+        prompt.text.starts_with("~/sql-bench-local-oracle-"),
+        "prefilled with the tab's connection: {}",
+        prompt.text
+    );
+    assert!(prompt.text.ends_with(".csv"));
+
+    // Every key is one the prompt is being typed with, `?` and q included.
+    press(&mut app, "Ctrl-U");
+    for spec in [
+        "?", "q", "/", "t", "m", "p", "/", "a", ".", "j", "s", "o", "n",
+    ] {
+        press(&mut app, spec);
+    }
+    assert!(!app.shell.help, "? was a character");
+    assert!(!app.shell.should_quit, "q was a character");
+    assert_eq!(
+        press(&mut app, "Enter"),
+        vec![Action::Export {
+            tab: 1,
+            path: "?q/tmp/a.json".to_owned()
+        }]
+    );
+    assert!(app.shell.prompt.is_none(), "Enter closes it");
+
+    // Esc is the way out, and an empty path asks for nothing.
+    press(&mut app, "e");
+    press(&mut app, "Esc");
+    assert!(app.shell.prompt.is_none());
+    press(&mut app, "e");
+    press(&mut app, "Ctrl-U");
+    assert_eq!(press(&mut app, "Enter"), vec![]);
+    assert!(app.shell.prompt.is_none());
 }
