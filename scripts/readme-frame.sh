@@ -13,6 +13,14 @@
 # connect took and the results title how long the query took, and neither is
 # the same twice. The committed frame keeps whatever the run that wrote it
 # measured.
+#
+# Masking the number is not enough on its own. A title's border fill and the
+# footer's gap are what is left of a fixed width after the text, so each loses
+# a character when the clock gains a digit; a mask that rewrote only the
+# number would make this check pass or fail on how busy the machine was. The
+# fill runs are squeezed too, on the lines that carry a clock and nowhere
+# else, so those two lines are compared for their text and not their padding
+# and every other line still pins the layout to the column.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -52,9 +60,25 @@ awk -v frame="$frames/frame" '
 grep -q '<!-- frame:start -->' README.md ||
     { echo "README.md has no <!-- frame:start --> marker" >&2; exit 1; }
 
+# `<n> ms` and `<n>ms` are a clock, not a layout, and neither is the fill that
+# shrank to make room for it.
+clock() {
+    sed -E 's/[0-9][0-9,]* ?ms/N ms/g
+            /N ms/ { s/─+/─/g; s/ {2,}/ /g }' "$1"
+}
+
+# The mask is blind to the clock's width or this check is a coin toss: the
+# same two lines, a one-digit clock against a three-digit one, compare equal.
+clock_mask_ignores_the_clock() {
+    local narrow wide
+    narrow=$(printf '%s\n' '│╭ Results · 15 rows · 1 ms ────╮' ' hints    ● connected 5ms')
+    wide=$(printf '%s\n' '│╭ Results · 15 rows · 123 ms ──╮' ' hints  ● connected 100ms')
+    [ "$(clock <(printf '%s\n' "$narrow"))" = "$(clock <(printf '%s\n' "$wide"))" ] ||
+        { echo "readme-frame: the clock mask still sees the clock's width" >&2; return 1; }
+}
+
 if [ "$check" = 1 ]; then
-    # `<n> ms` and `<n>ms` are a clock, not a layout.
-    clock() { sed -E 's/[0-9]+ ?ms/N ms/g' "$1"; }
+    clock_mask_ignores_the_clock
     if ! diff -u <(clock README.md) <(clock "$frames/README.md"); then
         echo "README.md is not the frame a run writes now: scripts/readme-frame.sh" >&2
         exit 1

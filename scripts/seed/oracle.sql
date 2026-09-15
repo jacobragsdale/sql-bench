@@ -66,6 +66,8 @@ BEGIN
              c_raw            RAW(8),
              c_clob           CLOB,
              c_blob           BLOB)');
+    -- The object tree browses sequences too, so the seed makes one.
+    ddl('CREATE SEQUENCE order_seq START WITH 501 INCREMENT BY 1');
 END;
 /
 
