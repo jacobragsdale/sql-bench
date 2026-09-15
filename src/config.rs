@@ -185,6 +185,14 @@ impl RawConnection {
             }
             _ => {}
         }
+        let port = match self.port {
+            Some(0) => bail!(
+                "port 0 is not a port; leave port out for the default {}",
+                kind.default_port()
+            ),
+            Some(port) => port,
+            None => kind.default_port(),
+        };
         let password = match (self.password, self.password_env, self.password_cmd) {
             (None, None, None) => None,
             (Some(literal), None, None) => Some(Password::Literal(literal)),
@@ -196,7 +204,7 @@ impl RawConnection {
             name: self.name,
             kind,
             host: self.host,
-            port: self.port.unwrap_or_else(|| kind.default_port()),
+            port,
             database: self.database,
             service: self.service,
             user: self.user,
@@ -349,6 +357,40 @@ user = "bench"
     }
 
     #[test]
+    fn a_port_of_zero_is_an_error_naming_the_connection() {
+        assert_eq!(
+            failure(
+                r#"
+[[connection]]
+name = "reports"
+kind = "mssql"
+host = "localhost"
+port = 0
+database = "bench"
+user = "sa"
+"#
+            ),
+            "connection \"reports\": port 0 is not a port; leave port out for the default 1433"
+        );
+    }
+
+    #[test]
+    fn a_name_with_spaces_is_a_name_like_any_other() {
+        let config = read(
+            r#"
+[[connection]]
+name = "prod reporting"
+kind = "mssql"
+host = "localhost"
+database = "bench"
+user = "sa"
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.connection("prod reporting").unwrap().port, 1433);
+    }
+
+    #[test]
     fn the_same_name_twice_is_an_error_naming_it() {
         let doubled = format!("{LOCAL_MSSQL}{LOCAL_MSSQL}");
         assert_eq!(
@@ -451,6 +493,12 @@ password_cmd = "pass show bench"
             config.oracle.client_lib_dir,
             Some(PathBuf::from("/opt/oracle/ic"))
         );
+    }
+
+    #[test]
+    fn a_file_with_only_oracle_is_a_configuration_with_no_connections() {
+        let config = read("[oracle]\nclient_lib_dir = \"/opt/oracle/ic\"\n").unwrap();
+        assert!(config.connections.is_empty(), "{config:?}");
     }
 
     #[test]
