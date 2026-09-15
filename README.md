@@ -61,11 +61,17 @@ headlessly, which is how the project verifies itself:
 
 ```sh
 sql-bench query   --conn local-mssql 'select top 10 * from bench.customers'
-sql-bench objects --conn local-mssql customers
-sql-bench source  --conn local-mssql bench.usp_report
+sql-bench query   --conn local-mssql --format json --max-rows 100 -   # SQL on stdin
+sql-bench objects --conn local-mssql --schema bench --kind procedure
+sql-bench source  --conn local-mssql bench.sp_customer_orders
 sql-bench bench   --conn local-mssql 'select 1'
 ```
 
-The TUI and the subcommands are stubs until their tickets land; each says
-so and exits 2. `docs/DESIGN.md` is the contract they are built against and
+`query` writes rows to stdout — an aligned table, `--format csv` or
+`--format json` — and its `N rows in X ms` footer to stderr, so a pipeline
+reads only the rows. It exits 1 on a database complaint, printing the
+server's own message and nothing at all on stdout.
+
+The TUI and `bench` are stubs until their tickets land; each says so and
+exits 2. `docs/DESIGN.md` is the contract they are built against and
 `docs/backlog.yaml` is the work breakdown.
