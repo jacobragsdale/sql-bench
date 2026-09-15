@@ -1051,6 +1051,9 @@ epics:
     verify:
     - scripts/readme-frame.sh
     - cargo test --all-targets
+    verified: true
+    note: merged to main 2026-09-15; README frame regenerated from a real run, key-table test green, DESIGN
+      audited claim by claim
   - id: T7.3
     tag: qa
     title: 'T7.3 QA: release verification and GitHub publication'
