@@ -20,9 +20,13 @@ time.
 
 ## Local databases
 
+Both run in Docker, from `compose.yaml`; the first `db-up.sh` pulls two
+large images.
+
 ```sh
 scripts/db-up.sh     # SQL Server 2022 and Oracle 23ai Free, seeded
 scripts/db-down.sh
+scripts/db-reset.sh  # throw both away and seed again, about a minute
 ```
 
 `config.local.toml` in this repo names both as `local-mssql` and
@@ -30,7 +34,11 @@ scripts/db-down.sh
 
 ```sh
 SQL_BENCH_CONFIG=config.local.toml cargo run
+SQL_BENCH_TEST_DBS=1 cargo test --all-targets   # the tests that need a database
 ```
+
+Without `SQL_BENCH_TEST_DBS` those tests return early, so `cargo test` on a
+machine with no containers is still green.
 
 ## Configuration
 
@@ -50,6 +58,6 @@ sql-bench source  --conn local-mssql bench.usp_report
 sql-bench bench   --conn local-mssql 'select 1'
 ```
 
-The subcommands are stubs until their tickets land; each says so and exits
-2. `docs/DESIGN.md` is the contract they are built against and
+The TUI and the subcommands are stubs until their tickets land; each says
+so and exits 2. `docs/DESIGN.md` is the contract they are built against and
 `docs/backlog.yaml` is the work breakdown.
