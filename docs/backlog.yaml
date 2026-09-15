@@ -850,6 +850,8 @@ epics:
     - cargo test --all-targets
     - SQL_BENCH_CONFIG=config.local.toml cargo run -- --replay scripts/replay/inspect.keys --size 120x40
       --frames-dir /tmp/sql-bench-frames
+    verified: true
+    note: merged to main 2026-09-15; 265 tests and run-queries.sh 9/9 re-run by the coordinator
   - id: T5.4
     tag: qa
     title: 'T5.4 QA: query workflow end to end on both databases'
