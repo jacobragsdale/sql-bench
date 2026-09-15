@@ -1,0 +1,27 @@
+# Growing, shrinking, going under the minimum and coming back: every size
+# draws the whole layout again, with nothing of the size before it left over.
+
+expect ╭ Objects ─
+resize 60x15
+expect ╭ Objects ─
+expect ╭ Scratch ─
+expect ╭ Results ─
+expect ○ disconnected
+resize 40x10
+expect sql-bench needs 60x15
+expect-not ╭ Objects
+resize 120x40
+expect ╭ Objects ─
+expect ╭ Scratch ─
+expect ╭ Results ─
+expect ○ disconnected
+expect-not sql-bench needs 60x15
+
+# The overlay follows the layout through a resize too.
+key ?
+expect ╭ Help ─
+resize 60x15
+expect ╭ Help ─
+expect Ctrl-Q    anywhere    quit
+resize 120x40
+expect ╭ Help ─

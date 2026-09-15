@@ -48,6 +48,11 @@ pub struct Cli {
     /// Write <name>.styles.txt beside every frame: the colours, run by run
     #[arg(long, global = true)]
     pub frame_styles: bool,
+    /// Panic this many milliseconds into the loop, so QA can check the
+    /// terminal is given back. Debug builds only.
+    #[cfg(debug_assertions)]
+    #[arg(long, global = true, value_name = "MS", hide = true)]
+    pub panic_after_ms: Option<u64>,
     #[command(subcommand)]
     pub command: Option<Command>,
 }

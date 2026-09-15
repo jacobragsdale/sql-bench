@@ -23,6 +23,17 @@ fn run() -> Result<ExitCode> {
     match cli.command {
         Some(_) => cli::run(&cli, &config),
         None if cli.replay.is_some() => run::replay(&config, &cli),
-        None => run::run(&config).map(|()| ExitCode::SUCCESS),
+        None => run::run(&config, panic_after(&cli)).map(|()| ExitCode::SUCCESS),
+    }
+}
+
+/// `--panic-after-ms`, which a release build has no flag for at all.
+fn panic_after(cli: &Cli) -> Option<std::time::Duration> {
+    #[cfg(debug_assertions)]
+    return cli.panic_after_ms.map(std::time::Duration::from_millis);
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = cli;
+        None
     }
 }

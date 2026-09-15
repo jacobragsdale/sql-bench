@@ -53,7 +53,7 @@ fn terminal() -> Terminal<TestBackend> {
 fn drive(input: &mut dyn InputSource, trace: &Trace) -> App {
     let mut app = two_tabs();
     let mut terminal = terminal();
-    run_loop(&mut terminal, &mut app, input, trace).expect("the loop");
+    run_loop(&mut terminal, &mut app, input, trace, None).expect("the loop");
     app
 }
 
@@ -66,6 +66,7 @@ fn a_run_draws_the_layout_and_q_ends_it() {
         &mut app,
         &mut Keys::new(&["Ctrl-T", "q"]),
         &Trace::new(None),
+        None,
     )
     .expect("the loop");
     assert!(app.shell.should_quit);
@@ -112,7 +113,13 @@ fn an_idle_app_draws_one_frame_and_nothing_more() {
     let draw = frames[0].split('\t').nth(2).expect("a draw_ms field");
     let (name, value) = draw.split_once('=').expect("k=v");
     assert_eq!(name, "draw_ms");
-    value.parse::<u64>().expect("milliseconds");
+    // With the fraction: a draw takes well under a millisecond, and a number
+    // rounded to whole ones cannot be held to a budget of five.
+    assert!(
+        value.contains('.'),
+        "draw_ms={value} is a whole millisecond"
+    );
+    value.parse::<f64>().expect("milliseconds");
 }
 
 #[test]

@@ -1,0 +1,8 @@
+# 40x10: one message instead of a layout nobody could read, and no overlay
+# over it either.
+
+expect sql-bench needs 60x15
+expect-not ╭ Objects
+key ?
+expect sql-bench needs 60x15
+expect-not ╭ Help
