@@ -156,3 +156,44 @@ throughout, and the phase tables under each block are where those two
 numbers come from. `cargo test --release -- --ignored` asserts the same
 budgets with a 2x margin against synthetic rows and no database at all.
 
+Nothing missed a budget on the first measurement, so T7.1 changed one cost
+that was merely large: the cell inspector built every line of the open value
+on every key and every frame, which is **4.15 ms** per keystroke at the 1 MiB
+a LOB stops at — a quarter of the key-to-frame budget for one overlay. It now
+counts the lines and builds only the forty the overlay shows, which is
+**1.70 ms**, and what is left of that is counting a megabyte of characters
+for the title's `N chars`. Everything else already cost the window and never
+the scan.
+
+
+### 2026-09-15 (d47ce6e)
+
+| budget | measured | pass |
+|---|---|---|
+| startup to the first frame, no connections < 50 ms | 1 ms | yes |
+| key to frame p95, 10,000 rows on screen < 16 ms | 0.193 ms | yes |
+| draw cost at 100,000 rows over 10,000 (0.108 ms / 0.108 ms) < 1.20 | 1.00 | yes |
+| `select 1` round trip on local-mssql < 5 ms | 0 ms | yes |
+| 1,000,000 row scan at `--max-rows 100000` on local-mssql < 8 s | 95 ms | yes |
+| `select 1` round trip on local-oracle < 5 ms | 0 ms | yes |
+| 1,000,000 row scan at `--max-rows 100000` on local-oracle < 8 s | 77 ms | yes |
+
+20 runs, 5 for the 100k scans.
+
+**local-mssql**
+
+| query | rows | connect | first_row p50 | first_row p95 | total p50 | total p95 | rows/s |
+|---|---|---|---|---|---|---|---|
+| select 1 | 1 | 5 | 0 | 0 | 0 | 0 | 20000 |
+| customers, top 100 | 50 | 5 | 0 | 0 | 0 | 0 | 1000000 |
+| events, 10k cap | 10000 | 5 | 4 | 4 | 13 | 14 | 754716 |
+| events, 100k cap | 100000 | 5 | 5 | 6 | 98 | 108 | 1022494 |
+
+**local-oracle**
+
+| query | rows | connect | first_row p50 | first_row p95 | total p50 | total p95 | rows/s |
+|---|---|---|---|---|---|---|---|
+| select 1 | 1 | 42 | 0 | 0 | 0 | 0 | 20000 |
+| customers, top 100 | 50 | 39 | 0 | 0 | 0 | 0 | 1000000 |
+| events, 10k cap | 10000 | 38 | 0 | 0 | 7 | 8 | 1307189 |
+| events, 100k cap | 100000 | 39 | 0 | 1 | 77 | 99 | 1216545 |
