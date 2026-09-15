@@ -66,3 +66,13 @@ done
 check "NO_COLOR=1 paints nothing" no_color
 check "the terminal after a panic" scripts/qa/panic-restore.sh "$BIN"
 check "draw latency" scripts/qa/draw-latency.sh "$BIN" 16
+check "the scratch pad frame and its persistence" scripts/qa/scratch-frame.sh
+
+# Everything below needs the local databases (scripts/db-up.sh) and stops
+# containers along the way, so it runs only when asked for.
+if [ "${SQL_BENCH_TEST_DBS:-}" = 1 ]; then
+    check "no password leaks" scripts/qa/no-password-leak.sh
+    check "max-rows timing" scripts/qa/max-rows-timing.sh
+    check "connection lifecycle" scripts/qa/connections.sh
+    check "database outage" scripts/qa/db-outage.sh
+fi
