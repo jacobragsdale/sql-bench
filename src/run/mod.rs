@@ -63,37 +63,95 @@ pub trait InputSource {
     /// the loop (see [`run_loop`]), so a source that is still live must not
     /// come up empty twice in a row.
     fn next(&mut self, timeout: Duration) -> Result<Option<Event>>;
+
+    /// Whether more events can still arrive. A source that says no is over,
+    /// and the loop stops keeping it alive for a spinner nobody can see —
+    /// otherwise a dead terminal under `--connect` spins the loop for ever.
+    fn live(&self) -> bool {
+        true
+    }
 }
 
-/// The keyboard, through crossterm.
-// ponytail: a terminal whose input side reaches end of file — `sql-bench
-// </dev/null`, or a pty nobody writes to again — leaves crossterm waiting in
-// `event::read` for bytes that never come, and the app hangs holding the
-// terminal with no key left to quit it. Reading input on a thread is the fix
-// if anyone meets it outside a test harness.
-#[derive(Debug, Default)]
+/// The keyboard, through crossterm, read on a thread of its own.
+///
+/// The loop waits on the channel and never on crossterm, which is what keeps
+/// a terminal it cannot read from becoming a terminal it cannot give back:
+/// `event::read` waiting for bytes that never come blocks its own thread,
+/// and a read that fails — the pty's other end closed, the window shut —
+/// drops the sender and ends the loop cleanly instead of surfacing as an
+/// error raised from inside a redraw.
+///
+/// A run whose own standard input is not a terminal gets no reader at all.
+/// crossterm would quietly read `/dev/tty` instead, which is how `sql-bench
+/// </dev/null` ends up holding raw mode and the alternate screen with no key
+/// left that could quit it.
+// ponytail: a pty that stays open and is never written to again is still
+// indistinguishable from a terminal nobody is typing at, and both wait. A
+// program in raw mode cannot tell them apart; only the input side closing,
+// or this run's own stdin not being a terminal, is a fact rather than a
+// guess.
+#[derive(Debug)]
 pub struct TerminalInput {
+    events: std::sync::mpsc::Receiver<Event>,
     idle: bool,
+    live: bool,
+}
+
+impl Default for TerminalInput {
+    fn default() -> Self {
+        let (sender, events) = std::sync::mpsc::channel();
+        if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            std::thread::spawn(move || {
+                // Ends on a read error, and on the loop hanging up — which
+                // is the app quitting and the receiver going with it.
+                while let Ok(event) = event::read() {
+                    if sender.send(event).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        Self {
+            events,
+            idle: false,
+            live: true,
+        }
+    }
 }
 
 impl InputSource for TerminalInput {
-    /// One poll, and then — having already come up empty once — however long
+    /// One wait, and then — having already come up empty once — however long
     /// it takes: a terminal nobody is typing at is idle, never exhausted, and
-    /// two empty polls in a row would end the loop.
+    /// two empty waits in a row would end the loop.
     ///
     /// The exception is a timeout shorter than the idle one, which is the
     /// loop saying it wants the turn back on time because something is
     /// animating; [`Driver::turn`] does not count those empties.
     fn next(&mut self, timeout: Duration) -> Result<Option<Event>> {
+        use std::sync::mpsc::RecvTimeoutError;
         loop {
-            if event::poll(timeout).context("waiting for a key")? {
-                self.idle = false;
-                return Ok(Some(event::read().context("reading a key")?));
-            }
-            if !std::mem::replace(&mut self.idle, true) || timeout < IDLE_TIMEOUT {
-                return Ok(None);
+            match self.events.recv_timeout(timeout) {
+                Ok(event) => {
+                    self.idle = false;
+                    return Ok(Some(event));
+                }
+                // The reader is gone: no key will ever arrive again, so the
+                // loop is over rather than idle.
+                Err(RecvTimeoutError::Disconnected) => {
+                    self.live = false;
+                    return Ok(None);
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    if !std::mem::replace(&mut self.idle, true) || timeout < IDLE_TIMEOUT {
+                        return Ok(None);
+                    }
+                }
             }
         }
+    }
+
+    fn live(&self) -> bool {
+        self.live
     }
 }
 
@@ -206,6 +264,10 @@ impl InputSource for PanicAfter<'_> {
             "--panic-after-ms: the deliberate panic QA checks the terminal is given back after"
         );
         self.inner.next(timeout)
+    }
+
+    fn live(&self) -> bool {
+        self.inner.live()
     }
 }
 
@@ -334,8 +396,9 @@ impl Driver {
             (false, false) => IDLE_TIMEOUT,
         };
         let Some(first) = input.next(timeout)? else {
-            if spinning || settling {
-                // An app still working is not an exhausted one.
+            if (spinning || settling) && input.live() {
+                // An app still working is not an exhausted one — unless
+                // there is nobody left to watch it work.
                 self.empty = 0;
                 return Ok(true);
             }

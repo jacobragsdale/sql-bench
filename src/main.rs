@@ -5,6 +5,7 @@ use std::process::ExitCode;
 use anyhow::Result;
 use clap::Parser;
 use sql_bench::cli::{self, Cli};
+use sql_bench::trace::Trace;
 use sql_bench::{config, run};
 
 fn main() -> ExitCode {
@@ -15,6 +16,10 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<ExitCode> {
+    // The first thing a traced run writes, before the command line has even
+    // been parsed: startup is the first `frame` line minus this one, and a
+    // clock the shell started itself is the only one both ends share.
+    Trace::from_env().event("start", &[]);
     let cli = Cli::parse();
     let path = cli.config.clone().unwrap_or_else(config::default_path);
     // Read before anything is dispatched: a config that cannot be read is a

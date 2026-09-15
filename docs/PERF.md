@@ -30,9 +30,11 @@ exists.
 
 ## Queries
 
-One block per run of `scripts/perf.sh`, against the containers
-`scripts/db-up.sh` seeds. Milliseconds, nearest-rank percentiles; `connect`
-is the one connect each run of `bench` makes, `rows/s` is over every run.
+Against the containers `scripts/db-up.sh` seeds. Milliseconds, nearest-rank
+percentiles; `connect` is the one connect each run of `bench` makes, `rows/s`
+is over every run. T7.1 moved these tables under **Budgets** below, where
+they are the evidence for the two query budgets; this block is what the
+script recorded before that.
 
 ### 2026-09-14 (a7d0bf8) — 20 runs, 5 for the 100k scans
 
@@ -138,3 +140,19 @@ error occured during the attempt of performing I/O` on SQL Server,
 hanging, and a Ctrl-R on a disconnected tab afterwards connected and returned
 rows in 65 ms and 111 ms. The whole script, both backends and both outages,
 is 35 s.
+
+## Budgets (T7.1)
+
+Every budget `docs/DESIGN.md` sets, measured by `scripts/perf.sh` in a
+release build at 120x40, one block per run. Startup is the median of ten
+runs of `--replay scripts/replay/quit.keys`: the first `frame` line of the
+trace minus the `start` line `main` writes before it parses its arguments.
+Key to frame is the `draw_ms` of the hundred keys
+`scripts/replay/perf-grid.keys` walks over a grid of 10,000 rows, three
+replays pooled, and the row independence is the same measurement at ten
+times the rows. The two query budgets are the `total` p50 of `sql-bench
+bench`, the one connect already paid for. Nearest-rank percentiles
+throughout, and the phase tables under each block are where those two
+numbers come from. `cargo test --release -- --ignored` asserts the same
+budgets with a 2x margin against synthetic rows and no database at all.
+

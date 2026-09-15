@@ -1,0 +1,3 @@
+# Start and stop: what scripts/perf.sh times startup with. The first `frame`
+# line of the trace minus the `start` line is the whole of it.
+key q

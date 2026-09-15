@@ -371,17 +371,18 @@ fn render_inspector(
     let (Some(column), Some(cell)) = (results.column(), results.cell()) else {
         return;
     };
-    let lines = app.inspect_lines();
-    let height = u16::try_from(lines.len())
+    let total = app.inspect_height();
+    let height = u16::try_from(total)
         .unwrap_or(u16::MAX)
         .saturating_add(2)
         .min(area.height.saturating_sub(2));
     let overlay = centered(area, INSPECT_WIDTH as u16 + 4, height);
     let showing = usize::from(height.saturating_sub(2));
-    let top = inspector.scroll.min(lines.len().saturating_sub(showing));
-    let body: Vec<Line> = lines[top..(top + showing).min(lines.len())]
-        .iter()
-        .map(|line| Line::raw(line.clone()))
+    let top = inspector.scroll.min(total.saturating_sub(showing));
+    let body: Vec<Line> = app
+        .inspect_lines(top, showing)
+        .into_iter()
+        .map(Line::raw)
         .collect();
     frame.render_widget(Clear, overlay);
     frame.render_widget(

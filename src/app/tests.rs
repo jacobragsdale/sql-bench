@@ -672,7 +672,7 @@ fn the_inspector_scrolls_a_value_longer_than_the_overlay() {
     app.tabs[0].results = results;
 
     press(&mut app, "Enter");
-    assert_eq!(app.inspect_lines().len(), 1_000_usize.div_ceil(68));
+    assert_eq!(app.inspect_height(), 1_000_usize.div_ceil(68));
     for _ in 0..40 {
         press(&mut app, "j");
     }

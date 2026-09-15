@@ -677,23 +677,37 @@ pub fn inspect_title(column: &Column, cell: &Cell) -> String {
     format!("{} · {} · {size}", column.name, column.type_name)
 }
 
-// ponytail: every line of the value is built on every key and every frame,
-// so the 1 MiB a LOB stops at is 1 MiB formatted per keystroke. Cheap enough
-// for a value a person opened on purpose; window it if a megabyte of hex ever
-// shows up in a trace.
-/// The whole of one cell, a line at a time: text wrapped at
-/// [`INSPECT_WIDTH`] with its own line breaks kept, bytes as a hex dump, and
-/// NULL as the word the grid shows.
+/// How many lines the whole of one cell comes to: text wrapped at
+/// [`INSPECT_WIDTH`] with its own line breaks kept, bytes as a hex dump,
+/// and NULL as the one word the grid shows.
+///
+/// Counted rather than built, because this is what a scroll key clamps
+/// against and what the overlay is sized by — and the 1 MiB a LOB stops at
+/// would otherwise be 1 MiB formatted per keystroke.
 #[must_use]
-pub fn inspect_lines(cell: &Cell) -> Vec<String> {
+pub fn inspect_height(cell: &Cell) -> usize {
+    match cell {
+        Cell::Null => 1,
+        Cell::Bytes(bytes) => bytes.len().div_ceil(HEX_PER_LINE),
+        other => wrapped_height(&other.display()),
+    }
+}
+
+/// The `count` lines of that value from `top`, and no others. A value is as
+/// long as a LOB is allowed to be and an overlay is forty lines tall, so
+/// what a frame costs is the overlay and never the value.
+#[must_use]
+pub fn inspect_lines(cell: &Cell, top: usize, count: usize) -> Vec<String> {
     match cell {
         Cell::Null => vec!["NULL".to_owned()],
         Cell::Bytes(bytes) => bytes
             .chunks(HEX_PER_LINE)
             .enumerate()
+            .skip(top)
+            .take(count)
             .map(|(line, chunk)| hex_line(line * HEX_PER_LINE, chunk))
             .collect(),
-        other => wrapped(&other.display()),
+        other => wrapped(&other.display(), top, count),
     }
 }
 
@@ -729,24 +743,41 @@ fn hex_line(offset: usize, chunk: &[u8]) -> String {
     text
 }
 
-/// The text in lines of [`INSPECT_WIDTH`] characters, cut where it is too
-/// long and broken where it breaks itself.
-fn wrapped(text: &str) -> Vec<String> {
-    let mut lines = Vec::new();
-    for paragraph in text.split('\n') {
-        let mut characters = paragraph
-            .strip_suffix('\r')
-            .unwrap_or(paragraph)
-            .chars()
-            .peekable();
-        loop {
-            lines.push(characters.by_ref().take(INSPECT_WIDTH).collect::<String>());
-            // A paragraph exactly as wide as the overlay is one line and not
-            // one line and an empty one.
-            if characters.peek().is_none() {
-                break;
+/// One paragraph of the text, its trailing carriage return dropped, as the
+/// overlay wraps it: the [`INSPECT_WIDTH`] characters of each line.
+fn paragraphs(text: &str) -> impl Iterator<Item = &str> {
+    text.split('\n')
+        .map(|paragraph| paragraph.strip_suffix('\r').unwrap_or(paragraph))
+}
+
+/// How many lines the wrapped text comes to. A paragraph exactly as wide as
+/// the overlay is one line and not one line and an empty one, and an empty
+/// paragraph is still a line.
+fn wrapped_height(text: &str) -> usize {
+    paragraphs(text)
+        .map(|paragraph| paragraph.chars().count().div_ceil(INSPECT_WIDTH).max(1))
+        .sum()
+}
+
+/// The `count` wrapped lines from `top`, cut where the text is too long and
+/// broken where it breaks itself. Only those lines are built: the rest of
+/// the value is counted past, not formatted.
+fn wrapped(text: &str, top: usize, count: usize) -> Vec<String> {
+    let mut lines = Vec::with_capacity(count.min(64));
+    let mut line = 0;
+    for paragraph in paragraphs(text) {
+        let height = paragraph.chars().count().div_ceil(INSPECT_WIDTH).max(1);
+        if line + height > top {
+            let skip = top.saturating_sub(line);
+            let mut characters = paragraph.chars().skip(skip * INSPECT_WIDTH);
+            for _ in skip..height {
+                if lines.len() == count {
+                    return lines;
+                }
+                lines.push(characters.by_ref().take(INSPECT_WIDTH).collect());
             }
         }
+        line += height;
     }
     lines
 }

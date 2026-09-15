@@ -289,14 +289,14 @@ key q
 `scripts/qa.sh` runs every check that needs no database, one line each: the
 QA replay scripts in `scripts/replay/qa/` at 60x15, 80x24, 120x40, 200x60 and
 40x10, a resize mid-run, the quit keys from every pane, `NO_COLOR` against a
-`--frame-styles` dump, the terminal restore below and the draw latency. CI
-runs it.
+`--frame-styles` dump, the two terminal-restore checks below and the draw
+latency. CI runs it.
 
 ### Terminal restore
 
-Three ways out of a run, and all three give the terminal back. A quit (`q`,
-`Ctrl-Q`) returns from the loop and an error returns `Err` up to `main`: both
-drop the `Restore` guard in `src/run/mod.rs`. A panic runs the hook
+Four ways out of a run, and all four give the terminal back. A quit (`q`,
+`Ctrl-Q`), an input that ran out, and an error returning `Err` up to `main`
+all drop the `Restore` guard in `src/run/mod.rs`. A panic runs the hook
 `ratatui::try_init` installed. Guard and hook do the same two things — raw
 mode off, then the alternate screen left — and the terminal's own `Drop`
 shows the cursor after them. The hook restores *before* it prints, so a panic
@@ -311,23 +311,44 @@ no key has to arrive for it to fire — and asserts that the capture has the
 shell drawn on it, that the run exits 101, and that `\e[?1049l\e[?25h` comes
 after the panic message and is the last thing written.
 
+Input that ran out is the fourth way, and T7.1's: keys are read on a thread
+of their own into an `mpsc` channel, so the loop waits on the channel and
+never inside crossterm. A read that fails — the pty's other end closed, the
+window shut — drops the sender, and `TerminalInput` then says it is no longer
+live, which ends the loop rather than keeping it alive for a spinner nobody
+can see. A run whose own standard input is not a terminal gets no reader at
+all: crossterm would quietly read `/dev/tty` instead, which is how `sql-bench
+</dev/null` used to hold raw mode and the alternate screen with no key left
+that could quit it. `scripts/qa/stdin-eof.sh` runs that under `script` and
+asserts the shell was drawn, the run exits 0 inside two seconds, and
+`\e[?1049l\e[?25h` is the last thing written.
+
 ## Trace format
 
 `SQL_BENCH_TRACE=<file>` appends one line per event: `unix_ms\tkind\tk=v...`.
-Unset, no clock is read at all.
+Unset, no clock is read at all. `start` is written before the command line
+has been parsed, so that startup is the first `frame` minus it and not a
+shell's idea of when the process began.
 
 | kind | fields |
 |---|---|
+| start | — |
 | connect | conn, ms |
 | query | conn, rows, truncated, connect_ms, first_row_ms, total_ms |
 | results | rows, batches, first_batch_ms |
 | frame | draw_ms |
 | turn | total_ms, draw_ms, input_ms |
 
-## Budgets *(T7.1 records the numbers in PERF.md)*
+## Budgets
 
 Startup < 50 ms, key-to-frame p95 < 16 ms, draw cost independent of rows
 fetched, `select 1` < 5 ms after connect, 1M-row scan at 100k rows < 8 s.
+
+`scripts/perf.sh` measures every one of them and appends the table to
+[PERF.md](PERF.md) with the commit it measured, and fails if one was missed.
+`cargo test --release -- --ignored` asserts the same budgets with a 2x
+margin against rows it makes up, so a regression is a red test on a machine
+with no database on it.
 
 ## Decisions log *(T7.2)*
 
