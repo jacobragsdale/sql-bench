@@ -1,0 +1,19 @@
+# The smoke replay: open the shell, read the help, quit. CI runs this against
+# config.local.toml, which names two connections and connects to neither, so
+# no database has to be up.
+
+expect 1 local-mssql ○  2 local-oracle ○
+frame shell
+
+key ?
+expect ╭ Help
+expect Ctrl-T    anywhere    next tab
+frame help
+key Esc
+expect-not ╭ Help
+
+key Tab
+expect ╭ Scratch
+key Shift-Tab
+
+key q

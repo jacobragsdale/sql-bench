@@ -176,6 +176,16 @@ impl App {
         self.tabs.get(self.shell.active_tab)
     }
 
+    /// Whether anything is still in flight: a tab connecting, and from E5 a
+    /// query running too. This is what a replay's `wait busy` waits out, so
+    /// it answers for the whole app and not just the tab on screen.
+    #[must_use]
+    pub fn busy(&self) -> bool {
+        self.tabs
+            .iter()
+            .any(|tab| tab.state == TabState::Connecting)
+    }
+
     /// One event, turned into state changes and whatever has to happen
     /// outside the app.
     pub fn handle(&mut self, event: Event) -> Vec<Action> {

@@ -117,10 +117,84 @@ columns, source. Never touches table data.
 | ? | anywhere | help |
 | q / Ctrl-Q | not Scratch / anywhere | quit |
 
-## Verifying *(T3.2 fills in the replay format)*
+## Verifying
 
 ```
-SQL_BENCH_CONFIG=config.local.toml sql-bench --replay scripts/replay/run-mssql.keys --size 120x40 --frames-dir /tmp/f
+SQL_BENCH_CONFIG=config.local.toml sql-bench --replay scripts/replay/smoke.keys --size 120x40 --frames-dir /tmp/f
+```
+
+`--replay FILE` runs the real loop — the real app, the real rendering, the
+real key handling — against a `ratatui::backend::TestBackend` of `--size`
+(default 120x40), with the keys in FILE instead of a keyboard. No raw mode,
+no alternate screen, nothing written to the terminal; `NO_COLOR` is honoured
+exactly as it is in a real run. `frame` writes into `--frames-dir` (default
+`./frames`, created if missing).
+
+### Commands
+
+One per line. Blank lines and lines whose first non-space character is `#`
+are ignored. Every argument is trimmed except `type`'s and `paste`'s, which
+are the rest of the line exactly as written.
+
+| command | does |
+|---|---|
+| `key <name>` | one key press, as crossterm would deliver it |
+| `type <text>` | one key press per character, spaces included |
+| `paste <text>` | one `Event::Paste` with the whole text |
+| `resize <cols>x<rows>` | resize the backend and send `Event::Resize` |
+| `wait busy` | until nothing is connecting or running; 60 s, then exit 3 |
+| `wait <ms>` | sleep that many milliseconds |
+| `wait text <substring>` | until the substring is on the frame; 30 s, then exit 3 |
+| `frame <name>` | write `<frames-dir>/<name>.txt` now |
+| `expect <substring>` | the substring is on the frame, or exit 4 |
+| `expect-not <substring>` | the substring is not on the frame, or exit 4 |
+
+### Key names
+
+`Enter`, `Esc`, `Tab`, `BackTab` (also spelled `Shift-Tab`), `Up`, `Down`,
+`Left`, `Right`, `PageUp`, `PageDown`, `Home`, `End`, `Backspace`, `Delete`,
+`Insert`, `Space`, `F1`-`F12`, and any single character (`q`, `?`, `1`).
+`Ctrl-<key>` and `Alt-<key>` add that modifier to any of them, so `Ctrl-Q`,
+`Alt-x` and `Ctrl-F5` are all keys. Anything else is an error naming the
+line.
+
+### Frames
+
+```
+# help 120x40
+ 1 local-mssql ●  2 local-oracle ○
+╭ Objects ────────────╮╭ Scratch ──────────────────────╮
+```
+
+A header of `# <name> <cols>x<rows>`, then one line per row with the padding
+trimmed off the right and every box-drawing character kept. With
+`--frame-styles` a second file, `<name>.styles.txt`, lists the runs of cells
+that share a style — `<row> <from>..<to> fg=<colour> bg=<colour>
+mod=<modifiers>` — so a colour can be asserted without a screenshot.
+
+### Exit codes
+
+| code | means |
+|---|---|
+| 0 | the script ran to its end |
+| 1 | something else went wrong (no such file, a bad line, unwritable frames) |
+| 3 | a `wait` gave up; the frame is written as `<frames-dir>/timeout.txt` |
+| 4 | an `expect` or `expect-not` was wrong; the frame goes to stderr |
+
+Every failure names the line of the script it happened on.
+
+### An example
+
+```
+# scripts/replay/smoke.keys
+expect 1 local-mssql ○  2 local-oracle ○
+frame shell
+key ?
+expect Ctrl-T    anywhere    next tab
+frame help
+key Esc
+expect-not ╭ Help
+key q
 ```
 
 ## Trace format *(T2.4)*

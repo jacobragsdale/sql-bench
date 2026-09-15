@@ -2,8 +2,12 @@
 //! changed, carrying out what the app asked for, and the trace file. The only
 //! module that blocks.
 
+pub mod replay;
+
 #[cfg(test)]
 mod tests;
+
+pub use replay::replay;
 
 use std::time::{Duration, Instant};
 
@@ -108,34 +112,80 @@ pub fn run_loop<B: Backend>(
 where
     B::Error: std::error::Error + Send + Sync + 'static,
 {
-    let theme = Theme::from_env();
-    let mut dirty = true;
-    let mut empty = 0u8;
-    while !app.shell.should_quit {
+    let mut driver = Driver::new(Theme::from_env());
+    while driver.turn(terminal, app, input, trace)? {}
+    Ok(())
+}
+
+/// What one turn of the loop carries over to the next, so the loop can be
+/// taken a turn at a time.
+///
+/// [`run_loop`] is this in a `while`, and that is all it is. [`replay`] takes
+/// the turns itself because it has to look at the screen and the app between
+/// keys — which the loop, being generic over its backend, cannot hand out.
+/// Nothing else should: a caller that forgets to check [`Driver::turn`]'s
+/// answer never stops.
+#[derive(Debug)]
+pub struct Driver {
+    theme: Theme,
+    dirty: bool,
+    empty: u8,
+}
+
+impl Driver {
+    /// A driver whose first turn draws, because nothing has been drawn yet.
+    #[must_use]
+    pub const fn new(theme: Theme) -> Self {
+        Self {
+            theme,
+            dirty: true,
+            empty: 0,
+        }
+    }
+
+    /// Draw if something changed, wait for input, handle everything already
+    /// queued, carry out what the app asked for.
+    ///
+    /// `Ok(false)` means the loop is over: the app asked to quit, or `input`
+    /// is exhausted. Taking further turns after that is allowed and does
+    /// nothing surprising — it is how a replay's `wait` lets the app make
+    /// progress — but a quit app is never handed another event.
+    pub fn turn<B: Backend>(
+        &mut self,
+        terminal: &mut Terminal<B>,
+        app: &mut App,
+        input: &mut dyn InputSource,
+        trace: &Trace,
+    ) -> Result<bool>
+    where
+        B::Error: std::error::Error + Send + Sync + 'static,
+    {
+        if app.shell.should_quit {
+            return Ok(false);
+        }
         let mut drew = Duration::ZERO;
-        if dirty {
+        if self.dirty {
             let at = Instant::now();
-            terminal.draw(|frame| ui::render(frame, app, &theme))?;
-            dirty = false;
+            terminal.draw(|frame| ui::render(frame, app, &self.theme))?;
+            self.dirty = false;
             drew = at.elapsed();
             if trace.is_on() {
                 trace.event("frame", &[("draw_ms", &millis(drew))]);
             }
         }
         let Some(first) = input.next(IDLE_TIMEOUT)? else {
-            empty += 1;
-            if empty >= 2 {
-                break;
-            }
-            continue;
+            // Saturating because a replay keeps turning the loop through a
+            // wait, long after it has counted to two.
+            self.empty = self.empty.saturating_add(1);
+            return Ok(self.empty < 2);
         };
-        empty = 0;
+        self.empty = 0;
         // Everything already queued is handled before the screen is painted
         // again, so a burst of keys is one frame rather than one frame each.
         let handling = Instant::now();
         let mut event = Some(first);
         while let Some(this) = event {
-            dirty = true;
+            self.dirty = true;
             for action in app.handle(this) {
                 match action {
                     Action::Quit => app.shell.should_quit = true,
@@ -146,7 +196,7 @@ where
             }
             event = input.next(Duration::ZERO)?;
             if event.is_none() {
-                empty += 1;
+                self.empty = self.empty.saturating_add(1);
             }
         }
         let input_ms = handling.elapsed();
@@ -160,8 +210,8 @@ where
                 ],
             );
         }
+        Ok(!app.shell.should_quit)
     }
-    Ok(())
 }
 
 fn millis(elapsed: Duration) -> String {
