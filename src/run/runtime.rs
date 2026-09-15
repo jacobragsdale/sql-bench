@@ -7,6 +7,7 @@
 //! The app is told what happened through [`RuntimeEvent`], never by this
 //! module reaching into its state.
 
+use std::collections::VecDeque;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
@@ -16,7 +17,8 @@ use crate::app::results::MORE_ROWS;
 use crate::app::{App, RuntimeEvent};
 use crate::cli::Cli;
 use crate::config::Config;
-use crate::db::model::{QueryEvent, QueryOptions};
+use crate::db::catalog::CatalogRequest;
+use crate::db::model::{Cell, QueryEvent, QueryOptions};
 use crate::db::{self, Connection};
 use crate::trace::Trace;
 
@@ -59,6 +61,21 @@ pub struct TabRuntime {
     cap: usize,
     /// The last statement run, so `m` can run it again for more of it.
     last: Option<String>,
+    /// The catalog query the object tree is waiting on, and the ones behind
+    /// it. A tab's worker takes one request at a time, so two branches
+    /// opened in the same breath are run one after the other rather than
+    /// racing for the one channel.
+    catalog: Option<Loading>,
+    waiting: VecDeque<CatalogRequest>,
+}
+
+/// One catalog query in flight: what was asked, where the rows arrive and
+/// the ones that have.
+#[derive(Debug)]
+struct Loading {
+    request: CatalogRequest,
+    events: Receiver<QueryEvent>,
+    rows: Vec<Vec<Cell>>,
 }
 
 /// What one statement is being started as: the SQL, what follows it in a
@@ -163,6 +180,8 @@ impl Runtime {
         runtime.started = None;
         runtime.queued = None;
         runtime.running = None;
+        runtime.catalog = None;
+        runtime.waiting.clear();
         app.apply(RuntimeEvent::Disconnected { tab });
     }
 
@@ -202,8 +221,13 @@ impl Runtime {
                     }
                 }
             };
+            let connected = matches!(event, RuntimeEvent::Connected { .. });
             app.apply(event);
             dirty = true;
+            if connected {
+                // The tree is empty until something asks: this is the ask.
+                self.load(app, tab, CatalogRequest::Schemas);
+            }
             if let Some(request) = self
                 .tabs
                 .get_mut(tab)
@@ -381,6 +405,113 @@ impl Runtime {
             }
             if let Some(start) = next {
                 self.begin(app, tab, start);
+            }
+        }
+        dirty
+    }
+
+    /// Fill a branch of the object tree, or fetch what `i` and `s` show.
+    ///
+    /// A catalog query is an ordinary query on the tab's own connection —
+    /// the same channel, the same worker — so the UI waits for it exactly as
+    /// little as it waits for anything else.
+    pub fn load(&mut self, app: &mut App, tab: usize, request: CatalogRequest) {
+        let Some(runtime) = self.tabs.get_mut(tab) else {
+            return;
+        };
+        if runtime.connection.is_none() {
+            app.apply(RuntimeEvent::Catalog {
+                tab,
+                request,
+                result: Err(db::model::DbError::Connect("not connected".to_owned())),
+            });
+            return;
+        }
+        app.catalog_started(tab, &request);
+        if runtime.catalog.is_some() {
+            runtime.waiting.push_back(request);
+            return;
+        }
+        self.begin_load(tab, request);
+    }
+
+    /// Hand one catalog query to the driver.
+    fn begin_load(&mut self, tab: usize, request: CatalogRequest) {
+        let Some(runtime) = self.tabs.get_mut(tab) else {
+            return;
+        };
+        let Some(connection) = runtime.connection.as_ref() else {
+            return;
+        };
+        let events = connection.query(
+            &request.sql(connection.kind()),
+            QueryOptions {
+                batch_size: BATCH,
+                // A listing is as long as it is; half a schema would be a
+                // tree that quietly lies about what is in the database.
+                max_rows: None,
+            },
+        );
+        runtime.catalog = Some(Loading {
+            request,
+            events,
+            rows: Vec::new(),
+        });
+    }
+
+    /// Everything the catalog queries have reported since the last turn.
+    pub fn poll_catalog(&mut self, app: &mut App) -> bool {
+        let mut dirty = false;
+        for tab in 0..self.tabs.len() {
+            let Some(runtime) = self.tabs.get_mut(tab) else {
+                continue;
+            };
+            let backend = runtime.connection.as_ref().map(Connection::kind);
+            let mut answer = None;
+            if let (Some(loading), Some(backend)) = (runtime.catalog.as_mut(), backend) {
+                loop {
+                    let event = match loading.events.try_recv() {
+                        Ok(event) => event,
+                        Err(TryRecvError::Empty) => break,
+                        // Only a panicked worker ends the channel without
+                        // saying why, and a row that says `…` for ever is
+                        // worse than one that says what happened.
+                        Err(TryRecvError::Disconnected) => {
+                            QueryEvent::Error(db::model::DbError::Connect(
+                                "the connection's worker has stopped".to_owned(),
+                            ))
+                        }
+                    };
+                    match event {
+                        QueryEvent::Rows(batch) => loading.rows.extend(batch),
+                        QueryEvent::Done { .. } => {
+                            let rows = std::mem::take(&mut loading.rows);
+                            answer = Some(loading.request.answer(backend, rows));
+                            break;
+                        }
+                        QueryEvent::Error(error) => {
+                            answer = Some(Err(error));
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            let Some(result) = answer else {
+                continue;
+            };
+            dirty = true;
+            let request = runtime.catalog.take().map(|loading| loading.request);
+            let next = runtime.waiting.pop_front();
+            if let Some(request) = request {
+                app.apply(RuntimeEvent::Catalog {
+                    tab,
+                    request,
+                    result,
+                });
+            }
+            if let Some(next) = next {
+                self.begin_load(tab, next);
             }
         }
         dirty

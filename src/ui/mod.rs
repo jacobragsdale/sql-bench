@@ -1,6 +1,7 @@
 //! Rendering: state in, a `ratatui::Frame` out, and the theme the frame is
 //! drawn with. Never reads a database and never decides anything.
 
+mod objects;
 mod results;
 pub mod theme;
 
@@ -11,7 +12,7 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph};
 
 use crate::app::prompt::Prompt;
 use crate::app::results::{INSPECT_WIDTH, Inspector, inspect_title};
@@ -75,14 +76,7 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
         Layout::vertical([Constraint::Percentage(40), Constraint::Min(3)]).areas(right);
 
     frame.render_widget(tab_bar(app, theme), bar);
-    pane(
-        frame,
-        app,
-        theme,
-        Focus::Objects,
-        objects,
-        vec![placeholder("press c to connect", theme)],
-    );
+    objects::render(frame, app, theme, objects);
     scratch_pane(frame, app, theme, scratch);
     results::render(frame, app, theme, results);
     frame.render_widget(footer_line(app, theme, area.width), footer);
@@ -222,28 +216,6 @@ fn scratch_lines(
 
 fn placeholder(text: &str, theme: &Theme) -> Line<'static> {
     Line::from(Span::styled(text.to_owned(), theme.dim))
-}
-
-/// One bordered pane around whatever it has to show.
-fn pane(
-    frame: &mut Frame,
-    app: &App,
-    theme: &Theme,
-    which: Focus,
-    area: Rect,
-    body: Vec<Line<'static>>,
-) {
-    let focused = app.shell.focus == which;
-    let (title_style, border_style) = if focused {
-        (theme.accent, theme.accent)
-    } else {
-        (theme.dim, theme.border)
-    };
-    let block = titled(&format!(" {} ", which.title()), title_style, border_style);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    // Wrapped: a driver's complaint is as long as the driver made it.
-    frame.render_widget(Paragraph::new(body).wrap(Wrap { trim: false }), inner);
 }
 
 /// Key hints on the left — or the error, or the status — and where the tab's

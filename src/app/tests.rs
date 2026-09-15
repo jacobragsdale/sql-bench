@@ -2,7 +2,9 @@
 
 use super::*;
 use crate::config::{Config, Connection};
+use crate::db::catalog::{CatalogAnswer, CatalogRequest, DbObject, ObjectKind};
 use crate::db::model::{Cell, Column, QueryEvent};
+use objects::Objects;
 use results::Results;
 
 /// The two connections `config.local.toml` names, which is what the dev loop
@@ -73,6 +75,38 @@ pub(crate) fn filled(rows: usize, columns: usize) -> Results {
     results
 }
 
+/// One object of a listing, as the catalog reports it.
+pub(crate) fn object(schema: &str, name: &str, kind: ObjectKind) -> DbObject {
+    DbObject {
+        schema: schema.to_owned(),
+        name: name.to_owned(),
+        kind,
+        modified: Some("2025-01-01 00:00:00".to_owned()),
+    }
+}
+
+/// A tree with a schema open, its tables loaded and the cursor on one of
+/// them — which is where every key of the objects pane has something to do.
+pub(crate) fn browsed(backend: Kind) -> Objects {
+    let mut objects = Objects::new(backend, "bench");
+    let schemas = CatalogAnswer::Schemas(vec!["dbo".to_owned(), "bench".to_owned()]);
+    objects.answer(&CatalogRequest::Schemas, &Ok(schemas));
+    // The own schema is open already, so this is its Tables branch.
+    objects.key(key("j"));
+    objects.key(key("l"));
+    let request = CatalogRequest::Objects {
+        schema: "dbo".to_owned(),
+        kind: ObjectKind::Table,
+    };
+    let listing = CatalogAnswer::Objects(vec![
+        object("dbo", "customers", ObjectKind::Table),
+        object("dbo", "orders", ObjectKind::Table),
+    ]);
+    objects.answer(&request, &Ok(listing));
+    objects.key(key("j"));
+    objects
+}
+
 pub(crate) fn two_tabs() -> App {
     App::new(&two_connections())
 }
@@ -103,6 +137,7 @@ pub(crate) fn key(spec: &str) -> KeyEvent {
         "Backspace" => KeyCode::Backspace,
         "Delete" => KeyCode::Delete,
         "Home" => KeyCode::Home,
+        "Space" => KeyCode::Char(' '),
         "End" => KeyCode::End,
         "Up" => KeyCode::Up,
         "Down" => KeyCode::Down,
@@ -145,6 +180,7 @@ fn ready(focus: Focus) -> App {
     // so Ctrl-C has something to copy.
     scratch.handle(key("x"));
     scratch.handle(key("Shift-Left"));
+    app.tabs[1].objects = browsed(app.tabs[1].kind);
     // A grid with somewhere to move in every direction, a second set for
     // `[` and `]`, and a cap that stopped it so `m` has more to fetch.
     let results = &mut app.tabs[1].results;
@@ -178,6 +214,7 @@ fn every_key_the_help_lists_is_handled_where_it_says_it_works() {
                 NOT_SCRATCH => focus == Focus::Scratch,
                 SCRATCH => focus != Focus::Scratch,
                 RESULTS => focus != Focus::Results,
+                OBJECTS => focus != Focus::Objects,
                 _ => false,
             };
             if elsewhere {
@@ -686,4 +723,411 @@ fn e_opens_the_export_prompt_which_then_takes_every_key() {
     press(&mut app, "Ctrl-U");
     assert_eq!(press(&mut app, "Enter"), vec![]);
     assert!(app.shell.prompt.is_none());
+}
+
+/// The rows the tree would draw, as `<indent><name>` — which is the flat
+/// list, its depths and what is expanded, all in one assertion.
+fn rows(objects: &Objects) -> Vec<String> {
+    objects
+        .visible()
+        .into_iter()
+        .map(|index| {
+            let node = &objects.nodes()[index];
+            format!("{:width$}{}", "", node.item.name(), width = node.depth * 2)
+        })
+        .collect()
+}
+
+/// Put the cursor on the row with this name, from the top.
+fn go_to(objects: &mut Objects, name: &str) {
+    objects.key(key("g"));
+    for _ in 0..objects.nodes().len() {
+        if objects.nodes()[objects.cursor()].item.name() == name {
+            return;
+        }
+        objects.key(key("j"));
+    }
+    panic!("no {name} in {:?}", rows(objects));
+}
+
+/// An app connected to its second tab with a tree on it, which is what every
+/// objects test starts from.
+fn browsing() -> App {
+    let mut app = two_tabs();
+    app.shell.active_tab = 1;
+    app.tabs[1].objects = browsed(Kind::Oracle);
+    app
+}
+
+#[test]
+fn the_schema_list_puts_the_connections_own_schema_first_and_opens_it() {
+    let mut objects = Objects::new(Kind::Oracle, "bench");
+    objects.answer(
+        &CatalogRequest::Schemas,
+        &Ok(CatalogAnswer::Schemas(vec![
+            "APP".to_owned(),
+            "BENCH".to_owned(),
+            "PDBADMIN".to_owned(),
+        ])),
+    );
+    assert_eq!(
+        rows(&objects),
+        [
+            "BENCH",
+            "  Tables",
+            "  Views",
+            "  Procedures",
+            "  Functions",
+            "  Packages",
+            "  Sequences",
+            "APP",
+            "PDBADMIN",
+        ],
+        "the schema it connected to is the one it opens, and Oracle is the \
+         one backend with packages"
+    );
+
+    let mut mssql = Objects::new(Kind::Mssql, "sa");
+    mssql.answer(
+        &CatalogRequest::Schemas,
+        &Ok(CatalogAnswer::Schemas(vec![
+            "bench".to_owned(),
+            "dbo".to_owned(),
+        ])),
+    );
+    assert_eq!(
+        rows(&mssql),
+        [
+            "dbo",
+            "  Tables",
+            "  Views",
+            "  Procedures",
+            "  Functions",
+            "  Sequences",
+            "bench",
+        ],
+        "a login lands in dbo, and no SQL Server has a package"
+    );
+}
+
+#[test]
+fn a_branch_loads_once_and_opens_and_closes_without_asking_again() {
+    let mut objects = Objects::new(Kind::Mssql, "sa");
+    objects.answer(
+        &CatalogRequest::Schemas,
+        &Ok(CatalogAnswer::Schemas(vec!["dbo".to_owned()])),
+    );
+    objects.key(key("j"));
+    let request = CatalogRequest::Objects {
+        schema: "dbo".to_owned(),
+        kind: ObjectKind::Table,
+    };
+    assert_eq!(objects.key(key("l")), objects::Hit::Load(request.clone()));
+    objects.started(&request);
+    assert!(objects.busy(), "the answer has not come back yet");
+    assert!(
+        objects.nodes()[1].loading,
+        "and the row says so until it does"
+    );
+
+    objects.answer(
+        &request,
+        &Ok(CatalogAnswer::Objects(vec![object(
+            "dbo",
+            "customers",
+            ObjectKind::Table,
+        )])),
+    );
+    assert!(!objects.busy());
+    assert!(!objects.nodes()[1].loading);
+    let open = [
+        "dbo",
+        "  Tables",
+        "    customers",
+        "  Views",
+        "  Procedures",
+        "  Functions",
+        "  Sequences",
+    ];
+    let closed = [
+        "dbo",
+        "  Tables",
+        "  Views",
+        "  Procedures",
+        "  Functions",
+        "  Sequences",
+    ];
+    assert_eq!(rows(&objects), open);
+
+    // Closed and opened again, it asks nothing: the answer is still here.
+    assert_eq!(objects.key(key("Space")), objects::Hit::Moved);
+    assert_eq!(rows(&objects), closed);
+    assert_eq!(objects.key(key("Space")), objects::Hit::Moved);
+    assert_eq!(rows(&objects), open);
+
+    // `r` is how it is asked again.
+    assert_eq!(objects.key(key("r")), objects::Hit::Load(request));
+    assert_eq!(rows(&objects), closed, "and it empties first");
+}
+
+#[test]
+fn a_load_that_failed_says_so_on_the_row_and_in_the_footer() {
+    let mut app = browsing();
+    let request = CatalogRequest::Objects {
+        schema: "dbo".to_owned(),
+        kind: ObjectKind::View,
+    };
+    app.apply(RuntimeEvent::Catalog {
+        tab: 1,
+        request: request.clone(),
+        result: Err(crate::db::model::DbError::Query {
+            message: "ORA-00942: table or view does not exist".to_owned(),
+            line: None,
+        }),
+    });
+    let objects = &app.tabs[1].objects;
+    let views = objects
+        .nodes()
+        .iter()
+        .find(|node| node.item.name() == "Views")
+        .expect("the views branch");
+    assert_eq!(
+        views.error.as_deref(),
+        Some("ORA-00942: table or view does not exist")
+    );
+    assert!(!views.expanded, "a branch that did not load is not open");
+    assert_eq!(
+        app.shell.error.as_deref(),
+        Some("ORA-00942: table or view does not exist")
+    );
+}
+
+#[test]
+fn the_filter_keeps_what_matches_and_the_branches_above_it() {
+    let mut app = browsing();
+    // A second table and a view, so there is something to hide.
+    let request = CatalogRequest::Objects {
+        schema: "dbo".to_owned(),
+        kind: ObjectKind::View,
+    };
+    go_to(&mut app.tabs[1].objects, "Views");
+    app.tabs[1].objects.key(key("l"));
+    app.apply(RuntimeEvent::Catalog {
+        tab: 1,
+        request,
+        result: Ok(CatalogAnswer::Objects(vec![object(
+            "dbo",
+            "v_customer_totals",
+            ObjectKind::View,
+        )])),
+    });
+
+    press(&mut app, "/");
+    assert!(app.tabs[1].objects.filtering());
+    for character in ["c", "u", "s", "t"] {
+        press(&mut app, character);
+    }
+    assert_eq!(app.tabs[1].objects.filter(), "cust");
+    assert_eq!(
+        rows(&app.tabs[1].objects),
+        [
+            "dbo",
+            "  Tables",
+            "    customers",
+            "  Views",
+            "    v_customer_totals"
+        ],
+        "orders is not a match and no branch above one"
+    );
+
+    // The pane keeps the letters: `c` is not a connect key while a filter is
+    // being typed.
+    assert_eq!(app.tabs[1].state, TabState::Disconnected);
+    press(&mut app, "Esc");
+    assert_eq!(app.tabs[1].objects.filter(), "");
+    assert!(!app.tabs[1].objects.filtering());
+    assert!(rows(&app.tabs[1].objects).contains(&"    orders".to_owned()));
+}
+
+#[test]
+fn enter_on_a_table_puts_a_select_in_the_pad_and_moves_the_focus_to_it() {
+    let mut app = browsing();
+    app.shell.focus = Focus::Objects;
+    assert_eq!(press(&mut app, "Enter"), vec![]);
+    assert_eq!(
+        app.tabs[1].scratch.text(),
+        "select * from dbo.customers fetch first 100 rows only\n"
+    );
+    assert_eq!(app.shell.focus, Focus::Scratch);
+
+    // SQL Server spells the same hundred rows its own way, and a line
+    // somebody is writing is not written over.
+    let mut app = two_tabs();
+    app.tabs[0].objects = browsed(Kind::Mssql);
+    app.tabs[0].scratch.set_text("select 1");
+    press(&mut app, "Enter");
+    assert_eq!(
+        app.tabs[0].scratch.text(),
+        "select top 100 * from dbo.customers\nselect 1",
+        "the line the cursor is on is pushed down rather than written over"
+    );
+}
+
+#[test]
+fn i_asks_for_the_columns_and_s_for_the_source_of_what_the_cursor_is_on() {
+    let mut app = browsing();
+    assert_eq!(
+        press(&mut app, "i"),
+        vec![Action::LoadObjects {
+            tab: 1,
+            request: CatalogRequest::Columns {
+                schema: "dbo".to_owned(),
+                table: "customers".to_owned(),
+                show: true,
+            }
+        }]
+    );
+    assert_eq!(
+        press(&mut app, "s"),
+        vec![],
+        "a table is its columns, and it says so rather than asking"
+    );
+    assert_eq!(
+        app.shell.status,
+        "a table has no source text; i shows its columns"
+    );
+
+    // The columns come back into the tree and the grid at once.
+    app.apply(RuntimeEvent::Catalog {
+        tab: 1,
+        request: CatalogRequest::Columns {
+            schema: "dbo".to_owned(),
+            table: "customers".to_owned(),
+            show: true,
+        },
+        result: Ok(CatalogAnswer::Columns(vec![
+            crate::db::catalog::ColumnInfo {
+                name: "id".to_owned(),
+                type_text: "int".to_owned(),
+                nullable: false,
+                is_pk: true,
+            },
+        ])),
+    });
+    assert_eq!(app.tabs[1].results.rows().len(), 1);
+    assert_eq!(
+        app.tabs[1].results.title(),
+        "dbo.customers columns · 1 rows"
+    );
+    press(&mut app, "l");
+    assert!(rows(&app.tabs[1].objects).contains(&"      id".to_owned()));
+}
+
+#[test]
+fn s_on_a_procedure_shows_its_source_in_the_results_pane() {
+    let mut app = browsing();
+    let request = CatalogRequest::Objects {
+        schema: "dbo".to_owned(),
+        kind: ObjectKind::Procedure,
+    };
+    // Down to the procedures branch, and open it.
+    go_to(&mut app.tabs[1].objects, "Procedures");
+    app.tabs[1].objects.key(key("l"));
+    app.apply(RuntimeEvent::Catalog {
+        tab: 1,
+        request,
+        result: Ok(CatalogAnswer::Objects(vec![object(
+            "dbo",
+            "sp_customer_orders",
+            ObjectKind::Procedure,
+        )])),
+    });
+    go_to(&mut app.tabs[1].objects, "sp_customer_orders");
+    let source = CatalogRequest::Source {
+        schema: "dbo".to_owned(),
+        name: "sp_customer_orders".to_owned(),
+        kind: ObjectKind::Procedure,
+    };
+    assert_eq!(
+        press(&mut app, "s"),
+        vec![Action::LoadObjects {
+            tab: 1,
+            request: source.clone()
+        }]
+    );
+    app.catalog_started(1, &source);
+    assert!(app.busy(), "a catalog query in flight is the app working");
+
+    app.apply(RuntimeEvent::Catalog {
+        tab: 1,
+        request: source,
+        result: Ok(CatalogAnswer::Source(
+            "CREATE PROCEDURE sp_customer_orders AS\nBEGIN\nEND;".to_owned(),
+        )),
+    });
+    assert!(!app.busy());
+    assert_eq!(
+        app.tabs[1].results.title(),
+        "Source · dbo.sp_customer_orders · 3 lines"
+    );
+    // The results pane's own keys scroll it, and nothing else does.
+    app.shell.focus = Focus::Results;
+    press(&mut app, "G");
+    assert_eq!(app.tabs[1].results.source().expect("the source").scroll, 2);
+    press(&mut app, "g");
+    assert_eq!(app.tabs[1].results.source().expect("the source").scroll, 0);
+}
+
+#[test]
+fn y_copies_the_qualified_name_of_whatever_the_cursor_is_on() {
+    let mut app = browsing();
+    assert_eq!(
+        press(&mut app, "y"),
+        vec![Action::Copy("dbo.customers".to_owned())]
+    );
+    assert_eq!(app.shell.clipboard, "dbo.customers");
+    go_to(&mut app.tabs[1].objects, "dbo");
+    assert_eq!(press(&mut app, "y"), vec![Action::Copy("dbo".to_owned())]);
+}
+
+#[test]
+fn h_closes_a_branch_and_then_goes_up_one_and_l_opens_and_steps_in() {
+    let mut app = browsing();
+    let objects = &mut app.tabs[1].objects;
+    assert_eq!(objects.nodes()[objects.cursor()].item.name(), "customers");
+    objects.key(key("h"));
+    assert_eq!(objects.nodes()[objects.cursor()].item.name(), "Tables");
+    objects.key(key("h"));
+    assert_eq!(
+        rows(objects),
+        [
+            "dbo",
+            "  Tables",
+            "  Views",
+            "  Procedures",
+            "  Functions",
+            "  Packages",
+            "  Sequences",
+            "bench"
+        ]
+    );
+    objects.key(key("h"));
+    assert_eq!(objects.nodes()[objects.cursor()].item.name(), "dbo");
+    objects.key(key("l"));
+    objects.key(key("l"));
+    objects.key(key("l"));
+    assert_eq!(
+        objects.nodes()[objects.cursor()].item.name(),
+        "customers",
+        "the branches were loaded already, so opening one steps into it"
+    );
+}
+
+#[test]
+fn a_connection_that_comes_or_goes_empties_the_tree() {
+    let mut app = browsing();
+    assert!(!app.tabs[1].objects.is_empty());
+    app.apply(RuntimeEvent::Disconnected { tab: 1 });
+    assert!(app.tabs[1].objects.is_empty());
+    assert!(!app.busy(), "and nothing is still waited on");
 }

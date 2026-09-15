@@ -1,0 +1,67 @@
+# T6.1: the object tree against SQL Server. The container `scripts/db-up.sh`
+# starts has to be up. Run it with a state directory of its own —
+# scripts/qa/run-queries.sh does — or the pad starts with whatever the last
+# run typed into it.
+
+key c
+wait busy
+expect ● local-mssql
+expect ▾ dbo
+
+# dbo is the schema a login lands in and is open already; bench is the one
+# the seed wrote into, and is the last of the two.
+key G
+key l
+expect ▾ bench
+key j
+key l
+wait busy
+expect customers
+
+# i: the columns of the table the cursor is on, as a grid.
+key j
+key j
+key j
+key j
+key i
+wait busy
+expect bench.customers columns
+expect email
+expect nvarchar(100)
+
+# Enter: a hundred rows of it in the pad, on a line of its own.
+key Enter
+expect select top 100 * from bench.customers
+key Shift-Tab
+
+# The views, so the filter has something of each kind to keep.
+key G
+key k
+key k
+key k
+key l
+wait busy
+expect v_recent_orders
+
+# /cust keeps what matches and the branches above it, and nothing else.
+key /
+type cust
+expect ╭ Objects /cust ─
+expect customers
+expect v_customer_totals
+expect-not ▸ orders
+key Esc
+expect ▸ orders
+
+# s: the text that made a procedure, in the results pane with line numbers.
+key h
+key j
+key l
+wait busy
+key j
+key s
+wait busy
+expect Source · bench.sp_customer_orders
+expect PROCEDURE bench.sp_customer_orders
+frame objects-mssql
+key Ctrl-Q

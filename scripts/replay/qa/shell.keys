@@ -8,8 +8,10 @@ expect ╭ Scratch ─
 expect ╭ Results ─
 expect ○ disconnected
 
+# The Objects pane's keys are more than a small screen holds, so its title
+# is expected without the dash: on those sizes it says which rows are showing.
 key ?
-expect ╭ Help · Objects ─
+expect ╭ Help · Objects
 expect Tab        next pane
 expect Ctrl-Q     quit
 key Esc

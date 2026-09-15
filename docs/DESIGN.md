@@ -87,7 +87,28 @@ Either way the connection is spent and the next query opens a new one.
 ## Catalog (`src/db/catalog.rs`)
 
 Plain SQL per backend through the same query path: schemas, objects by kind,
-columns, source. Never touches table data.
+columns, source. Never touches table data. Each question is a
+`CatalogRequest` that knows the one statement that answers it and how to read
+the rows back, so the CLI runs it blocking and the object tree runs it down
+the tab's own query channel without the loop waiting for either.
+
+## Object tree (`src/app/objects.rs`, `src/ui/objects.rs`)
+
+A flat `Vec<Node>` with a depth per row: schemas, the kinds under them, the
+objects under those, a table's columns under that. Nothing is loaded until it
+is opened — the row says `…` while the catalog query runs and `✗ ORA-…` if it
+would not — and what has loaded stays loaded for the session, `r` being the
+way to ask again. The connection's own schema is listed first and opened as
+soon as the connection is up: `dbo` on SQL Server, the user name on Oracle,
+where every catalog name is upper case.
+
+`/` narrows the pane to the rows whose name contains what is typed, plus the
+branches above them, and says so in the title: `Objects /cust`. Esc clears it.
+Enter on a table or a view writes `select top 100 * from schema.name` — `select
+* from schema.name fetch first 100 rows only` on Oracle — into the pad on a
+line of its own and moves the focus there. `i` puts a table's columns in the
+results pane as a grid, `s` puts an object's source there as numbered lines
+that the pane's own movement keys scroll, and `y` copies the qualified name.
 
 ## Results grid (`src/app/results.rs`, `src/ui/results.rs`)
 
@@ -143,7 +164,7 @@ background until the next edit.
 | Ctrl-E | Scratch | edit in $EDITOR |
 | Tab, Ctrl-Z, Ctrl-C | Scratch | two spaces, undo the last edits, copy the selection |
 | Home End Ctrl-A, Ctrl-U Ctrl-K Ctrl-W, Ctrl-arrows, Shift-arrows | Scratch | move, cut, jump a word, select |
-| j k h l, Enter, /, r, s, i, y | Objects | move, expand, filter, reload, source, columns, copy name |
+| j k h l, arrows, PageUp/Down, g G, Space, Enter, /, r, s, i, y | Objects | move, expand, filter, reload, source, columns, copy name |
 | j k h l, arrows, PageUp/Down, Ctrl-D Ctrl-U, g G, 0 $ | Results | move the cell cursor |
 | Enter, y Y, e, m, [ ] | Results | inspect, copy, export, 10,000 more rows, switch result set |
 | ? | anywhere | help |
