@@ -753,6 +753,9 @@ epics:
     - cargo test --all-targets
     - SQL_BENCH_CONFIG=config.local.toml SQL_BENCH_STATE_DIR=/tmp/sb-state cargo run -- --replay scripts/replay/scratch.keys
       --size 120x40 --frames-dir /tmp/sql-bench-frames
+    verified: true
+    note: merged to main 2026-09-14 with a follow-up that makes the help overlay per-pane and scrollable;
+      qa.sh 14/14
   - id: T5.2
     tag: dev
     title: T5.2 Run statements and stream results into a virtualized grid
