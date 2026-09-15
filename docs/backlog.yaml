@@ -815,6 +815,8 @@ epics:
       --frames-dir /tmp/sql-bench-frames
     - SQL_BENCH_CONFIG=config.local.toml cargo run -- --replay scripts/replay/run-oracle.keys --size 120x40
       --frames-dir /tmp/sql-bench-frames
+    verified: true
+    note: merged to main 2026-09-15; 249 tests, qa.sh 14/14, run-queries.sh 8/8 re-run by the coordinator
   - id: T5.3
     tag: dev
     title: T5.3 Cell inspector, copy and export
@@ -868,6 +870,10 @@ epics:
         then G, PageUp ×5, export to CSV: total under 15 s and no frame over 16 ms after the query finishes.'
       - Compare the grid's rendering of bench.all_types against docs/TYPES.md.
       - Record every number in docs/PERF.md.
+      - 'Column alignment with wide (CJK) glyphs: the grid and export::table count chars, so a column
+        after 李雷 leans. Fix by measuring display width with the unicode-width crate (already in ratatui''s
+        dependency tree; adding it as a direct dependency is allowed for this) in one shared width() helper
+        used by both; test with the customers rows.'
       out:
       - New features.
     acceptance:
