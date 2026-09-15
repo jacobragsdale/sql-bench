@@ -4,12 +4,14 @@
 //!
 //! One handle, one thread, one driver connection. [`Connection::query`] hands
 //! back a `Receiver` straight away and the worker fills it; [`Connection::cancel`]
-//! sets a flag the backend looks at while it waits, and the backend answers by
-//! throwing its connection away — neither driver can ask a server to stop, so
-//! the socket is the cancel button. The next query reconnects.
+//! sets a flag the backend looks at while it waits. How a backend answers is
+//! its own business — tiberius throws the socket away because TDS gives it
+//! nothing better, Oracle breaks the call OCI is inside — but either way the
+//! connection is spent and the next query opens a new one.
 
 pub mod model;
 mod mssql;
+mod oracle;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -55,8 +57,8 @@ impl Connection {
     /// ten second timeout runs out.
     ///
     /// The whole configuration comes along because Oracle's client directory
-    /// lives in it (T2.2); SQL Server needs nothing from it.
-    pub fn open(spec: &config::Connection, _config: &config::Config) -> Result<Self, DbError> {
+    /// lives in it; SQL Server needs nothing from it.
+    pub fn open(spec: &config::Connection, config: &config::Config) -> Result<Self, DbError> {
         // Resolved here rather than on the worker: a `password_cmd` should
         // fail against the caller, which is still allowed to print to a
         // terminal.
@@ -64,8 +66,9 @@ impl Connection {
             .password()
             .map_err(|why| DbError::Connect(format!("{why:#}")))?;
         let spec = spec.clone();
+        let config = config.clone();
         let (name, kind) = (spec.name.clone(), spec.kind);
-        Self::spawn(name, kind, move || Backend::open(&spec, password))
+        Self::spawn(name, kind, move || Backend::open(&spec, password, &config))
     }
 
     /// Runs `sql` and reports through the returned channel until
@@ -190,28 +193,32 @@ fn work(
 
 /// The drivers. An enum and not a trait: there are two of them, they are both
 /// in this crate, and nobody is going to write a third.
-// One of these exists per worker thread, so the fake being smaller than a
-// driver connection costs nothing.
+// One of these exists per worker thread, so tiberius' kilobyte of config
+// being bigger than an Oracle handle costs nothing.
 #[allow(clippy::large_enum_variant)]
 enum Backend {
     Mssql(mssql::Backend),
+    Oracle(oracle::Backend),
     #[cfg(test)]
     Fake(fake::Backend),
 }
 
 impl Backend {
-    fn open(spec: &config::Connection, password: Option<String>) -> Result<Self, DbError> {
+    fn open(
+        spec: &config::Connection,
+        password: Option<String>,
+        config: &config::Config,
+    ) -> Result<Self, DbError> {
         match spec.kind {
             Kind::Mssql => Ok(Self::Mssql(mssql::Backend::open(spec, password)?)),
-            Kind::Oracle => Err(DbError::Unsupported(
-                "oracle connections arrive in T2.2".to_owned(),
-            )),
+            Kind::Oracle => Ok(Self::Oracle(oracle::Backend::open(spec, password, config)?)),
         }
     }
 
     fn run(&mut self, sql: &str, sink: &mut Sink) -> Result<(), DbError> {
         match self {
             Self::Mssql(backend) => backend.run(sql, sink),
+            Self::Oracle(backend) => backend.run(sql, sink),
             #[cfg(test)]
             Self::Fake(backend) => backend.run(sql, sink),
         }
@@ -257,6 +264,12 @@ impl Sink {
 
     fn cancelled(&self) -> bool {
         self.cancel.load(Ordering::SeqCst)
+    }
+
+    /// How many rows go in one batch, for a driver that can be told to fetch
+    /// exactly that many per round trip.
+    fn batch_size(&self) -> usize {
+        self.options.batch_size
     }
 
     /// The flag itself, for a backend that wants to watch it while it waits.
@@ -648,26 +661,6 @@ mod tests {
             emitted.load(Ordering::SeqCst) < 1_000_000,
             "{} rows were produced for a reader that had gone",
             emitted.load(Ordering::SeqCst)
-        );
-    }
-
-    #[test]
-    fn an_oracle_connection_says_which_ticket_brings_it() {
-        let spec = config::Connection {
-            name: "ledger".to_owned(),
-            kind: Kind::Oracle,
-            host: "localhost".to_owned(),
-            port: 1521,
-            database: None,
-            service: Some("FREEPDB1".to_owned()),
-            user: "bench".to_owned(),
-            password: None,
-            trust_cert: false,
-            encrypt: true,
-        };
-        assert_eq!(
-            Connection::open(&spec, &config::Config::default()).unwrap_err(),
-            DbError::Unsupported("oracle connections arrive in T2.2".to_owned())
         );
     }
 
