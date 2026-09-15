@@ -883,6 +883,8 @@ epics:
     - Defects fixed with regression tests; docs/PERF.md updated.
     verify:
     - scripts/qa.sh
+    verified: true
+    note: merged to main 2026-09-15; 12 cases green on both backends, display-width fix, 284 tests
 - id: E6
   title: E6 Object browser
   description: 'A lazily loaded tree of schemas, tables, views, procedures, functions and packages with
