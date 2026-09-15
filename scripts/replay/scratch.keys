@@ -1,0 +1,36 @@
+# The scratch pad: type three lines, move about, take back a word, and put it
+# back. Run by scripts/qa/scratch-frame.sh, which diffs the frame this writes
+# against scripts/replay/expected/scratch.txt.
+#
+# It types into an empty pad, so give it a state directory of its own —
+# SQL_BENCH_STATE_DIR=$(mktemp -d) — or it types on top of what the last run
+# saved there.
+
+key Tab
+expect ╭ Scratch
+
+type select id, name
+key Enter
+type from bench.customers
+key Enter
+type where country = 'US'
+expect where country = 'US'
+
+# Long enough for the pad to be saved and the undo burst to end, so Ctrl-Z
+# takes back the delete below and not everything typed above it.
+wait 600
+expect-not [modified]
+
+key Up
+key End
+key Ctrl-W
+expect-not bench.customers
+key Ctrl-Z
+expect from bench.customers
+
+# Ctrl-C with nothing selected copies nothing, and never quits.
+key Ctrl-C
+expect where country = 'US'
+
+frame scratch
+key Ctrl-Q

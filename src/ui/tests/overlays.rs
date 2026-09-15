@@ -75,12 +75,16 @@ fn the_footer_hints_and_the_help_are_the_same_table() {
                 help.contains(&format!(" {spec:<10}{place:<12}{does}")),
                 "the help does not list {spec} ({place}: {does}):\n{help}"
             );
-            let works_here = keys_for(focus).any(|(other, ..)| other == spec);
-            assert_eq!(
-                footer.contains(&format!(" {spec} {does}")),
-                works_here,
-                "{spec} ({place}: {does}) with {focus:?} focused, hinted:\n{footer}"
-            );
+            let works_here =
+                keys_for(focus).any(|(other, _, other_does)| other == spec && other_does == does);
+            // The footer hints as many keys as fit, so a key it shows must
+            // work here; one it leaves out may simply not have fit.
+            if footer.contains(&format!(" {spec} {does}")) {
+                assert!(
+                    works_here,
+                    "{spec} ({place}: {does}) hinted with {focus:?} focused:\n{footer}"
+                );
+            }
         }
     }
 }

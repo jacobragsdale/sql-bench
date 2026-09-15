@@ -10,7 +10,7 @@ expect ○ disconnected
 
 key ?
 expect ╭ Help ─
-expect Tab       anywhere    next pane
+expect Tab       not Scratch next pane
 expect Ctrl-Q    anywhere    quit
 key Esc
 expect-not ╭ Help

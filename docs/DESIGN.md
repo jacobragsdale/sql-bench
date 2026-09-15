@@ -106,16 +106,24 @@ columns, source. Never touches table data.
 
 | key | where | does |
 |---|---|---|
-| Tab / Shift-Tab | anywhere | cycle focus Objects → Scratch → Results |
+| Tab / Shift-Tab | not Scratch / anywhere | cycle focus Objects → Scratch → Results |
 | 1-9, Ctrl-T | not Scratch / anywhere | select tab, next tab |
 | c / C | not Scratch | connect, disconnect |
 | Ctrl-R / F5 | Scratch | run statement under cursor / run all |
 | Esc | anywhere | cancel query, close overlay, clear filter |
 | Ctrl-E | Scratch | edit in $EDITOR |
+| Tab, Ctrl-Z, Ctrl-C | Scratch | two spaces, undo the last edits, copy the selection |
+| Home End Ctrl-A, Ctrl-U Ctrl-K Ctrl-W, Ctrl-arrows, Shift-arrows | Scratch | move, cut, jump a word, select |
 | j k h l, Enter, /, r, s, i, y | Objects | move, expand, filter, reload, source, columns, copy name |
 | j k h l g G, Enter, y Y, e, m, [ ] | Results | move, inspect, copy, export, more rows, switch set |
 | ? | anywhere | help |
 | q / Ctrl-Q | not Scratch / anywhere | quit |
+
+The scratch pad is one pad per connection, kept in
+`~/.local/state/sql-bench/scratch/<connection>.sql` — `$SQL_BENCH_STATE_DIR`
+moves the directory — written 500 ms after the last edit and on the way out,
+and loaded before the first frame. The same pause ends an undo burst, so
+Ctrl-Z takes back everything typed without a pause in it and no more.
 
 ## Verifying
 

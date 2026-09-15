@@ -31,6 +31,7 @@ use ratatui::buffer::Buffer;
 use crate::app::App;
 use crate::cli::{Cli, Size};
 use crate::config::Config;
+use crate::run::state::Store;
 use crate::run::{Driver, InputSource, startup_tabs};
 use crate::trace::Trace;
 use crate::ui::theme::Theme;
@@ -76,6 +77,9 @@ pub struct Options {
     pub text_timeout: Duration,
     /// Tabs `--connect` asked for, connected after the first frame.
     pub connect: Vec<usize>,
+    /// Where the scratch pads are loaded from and saved to; a test points it
+    /// at a directory of its own.
+    pub store: Store,
 }
 
 impl Default for Options {
@@ -88,6 +92,7 @@ impl Default for Options {
             busy_timeout: BUSY_TIMEOUT,
             text_timeout: TEXT_TIMEOUT,
             connect: Vec::new(),
+            store: Store::from_env(),
         }
     }
 }
@@ -340,8 +345,13 @@ struct Replay {
 }
 
 impl Replay {
-    fn new(app: App, config: &Config, options: &Options) -> Result<Self> {
+    fn new(mut app: App, config: &Config, options: &Options) -> Result<Self> {
         let mut driver = Driver::new(options.theme, config);
+        driver.keep_scratch_in(options.store.clone());
+        // A replay owns no terminal, so Ctrl-E says so rather than handing
+        // over a screen it cannot take back.
+        driver.without_terminal();
+        driver.restore_scratch(&mut app);
         driver.connect_at_startup(options.connect.clone());
         Ok(Self {
             terminal: Terminal::new(TestBackend::new(options.size.cols, options.size.rows))
@@ -537,6 +547,9 @@ mod tests {
         Options {
             frames: directory.to_path_buf(),
             theme: Theme::new(false),
+            // A test keeps its scratch pads to itself, whatever
+            // `$SQL_BENCH_STATE_DIR` says on the machine running it.
+            store: Store::new(Some(directory.to_path_buf())),
             ..Options::default()
         }
     }
@@ -749,6 +762,58 @@ mod tests {
         assert_eq!(code, OK);
         let written = std::fs::read_to_string(directory.path().join("small.txt")).expect("a frame");
         assert!(written.starts_with("# small 60x15\n"), "{written}");
+    }
+
+    #[test]
+    fn a_pad_is_written_on_the_way_out_and_is_there_again_next_time() {
+        let directory = tempfile::tempdir().expect("a directory");
+        let options = options(directory.path());
+        assert_eq!(
+            run(
+                "key Tab\n\
+                 type select 1 from bench.events\n\
+                 key Ctrl-Q\n",
+                App::new(&two_connections()),
+                &options,
+            ),
+            OK
+        );
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("scratch/local-mssql.sql"))
+                .expect("the pad"),
+            "select 1 from bench.events\n"
+        );
+        assert_eq!(
+            run(
+                "expect select 1 from bench.events\nkey Ctrl-Q\n",
+                App::new(&two_connections()),
+                &options,
+            ),
+            OK,
+            "the pad is on the screen before a key is pressed"
+        );
+    }
+
+    #[test]
+    fn the_pads_keys_do_what_they_say_and_ctrl_c_never_quits() {
+        let directory = tempfile::tempdir().expect("a directory");
+        let code = run(
+            "key Tab\n\
+             type select 1\n\
+             key Ctrl-C\n\
+             expect select 1\n\
+             key Shift-Left\n\
+             key Ctrl-C\n\
+             expect copied 1 characters\n\
+             key Ctrl-R\n\
+             expect no query runner yet\n\
+             key Ctrl-E\n\
+             expect editor unavailable in replay\n\
+             key Ctrl-Q\n",
+            App::new(&two_connections()),
+            &options(directory.path()),
+        );
+        assert_eq!(code, OK);
     }
 
     #[test]
