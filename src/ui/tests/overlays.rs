@@ -7,7 +7,9 @@ use crate::app::KEYS;
 fn the_help_lists_every_key_with_where_it_works_and_what_it_does() {
     let mut app = two_tabs();
     app.handle(Event::Key(key("?")));
-    let terminal = frame(120, 40, &app);
+    // Tall enough for the whole table: a screen that cannot show it all
+    // shows as much as fits, and T5.3 gives the overlay a scroll.
+    let terminal = frame(120, 60, &app);
     let screen = text(&terminal);
     assert!(screen.contains("╭ Help "), "{screen}");
     for (spec, place, does) in KEYS {
@@ -16,7 +18,7 @@ fn the_help_lists_every_key_with_where_it_works_and_what_it_does() {
     }
 
     app.handle(Event::Key(key("Esc")));
-    assert!(!text(&frame(120, 40, &app)).contains("╭ Help "));
+    assert!(!text(&frame(120, 60, &app)).contains("╭ Help "));
 }
 
 #[test]

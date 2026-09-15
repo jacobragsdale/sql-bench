@@ -89,6 +89,35 @@ Either way the connection is spent and the next query opens a new one.
 Plain SQL per backend through the same query path: schemas, objects by kind,
 columns, source. Never touches table data.
 
+## Results grid (`src/app/results.rs`, `src/ui/results.rs`)
+
+Ctrl-R runs the statement under the cursor, F5 every statement in the pad.
+Rows arrive in batches of 500 over the tab's channel; the run loop drains
+every event that has arrived each turn and paints once, so a scan is one
+frame per turn and not one per batch. `Results` keeps the rows exactly as
+they came and recomputes column widths over the new batch only — capped at
+40 characters, never narrower than the header and its type — and the
+renderer formats `rows[top .. top + visible]` and the columns that fit
+across. A draw therefore costs the window and not the scan, whatever
+`--max-rows` allowed.
+
+The fetch cap is `--max-rows` (default 10,000). When it stopped the scan the
+title says `(truncated)` and `m` runs the same statement again with another
+10,000 allowed, keeping the cell cursor where it was. Esc while a query is
+running cancels it: the receiver ends in `Cancelled`, the rows that did
+arrive stay on screen and the title reads `cancelled after 1.2 s, 4,500
+rows`.
+
+A run of several statements runs them one after another, each started when
+the one before it is done. The pane shows the last result set and a summary
+line, `3 statements, 2 result sets, 1 rows affected`. **A statement the
+server says no to stops the run**: the statements after it were written to
+follow it, so they are dropped rather than run against whatever state the
+failure left. The footer says which one it was (`statement 2 of 3 failed`),
+the pane shows the driver's own message with the line number when it gave
+one, and the scratch pad paints that statement's lines in the error
+background until the next edit.
+
 ## Layout and keys
 
 ```
@@ -115,7 +144,8 @@ columns, source. Never touches table data.
 | Tab, Ctrl-Z, Ctrl-C | Scratch | two spaces, undo the last edits, copy the selection |
 | Home End Ctrl-A, Ctrl-U Ctrl-K Ctrl-W, Ctrl-arrows, Shift-arrows | Scratch | move, cut, jump a word, select |
 | j k h l, Enter, /, r, s, i, y | Objects | move, expand, filter, reload, source, columns, copy name |
-| j k h l g G, Enter, y Y, e, m, [ ] | Results | move, inspect, copy, export, more rows, switch set |
+| j k h l, arrows, PageUp/Down, Ctrl-D Ctrl-U, g G, 0 $ | Results | move the cell cursor |
+| Enter, y Y, e, m, [ ] | Results | inspect *(T5.3)*, copy, export, 10,000 more rows, switch result set |
 | ? | anywhere | help |
 | q / Ctrl-Q | not Scratch / anywhere | quit |
 
@@ -241,6 +271,7 @@ Unset, no clock is read at all.
 |---|---|
 | connect | conn, ms |
 | query | conn, rows, truncated, connect_ms, first_row_ms, total_ms |
+| results | rows, batches, first_batch_ms |
 | frame | draw_ms |
 | turn | total_ms, draw_ms, input_ms |
 

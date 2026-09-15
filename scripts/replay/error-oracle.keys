@@ -1,0 +1,14 @@
+# T5.2: a statement the server says no to shows the server's own words.
+
+key 2
+key c
+wait busy
+
+key Tab
+type select * from bench.nope_not_here
+key Ctrl-R
+wait busy
+
+expect ORA-00942
+frame error-oracle
+key Ctrl-Q

@@ -54,6 +54,10 @@ pub struct Cli {
     /// Connect every connection in the config at startup
     #[arg(long, global = true)]
     pub connect_all: bool,
+    /// Stop a query in the TUI after this many rows; `m` in the grid asks
+    /// for ten thousand more. Not global: `query` and `bench` have their own
+    #[arg(long, value_name = "N", default_value_t = 10_000)]
+    pub max_rows: usize,
     /// Panic this many milliseconds into the loop, so QA can check the
     /// terminal is given back. Debug builds only.
     #[cfg(debug_assertions)]

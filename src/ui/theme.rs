@@ -23,6 +23,8 @@ pub struct Theme {
     pub cursor: Style,
     /// What a Shift-arrow selection is painted with.
     pub selection: Style,
+    /// The lines of the statement a driver said no to, until the next edit.
+    pub flagged: Style,
 }
 
 impl Theme {
@@ -45,6 +47,7 @@ impl Theme {
             ok: Style::new().fg(Color::Green),
             cursor: Style::new().add_modifier(Modifier::REVERSED),
             selection: Style::new().bg(Color::Cyan).fg(Color::Black),
+            flagged: Style::new().bg(Color::Red).fg(Color::Black),
         }
     }
 }

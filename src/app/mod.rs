@@ -3,17 +3,21 @@
 //! event goes in, a state change and a list of [`Action`]s come out, which is
 //! what makes the whole app testable without either.
 
+pub mod results;
 pub mod scratch;
 
 #[cfg(test)]
 pub(crate) mod tests;
 
+use std::ops::Range;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::Size;
 
 use crate::config::{Config, Kind};
+use crate::db::model::QueryEvent;
+use results::{Hit, Results};
 use scratch::{Outcome, Scratch};
 
 /// Every key this build handles: the key, where it works, what it does.
@@ -46,9 +50,26 @@ pub const KEYS: &[(&str, &str, &str)] = &[
     ("Ctrl-Left", SCRATCH, "word left"),
     ("Ctrl-Right", SCRATCH, "word right"),
     ("?", ANYWHERE, "help"),
-    ("Esc", ANYWHERE, "close help or error"),
+    ("Esc", ANYWHERE, "cancel or close help"),
     ("q", NOT_SCRATCH, "quit"),
     ("Ctrl-Q", ANYWHERE, "quit"),
+    ("j", RESULTS, "row down"),
+    ("k", RESULTS, "row up"),
+    ("h", RESULTS, "column left"),
+    ("l", RESULTS, "column right"),
+    ("Arrows", RESULTS, "move the cell cursor"),
+    ("PageDown", RESULTS, "page down"),
+    ("PageUp", RESULTS, "page up"),
+    ("Ctrl-D", RESULTS, "half a page down"),
+    ("Ctrl-U", RESULTS, "half a page up"),
+    ("g", RESULTS, "first row"),
+    ("G", RESULTS, "last row"),
+    ("0", RESULTS, "first column"),
+    ("$", RESULTS, "last column"),
+    ("[", RESULTS, "previous result set"),
+    ("]", RESULTS, "next result set"),
+    ("m", RESULTS, "10,000 more rows"),
+    ("Enter", RESULTS, "inspect the cell"),
 ];
 
 pub const ANYWHERE: &str = "anywhere";
@@ -56,6 +77,8 @@ pub const ANYWHERE: &str = "anywhere";
 pub const NOT_SCRATCH: &str = "not Scratch";
 
 pub const SCRATCH: &str = "Scratch";
+
+pub const RESULTS: &str = "Results";
 
 /// The frames a connecting tab's mark cycles through, one every
 /// [`SPIN_EVERY`].
@@ -73,6 +96,7 @@ pub fn keys_for(
         let typing = focus == Focus::Scratch;
         match *place {
             SCRATCH => typing,
+            RESULTS => focus == Focus::Results,
             NOT_SCRATCH => !typing,
             _ => true,
         }
@@ -108,6 +132,12 @@ pub enum Action {
     SaveScratch {
         tab: usize,
     },
+    /// Stop whatever this tab is running.
+    Cancel(usize),
+    /// Run the last statement again with ten thousand more rows allowed.
+    MoreRows {
+        tab: usize,
+    },
     /// Best effort, into the terminal's clipboard.
     Copy(String),
 }
@@ -115,12 +145,37 @@ pub enum Action {
 /// What the run loop reports back about a connection. The app never opens
 /// one, so this is the only way a tab moves off [`TabState::Connecting`] —
 /// and it is what makes those transitions testable without a database.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum RuntimeEvent {
-    Connecting { tab: usize },
-    Connected { tab: usize, connect_ms: u32 },
-    Failed { tab: usize, message: String },
-    Disconnected { tab: usize },
+    Connecting {
+        tab: usize,
+    },
+    Connected {
+        tab: usize,
+        connect_ms: u32,
+    },
+    Failed {
+        tab: usize,
+        message: String,
+    },
+    Disconnected {
+        tab: usize,
+    },
+    /// A statement has been handed to the driver: which one of how many, and
+    /// when — the app reads no clock of its own for the running timer.
+    /// `keep_view` is `m` asking for more rows of the same statement.
+    QueryStarted {
+        tab: usize,
+        at: Instant,
+        statement: usize,
+        of: usize,
+        keep_view: bool,
+    },
+    /// One event from the query that tab is running.
+    Query {
+        tab: usize,
+        event: QueryEvent,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -197,7 +252,7 @@ impl TabState {
 }
 
 /// One tab: a connection from `config.toml` and where it is.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Tab {
     pub name: String,
     pub kind: Kind,
@@ -207,6 +262,8 @@ pub struct Tab {
     /// The SQL this connection is being written against, loaded from and
     /// saved to `<state dir>/scratch/<name>.sql`.
     pub scratch: Scratch,
+    /// What the last statement run on this tab returned.
+    pub results: Results,
 }
 
 /// The state every pane shares.
@@ -264,7 +321,7 @@ impl Shell {
     }
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct App {
     pub shell: Shell,
     pub tabs: Vec<Tab>,
@@ -287,6 +344,7 @@ impl App {
                     state: TabState::default(),
                     connect_ms: None,
                     scratch: Scratch::default(),
+                    results: Results::default(),
                 })
                 .collect(),
         }
@@ -298,12 +356,18 @@ impl App {
         self.tabs.get(self.shell.active_tab)
     }
 
-    /// Whether anything is still in flight: a tab connecting, and from E5 a
-    /// query running too. This is what a replay's `wait busy` waits out, so
-    /// it answers for the whole app and not just the tab on screen.
+    /// Whether anything is still in flight: a tab connecting, or a query
+    /// running. This is what a replay's `wait busy` waits out, so it answers
+    /// for the whole app and not just the tab on screen.
     #[must_use]
     pub fn busy(&self) -> bool {
-        self.connecting()
+        self.connecting() || self.running()
+    }
+
+    /// Whether any tab has a query in flight.
+    #[must_use]
+    pub fn running(&self) -> bool {
+        self.tabs.iter().any(|tab| tab.results.running())
     }
 
     /// Whether any tab is connecting, which is the only thing that animates.
@@ -320,6 +384,26 @@ impl App {
     /// not always the tab on screen.
     pub fn apply(&mut self, event: RuntimeEvent) {
         let (index, state, connect_ms) = match event {
+            RuntimeEvent::QueryStarted {
+                tab,
+                at,
+                statement,
+                of,
+                keep_view,
+            } => {
+                let Some(open) = self.tabs.get_mut(tab) else {
+                    return;
+                };
+                open.results.start(at, statement, of, keep_view);
+                open.scratch.flag(None);
+                self.shell.status = if of > 1 {
+                    format!("running statement {} of {of}", statement + 1)
+                } else {
+                    "running…".to_owned()
+                };
+                return;
+            }
+            RuntimeEvent::Query { tab, event } => return self.query_event(tab, event),
             RuntimeEvent::Connecting { tab } => (tab, TabState::Connecting, None),
             RuntimeEvent::Connected { tab, connect_ms } => {
                 (tab, TabState::Connected, Some(connect_ms))
@@ -341,6 +425,32 @@ impl App {
                 .map(|ms| format!(" in {ms} ms"))
                 .unwrap_or_default(),
         );
+    }
+
+    /// One event of a running query. When it is the last one, the pad is
+    /// told which statement failed — it highlights those lines until the
+    /// next edit — and the footer says which of a run of several it was.
+    fn query_event(&mut self, tab: usize, event: QueryEvent) {
+        let last = matches!(event, QueryEvent::Done { .. } | QueryEvent::Error(_));
+        let Some(open) = self.tabs.get_mut(tab) else {
+            return;
+        };
+        open.results.apply(event);
+        if !last {
+            return;
+        }
+        let (ran, of) = open.results.progress();
+        if open.results.failure().is_some() {
+            let lines = open.results.statement_lines();
+            open.scratch.flag(lines);
+            self.shell.status = if of > 1 {
+                format!("statement {ran} of {of} failed")
+            } else {
+                String::new()
+            };
+        } else {
+            self.shell.status.clear();
+        }
     }
 
     /// One event, turned into state changes and whatever has to happen
@@ -399,6 +509,8 @@ impl App {
             KeyCode::Esc => {
                 if self.shell.help {
                     self.shell.help = false;
+                } else if self.tab().is_some_and(|tab| tab.results.running()) {
+                    return vec![Action::Cancel(self.shell.active_tab)];
                 } else {
                     self.shell.error = None;
                 }
@@ -418,9 +530,30 @@ impl App {
                     self.shell.active_tab = wanted;
                 }
             }
+            _ if self.shell.focus == Focus::Results => return self.results_key(key),
             _ => {}
         }
         Vec::new()
+    }
+
+    /// A key the result grid handles, and what it asks the run loop for.
+    fn results_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        let tab = self.shell.active_tab;
+        let Some(open) = self.tabs.get_mut(tab) else {
+            return Vec::new();
+        };
+        match open.results.key(key) {
+            Hit::Ignored | Hit::Moved => Vec::new(),
+            Hit::MoreRows if open.results.truncated() => vec![Action::MoreRows { tab }],
+            Hit::MoreRows => {
+                self.shell.status = "every row is already here".to_owned();
+                Vec::new()
+            }
+            Hit::Inspect => {
+                self.shell.status = "inspector arrives in T5.3".to_owned();
+                Vec::new()
+            }
+        }
     }
 
     /// A key the pad handles, and what the run loop owes it afterwards.
@@ -433,23 +566,23 @@ impl App {
         match open.scratch.handle(key) {
             Outcome::Unchanged | Outcome::Edited => Vec::new(),
             Outcome::RunStatement => match open.scratch.statement_at_cursor(kind) {
-                Some((sql, _)) => vec![Action::RunStatement { tab, sql }],
+                Some((sql, lines)) => {
+                    open.results.expect(vec![lines]);
+                    vec![Action::RunStatement { tab, sql }]
+                }
                 None => {
                     self.shell.status = "no statement under the cursor".to_owned();
                     Vec::new()
                 }
             },
             Outcome::RunAll => {
-                let statements: Vec<String> = open
-                    .scratch
-                    .statements(kind)
-                    .into_iter()
-                    .map(|(sql, _)| sql)
-                    .collect();
+                let (statements, lines): (Vec<String>, Vec<Range<usize>>) =
+                    open.scratch.statements(kind).into_iter().unzip();
                 if statements.is_empty() {
                     self.shell.status = "the pad is empty".to_owned();
                     return Vec::new();
                 }
+                open.results.expect(lines);
                 vec![Action::RunAll { tab, statements }]
             }
             Outcome::OpenEditor => vec![Action::OpenEditor { tab }],

@@ -75,6 +75,8 @@ pub struct Scratch {
     dirty_since: Option<Instant>,
     /// Whether the file on disk is behind the pad.
     modified: bool,
+    /// The lines of the statement that failed, painted until the next edit.
+    flagged: Option<Range<usize>>,
 }
 
 impl Default for Scratch {
@@ -89,6 +91,7 @@ impl Default for Scratch {
             edited: false,
             dirty_since: None,
             modified: false,
+            flagged: None,
         }
     }
 }
@@ -139,6 +142,7 @@ impl Scratch {
         self.selection = None;
         self.undo = None;
         self.burst = false;
+        self.flagged = None;
         self.modified = true;
         self.edited = true;
         self.clamp_cursor();
@@ -388,9 +392,21 @@ impl Scratch {
         Outcome::Edited
     }
 
+    /// The lines a failed statement was on, which the pane paints until the
+    /// next edit. `None` clears it, which a new run does.
+    pub fn flag(&mut self, lines: Option<Range<usize>>) {
+        self.flagged = lines;
+    }
+
+    #[must_use]
+    pub fn flagged(&self) -> Option<&Range<usize>> {
+        self.flagged.as_ref()
+    }
+
     /// The bookkeeping every edit does: the snapshot the burst is taken back
     /// to, and the flags the settle reads.
     fn begin_edit(&mut self) {
+        self.flagged = None;
         if !self.burst {
             self.undo = Some((self.lines.clone(), self.cursor));
             self.burst = true;
