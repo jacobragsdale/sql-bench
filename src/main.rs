@@ -8,13 +8,10 @@ use sql_bench::cli::{self, Cli};
 use sql_bench::{config, run};
 
 fn main() -> ExitCode {
-    match run() {
-        Ok(code) => code,
-        Err(error) => {
-            eprintln!("error: {error:#}");
-            ExitCode::FAILURE
-        }
-    }
+    run().unwrap_or_else(|error| {
+        eprintln!("error: {error:#}");
+        ExitCode::FAILURE
+    })
 }
 
 fn run() -> Result<ExitCode> {
@@ -25,7 +22,7 @@ fn run() -> Result<ExitCode> {
     let config = config::load(&path)?;
     match cli.command {
         Some(_) => cli::run(&cli, &config),
-        None if cli.replay.is_some() => cli::not_implemented("replay"),
+        None if cli.replay.is_some() => run::replay(&config, &cli),
         None => run::run(&config).map(|()| ExitCode::SUCCESS),
     }
 }

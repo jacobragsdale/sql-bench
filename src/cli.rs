@@ -45,6 +45,9 @@ pub struct Cli {
     /// Directory a replay writes one text frame per redraw into
     #[arg(long, global = true, value_name = "DIR", value_hint = ValueHint::DirPath)]
     pub frames_dir: Option<PathBuf>,
+    /// Write <name>.styles.txt beside every frame: the colours, run by run
+    #[arg(long, global = true)]
+    pub frame_styles: bool,
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -628,6 +631,7 @@ mod tests {
             "120x40",
             "--frames-dir",
             "/tmp/f",
+            "--frame-styles",
         ]);
         assert_eq!(cli.replay, Some(PathBuf::from("keys.txt")));
         assert_eq!(
@@ -638,6 +642,7 @@ mod tests {
             })
         );
         assert_eq!(cli.frames_dir, Some(PathBuf::from("/tmp/f")));
+        assert!(cli.frame_styles);
     }
 
     #[test]
