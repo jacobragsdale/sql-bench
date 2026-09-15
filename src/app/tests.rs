@@ -173,6 +173,83 @@ fn no_connections_is_an_app_with_no_tabs_that_still_takes_keys() {
 }
 
 #[test]
+fn c_asks_to_connect_the_tab_on_screen_and_shift_c_to_disconnect_it() {
+    let mut app = two_tabs();
+    assert_eq!(press(&mut app, "c"), vec![Action::Connect(0)]);
+    assert_eq!(press(&mut app, "C"), vec![Action::Disconnect(0)]);
+    press(&mut app, "Ctrl-T");
+    assert_eq!(press(&mut app, "c"), vec![Action::Connect(1)]);
+
+    // A connection is not something the scratch pad asks for; both are
+    // characters to type there.
+    app.shell.focus = Focus::Scratch;
+    assert_eq!(press(&mut app, "c"), vec![]);
+    assert_eq!(press(&mut app, "C"), vec![]);
+}
+
+#[test]
+fn a_runtime_event_is_the_only_thing_that_moves_a_tab_and_it_says_so_in_the_footer() {
+    let mut app = two_tabs();
+    app.apply(RuntimeEvent::Connecting { tab: 0 });
+    assert_eq!(app.tabs[0].state, TabState::Connecting);
+    assert!(app.busy(), "a connecting tab is a busy app");
+
+    app.apply(RuntimeEvent::Connected {
+        tab: 0,
+        connect_ms: 42,
+    });
+    assert_eq!(app.tabs[0].state, TabState::Connected);
+    assert_eq!(app.tabs[0].connect_ms, Some(42));
+    assert_eq!(app.shell.status, "● local-mssql connected in 42 ms");
+    assert!(!app.busy());
+
+    app.apply(RuntimeEvent::Failed {
+        tab: 1,
+        message: "localhost:1521: ORA-12541".to_owned(),
+    });
+    assert_eq!(
+        app.tabs[1].state,
+        TabState::Failed("localhost:1521: ORA-12541".to_owned())
+    );
+    assert_eq!(app.shell.status, "✗ local-oracle failed");
+    assert_eq!(app.tabs[0].state, TabState::Connected, "one tab each");
+
+    app.apply(RuntimeEvent::Disconnected { tab: 0 });
+    assert_eq!(app.tabs[0].state, TabState::Disconnected);
+    assert_eq!(app.tabs[0].connect_ms, None);
+    assert_eq!(app.shell.status, "○ local-mssql disconnected");
+
+    // A tab that is not there is a stale message, not a panic.
+    app.apply(RuntimeEvent::Connected {
+        tab: 9,
+        connect_ms: 1,
+    });
+}
+
+#[test]
+fn the_spinner_moves_once_a_tick_while_something_is_connecting_and_never_otherwise() {
+    let mut shell = Shell::default();
+    let started = Instant::now();
+    assert!(!shell.tick(started, false), "nothing is connecting");
+    assert_eq!(shell.spinner, 0);
+
+    assert!(shell.tick(started, true), "the first frame is due at once");
+    assert_eq!(shell.spinner, 1);
+    assert!(
+        !shell.tick(started + SPIN_EVERY / 2, true),
+        "half a tick is no frame"
+    );
+    assert!(shell.tick(started + SPIN_EVERY, true));
+    assert_eq!(shell.spinner, 2);
+    assert_eq!(shell.mark(&TabState::Connecting), SPINNER[2]);
+    assert_eq!(shell.mark(&TabState::Connected), "●");
+
+    // Off again, and the next connection starts its own first frame.
+    assert!(!shell.tick(started + SPIN_EVERY, false));
+    assert!(shell.tick(started + SPIN_EVERY, true));
+}
+
+#[test]
 fn a_resize_is_remembered_and_asks_for_nothing() {
     let mut app = two_tabs();
     assert_eq!(app.handle(Event::Resize(120, 40)), vec![]);

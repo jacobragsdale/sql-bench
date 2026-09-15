@@ -1,5 +1,7 @@
 //! The three panes, the tab bar above them and the footer below.
 
+use std::time::Instant;
+
 use super::*;
 
 /// Where the footer's right end sits: one column off the edge.
@@ -63,7 +65,7 @@ fn the_footer_hints_the_focused_panes_keys_and_says_where_the_connection_is() {
         line(&terminal, 39),
         footer_of(
             &terminal,
-            " Tab next pane  Shift-Tab previous pane  Ctrl-T next tab  1-9 select tab  ? help",
+            " Tab next pane  Shift-Tab previous pane  Ctrl-T next tab  1-9 select tab  c connect  C disconnect",
             "○ disconnected",
         )
     );
@@ -84,6 +86,54 @@ fn the_footer_hints_the_focused_panes_keys_and_says_where_the_connection_is() {
     app.tabs[0].state = TabState::Connected;
     let terminal = frame(120, 40, &app);
     assert!(line(&terminal, 39).ends_with("● connected"));
+
+    // How long it took, once the connection reported it.
+    app.tabs[0].connect_ms = Some(4);
+    assert!(line(&frame(120, 40, &app), 39).ends_with("● connected 4ms"));
+
+    app.tabs[0].state = TabState::Connecting;
+    app.tabs[0].connect_ms = None;
+    assert!(line(&frame(120, 40, &app), 39).ends_with("⠋ connecting"));
+
+    app.tabs[0].state = TabState::Failed("no".to_owned());
+    assert!(line(&frame(120, 40, &app), 39).ends_with("✗ failed"));
+}
+
+#[test]
+fn a_connecting_tab_is_marked_with_the_spinner_frame_the_shell_is_on() {
+    let mut app = two_tabs();
+    app.tabs[0].state = TabState::Connecting;
+    let started = Instant::now();
+    for (step, expected) in ["⠋", "⠙", "⠹", "⠸", "⠋"].into_iter().enumerate() {
+        assert_eq!(
+            line(&frame(120, 40, &app), 0),
+            format!(" 1 local-mssql {expected}  2 local-oracle ○")
+        );
+        #[allow(clippy::cast_possible_truncation)]
+        let now = started + crate::app::SPIN_EVERY * step as u32;
+        assert!(app.shell.tick(now, true), "a frame is due");
+    }
+}
+
+#[test]
+fn a_failed_connection_is_the_message_and_how_to_retry_in_the_results_pane() {
+    let mut app = two_tabs();
+    app.tabs[0].state = TabState::Failed("localhost:1433: cannot connect: refused".to_owned());
+    let terminal = frame(120, 40, &app);
+    let screen = text(&terminal);
+    assert!(
+        screen.contains("localhost:1433: cannot connect: refused"),
+        "{screen}"
+    );
+    assert!(screen.contains("c to retry"), "{screen}");
+    assert!(!screen.contains("nothing has run yet"), "{screen}");
+
+    // The message is in the error colour, at the top left of the pane.
+    let (x, y) = corners(&terminal)
+        .into_iter()
+        .max_by_key(|(_, y)| *y)
+        .expect("the results pane");
+    assert_eq!(painted(&terminal, x + 2, y + 1), Theme::new(false).error);
 }
 
 #[test]

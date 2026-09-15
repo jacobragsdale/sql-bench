@@ -3,11 +3,13 @@
 //! module that blocks.
 
 pub mod replay;
+pub mod runtime;
 
 #[cfg(test)]
 mod tests;
 
 pub use replay::replay;
+pub use runtime::{Runtime, startup_tabs};
 
 use std::time::{Duration, Instant};
 
@@ -16,7 +18,8 @@ use crossterm::event::{self, Event};
 use ratatui::Terminal;
 use ratatui::backend::Backend;
 
-use crate::app::{Action, App};
+use crate::app::{Action, App, SPIN_EVERY};
+use crate::cli::Cli;
 use crate::config::Config;
 use crate::trace::Trace;
 use crate::ui;
@@ -27,7 +30,9 @@ use crate::ui::theme::Theme;
 /// limit the drain never empties and nothing is redrawn until it comes up.
 const DRAIN_LIMIT: Duration = Duration::from_millis(50);
 
-/// How long the loop waits for input before taking a turn with none.
+/// How long the loop waits for input before taking a turn with none. While
+/// something is connecting the wait is [`SPIN_EVERY`] instead, because the
+/// spinner has to move even when nobody is typing.
 const IDLE_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// A turn slower than this is worth a `turn` line in the trace. Anything
@@ -56,13 +61,17 @@ impl InputSource for TerminalInput {
     /// One poll, and then — having already come up empty once — however long
     /// it takes: a terminal nobody is typing at is idle, never exhausted, and
     /// two empty polls in a row would end the loop.
+    ///
+    /// The exception is a timeout shorter than the idle one, which is the
+    /// loop saying it wants the turn back on time because something is
+    /// animating; [`Driver::turn`] does not count those empties.
     fn next(&mut self, timeout: Duration) -> Result<Option<Event>> {
         loop {
             if event::poll(timeout).context("waiting for a key")? {
                 self.idle = false;
                 return Ok(Some(event::read().context("reading a key")?));
             }
-            if !std::mem::replace(&mut self.idle, true) {
+            if !std::mem::replace(&mut self.idle, true) || timeout < IDLE_TIMEOUT {
                 return Ok(None);
             }
         }
@@ -70,8 +79,9 @@ impl InputSource for TerminalInput {
 }
 
 /// Opens the TUI on this terminal and gives it back when the app quits.
-pub fn run(config: &Config) -> Result<()> {
+pub fn run(config: &Config, args: &Cli) -> Result<()> {
     let mut app = App::new(config);
+    let startup = startup_tabs(config, args)?;
     // `try_init` takes raw mode and the alternate screen and installs the
     // panic hook that gives both back; `Restore` is the same for every other
     // way out of this function.
@@ -79,11 +89,14 @@ pub fn run(config: &Config) -> Result<()> {
         .inspect_err(|_| ratatui::restore())
         .context("failed to take the terminal")?;
     let _restore = Restore;
+    let mut driver = Driver::new(Theme::from_env(), config);
+    driver.connect_at_startup(startup);
     run_loop(
         &mut terminal,
         &mut app,
         &mut TerminalInput::default(),
         &Trace::from_env(),
+        &mut driver,
     )
 }
 
@@ -108,11 +121,11 @@ pub fn run_loop<B: Backend>(
     app: &mut App,
     input: &mut dyn InputSource,
     trace: &Trace,
+    driver: &mut Driver,
 ) -> Result<()>
 where
     B::Error: std::error::Error + Send + Sync + 'static,
 {
-    let mut driver = Driver::new(Theme::from_env());
     while driver.turn(terminal, app, input, trace)? {}
     Ok(())
 }
@@ -130,17 +143,28 @@ pub struct Driver {
     theme: Theme,
     dirty: bool,
     empty: u8,
+    runtime: Runtime,
+    /// The tabs `--connect` asked for, connected once the first frame is up
+    /// so that a slow server is watched rather than waited for.
+    startup: Vec<usize>,
 }
 
 impl Driver {
     /// A driver whose first turn draws, because nothing has been drawn yet.
     #[must_use]
-    pub const fn new(theme: Theme) -> Self {
+    pub fn new(theme: Theme, config: &Config) -> Self {
         Self {
             theme,
             dirty: true,
             empty: 0,
+            runtime: Runtime::new(config),
+            startup: Vec::new(),
         }
+    }
+
+    /// Connect these tabs as soon as the first frame is on the screen.
+    pub fn connect_at_startup(&mut self, tabs: Vec<usize>) {
+        self.startup = tabs;
     }
 
     /// Draw if something changed, wait for input, handle everything already
@@ -163,6 +187,9 @@ impl Driver {
         if app.shell.should_quit {
             return Ok(false);
         }
+        self.dirty |= self.runtime.poll_connections(app, trace);
+        let spinning = app.connecting();
+        self.dirty |= app.shell.tick(Instant::now(), spinning);
         let mut drew = Duration::ZERO;
         if self.dirty {
             let at = Instant::now();
@@ -172,8 +199,19 @@ impl Driver {
             if trace.is_on() {
                 trace.event("frame", &[("draw_ms", &millis(drew))]);
             }
+            // After the first frame and never before: a connection takes up
+            // to ten seconds and nobody should watch a blank terminal for it.
+            for tab in std::mem::take(&mut self.startup) {
+                self.runtime.connect(app, tab, trace);
+            }
         }
-        let Some(first) = input.next(IDLE_TIMEOUT)? else {
+        let timeout = if spinning { SPIN_EVERY } else { IDLE_TIMEOUT };
+        let Some(first) = input.next(timeout)? else {
+            if spinning {
+                // A spinning app is working, not exhausted.
+                self.empty = 0;
+                return Ok(true);
+            }
             // Saturating because a replay keeps turning the loop through a
             // wait, long after it has counted to two.
             self.empty = self.empty.saturating_add(1);
@@ -189,6 +227,8 @@ impl Driver {
             for action in app.handle(this) {
                 match action {
                     Action::Quit => app.shell.should_quit = true,
+                    Action::Connect(tab) => self.runtime.connect(app, tab, trace),
+                    Action::Disconnect(tab) => self.runtime.disconnect(app, tab),
                 }
             }
             if app.shell.should_quit || handling.elapsed() >= DRAIN_LIMIT {

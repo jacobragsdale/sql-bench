@@ -48,6 +48,12 @@ pub struct Cli {
     /// Write <name>.styles.txt beside every frame: the colours, run by run
     #[arg(long, global = true)]
     pub frame_styles: bool,
+    /// Connect this connection once the first frame is up; repeatable
+    #[arg(long, global = true, value_name = "NAME")]
+    pub connect: Vec<String>,
+    /// Connect every connection in the config at startup
+    #[arg(long, global = true)]
+    pub connect_all: bool,
     #[command(subcommand)]
     pub command: Option<Command>,
 }
