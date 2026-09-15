@@ -1,0 +1,19 @@
+# Connect, reconnect and disconnect against the two containers
+# `scripts/db-up.sh` starts. Both have to be up: this is the script QA runs
+# to prove E4 against real databases.
+
+key c
+wait busy
+expect ● local-mssql
+frame connected
+
+key 2
+key c
+wait busy
+expect ● local-oracle
+
+key C
+expect ○ local-oracle
+frame final
+
+key q

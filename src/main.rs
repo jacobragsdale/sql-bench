@@ -23,6 +23,6 @@ fn run() -> Result<ExitCode> {
     match cli.command {
         Some(_) => cli::run(&cli, &config),
         None if cli.replay.is_some() => run::replay(&config, &cli),
-        None => run::run(&config).map(|()| ExitCode::SUCCESS),
+        None => run::run(&config, &cli).map(|()| ExitCode::SUCCESS),
     }
 }

@@ -10,7 +10,7 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph};
+use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph, Wrap};
 
 use crate::app::{App, Focus, KEYS, TabState, keys_for};
 use theme::Theme;
@@ -77,7 +77,7 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
         theme,
         Focus::Objects,
         objects,
-        "press c to connect",
+        vec![placeholder("press c to connect", theme)],
     );
     pane(
         frame,
@@ -85,7 +85,7 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
         theme,
         Focus::Scratch,
         scratch,
-        "your SQL goes here",
+        vec![placeholder("your SQL goes here", theme)],
     );
     pane(
         frame,
@@ -93,7 +93,7 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
         theme,
         Focus::Results,
         results,
-        "nothing has run yet",
+        results_body(app, theme),
     );
     frame.render_widget(footer_line(app, theme, area.width), footer);
     if app.shell.help {
@@ -107,7 +107,7 @@ fn tab_bar(app: &App, theme: &Theme) -> Line<'static> {
     for (index, tab) in app.tabs.iter().enumerate() {
         spans.push(Span::raw(if index == 0 { " " } else { "  " }));
         spans.push(Span::styled(
-            format!("{} {} {}", index + 1, tab.name, tab.state.mark()),
+            format!("{} {} {}", index + 1, tab.name, app.shell.mark(&tab.state)),
             if index == app.shell.active_tab {
                 theme.accent
             } else {
@@ -118,9 +118,31 @@ fn tab_bar(app: &App, theme: &Theme) -> Line<'static> {
     Line::from(spans)
 }
 
-/// One bordered placeholder. Nothing connects yet, so every pane's body is
-/// the one line that says what will be there.
-fn pane(frame: &mut Frame, app: &App, theme: &Theme, which: Focus, area: Rect, placeholder: &str) {
+/// What the results pane has to say: the failure a connection ended in, or
+/// the line that says nothing has run.
+fn results_body(app: &App, theme: &Theme) -> Vec<Line<'static>> {
+    match app.tab().map(|tab| &tab.state) {
+        Some(TabState::Failed(message)) => vec![
+            Line::from(Span::styled(message.clone(), theme.error)),
+            Line::from(Span::styled("c to retry", theme.dim)),
+        ],
+        _ => vec![placeholder("nothing has run yet", theme)],
+    }
+}
+
+fn placeholder(text: &str, theme: &Theme) -> Line<'static> {
+    Line::from(Span::styled(text.to_owned(), theme.dim))
+}
+
+/// One bordered pane around whatever it has to show.
+fn pane(
+    frame: &mut Frame,
+    app: &App,
+    theme: &Theme,
+    which: Focus,
+    area: Rect,
+    body: Vec<Line<'static>>,
+) {
     let focused = app.shell.focus == which;
     let (title_style, border_style) = if focused {
         (theme.accent, theme.accent)
@@ -130,19 +152,24 @@ fn pane(frame: &mut Frame, app: &App, theme: &Theme, which: Focus, area: Rect, p
     let block = titled(&format!(" {} ", which.title()), title_style, border_style);
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    frame.render_widget(
-        Paragraph::new(Span::styled(placeholder.to_owned(), theme.dim)),
-        inner,
-    );
+    // Wrapped: a driver's complaint is as long as the driver made it.
+    frame.render_widget(Paragraph::new(body).wrap(Wrap { trim: false }), inner);
 }
 
 /// Key hints on the left — or the error, or the status — and where the tab's
 /// connection is on the right.
 fn footer_line(app: &App, theme: &Theme, width: u16) -> Line<'static> {
     let disconnected = TabState::Disconnected;
-    let state = app.tab().map_or(&disconnected, |tab| &tab.state);
+    let tab = app.tab();
+    let state = tab.map_or(&disconnected, |tab| &tab.state);
+    // `● connected 4ms`: how long it took, while it is up.
+    let took = tab
+        .and_then(|tab| tab.connect_ms)
+        .filter(|_| *state == TabState::Connected)
+        .map(|ms| format!(" {ms}ms"))
+        .unwrap_or_default();
     let right = Span::styled(
-        format!("{} {} ", state.mark(), state.label()),
+        format!("{} {}{took} ", app.shell.mark(state), state.label()),
         match state {
             TabState::Connected => theme.ok,
             TabState::Failed(_) => theme.error,

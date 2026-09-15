@@ -31,7 +31,7 @@ use ratatui::buffer::Buffer;
 use crate::app::App;
 use crate::cli::{Cli, Size};
 use crate::config::Config;
-use crate::run::{Driver, InputSource};
+use crate::run::{Driver, InputSource, startup_tabs};
 use crate::trace::Trace;
 use crate::ui::theme::Theme;
 
@@ -74,6 +74,8 @@ pub struct Options {
     /// Only a test shortens these.
     pub busy_timeout: Duration,
     pub text_timeout: Duration,
+    /// Tabs `--connect` asked for, connected after the first frame.
+    pub connect: Vec<usize>,
 }
 
 impl Default for Options {
@@ -85,12 +87,15 @@ impl Default for Options {
             theme: Theme::from_env(),
             busy_timeout: BUSY_TIMEOUT,
             text_timeout: TEXT_TIMEOUT,
+            connect: Vec::new(),
         }
     }
 }
 
 impl Options {
     /// What the command line asked for, and the defaults for the rest.
+    /// `connect` is not among them: resolving a name needs the config, which
+    /// only [`replay`] has.
     #[must_use]
     pub fn from_cli(args: &Cli) -> Self {
         let defaults = Self::default();
@@ -115,13 +120,17 @@ pub fn replay(config: &Config, args: &Cli) -> Result<ExitCode> {
         .context("replay was asked for without a script")?;
     let source = std::fs::read_to_string(path)
         .with_context(|| format!("reading the replay script {}", path.display()))?;
-    run_script(&source, App::new(config), &Options::from_cli(args)).map(ExitCode::from)
+    let options = Options {
+        connect: startup_tabs(config, args)?,
+        ..Options::from_cli(args)
+    };
+    run_script(&source, App::new(config), config, &options).map(ExitCode::from)
 }
 
 /// The same run from a string, which is how a test asks for one.
-fn run_script(source: &str, app: App, options: &Options) -> Result<u8> {
+fn run_script(source: &str, app: App, config: &Config, options: &Options) -> Result<u8> {
     let script = parse(source)?;
-    let mut replay = Replay::new(app, options)?;
+    let mut replay = Replay::new(app, config, options)?;
     // The first frame, so that the first `expect` has something to look at.
     replay.turn()?;
     for (number, command) in &script {
@@ -331,12 +340,14 @@ struct Replay {
 }
 
 impl Replay {
-    fn new(app: App, options: &Options) -> Result<Self> {
+    fn new(app: App, config: &Config, options: &Options) -> Result<Self> {
+        let mut driver = Driver::new(options.theme, config);
+        driver.connect_at_startup(options.connect.clone());
         Ok(Self {
             terminal: Terminal::new(TestBackend::new(options.size.cols, options.size.rows))
                 .context("opening a test terminal")?,
             app,
-            driver: Driver::new(options.theme),
+            driver,
             input: Queue::default(),
             trace: Trace::from_env(),
             frames: options.frames.clone(),
@@ -531,7 +542,7 @@ mod tests {
     }
 
     fn run(source: &str, app: App, options: &Options) -> u8 {
-        run_script(source, app, options).expect("the replay")
+        run_script(source, app, &two_connections(), options).expect("the replay")
     }
 
     #[test]
@@ -697,7 +708,8 @@ mod tests {
     #[test]
     fn a_replay_stops_where_the_app_did() {
         let directory = tempfile::tempdir().expect("a directory");
-        let mut replay = Replay::new(two_tabs(), &options(directory.path())).expect("a replay");
+        let mut replay = Replay::new(two_tabs(), &two_connections(), &options(directory.path()))
+            .expect("a replay");
         replay.turn().expect("the first frame");
         assert_eq!(replay.step(&parsed("key Tab"), 1).expect("a key"), None);
         assert_eq!(replay.app.shell.focus, Focus::Scratch);

@@ -6,6 +6,8 @@
 #[cfg(test)]
 pub(crate) mod tests;
 
+use std::time::{Duration, Instant};
+
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::Size;
 
@@ -23,6 +25,8 @@ pub const KEYS: &[(&str, &str, &str)] = &[
     ("Shift-Tab", ANYWHERE, "previous pane"),
     ("Ctrl-T", ANYWHERE, "next tab"),
     ("1-9", NOT_SCRATCH, "select tab"),
+    ("c", NOT_SCRATCH, "connect"),
+    ("C", NOT_SCRATCH, "disconnect"),
     ("?", ANYWHERE, "help"),
     ("Esc", ANYWHERE, "close help or error"),
     ("q", NOT_SCRATCH, "quit"),
@@ -32,6 +36,14 @@ pub const KEYS: &[(&str, &str, &str)] = &[
 pub const ANYWHERE: &str = "anywhere";
 
 pub const NOT_SCRATCH: &str = "not Scratch";
+
+/// The frames a connecting tab's mark cycles through, one every
+/// [`SPIN_EVERY`].
+pub const SPINNER: [&str; 4] = ["⠋", "⠙", "⠹", "⠸"];
+
+/// How often the spinner moves on. Fast enough to read as motion, slow
+/// enough that a connecting app costs ten frames a second and not more.
+pub const SPIN_EVERY: Duration = Duration::from_millis(100);
 
 /// The rows of [`KEYS`] that work while `focus` has the focus.
 pub fn keys_for(
@@ -46,6 +58,21 @@ pub fn keys_for(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Action {
     Quit,
+    /// Open (or re-open) this tab's connection.
+    Connect(usize),
+    /// Close it, cancelling whatever it is running.
+    Disconnect(usize),
+}
+
+/// What the run loop reports back about a connection. The app never opens
+/// one, so this is the only way a tab moves off [`TabState::Connecting`] —
+/// and it is what makes those transitions testable without a database.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RuntimeEvent {
+    Connecting { tab: usize },
+    Connected { tab: usize, connect_ms: u32 },
+    Failed { tab: usize, message: String },
+    Disconnected { tab: usize },
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -86,8 +113,7 @@ impl Focus {
     }
 }
 
-/// Where one tab's connection is. Nothing moves it off `Disconnected` yet:
-/// connecting is E4's.
+/// Where one tab's connection is. Only [`App::apply`] moves it.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub enum TabState {
     #[default]
@@ -103,7 +129,8 @@ impl TabState {
     pub const fn mark(&self) -> &'static str {
         match self {
             Self::Disconnected => "○",
-            Self::Connecting => "◌",
+            // The still frame; [`Shell::mark`] is the moving one.
+            Self::Connecting => SPINNER[0],
             Self::Connected => "●",
             Self::Failed(_) => "✗",
         }
@@ -116,7 +143,7 @@ impl TabState {
             Self::Disconnected => "disconnected",
             Self::Connecting => "connecting",
             Self::Connected => "connected",
-            Self::Failed(_) => "error",
+            Self::Failed(_) => "failed",
         }
     }
 }
@@ -127,6 +154,8 @@ pub struct Tab {
     pub name: String,
     pub kind: Kind,
     pub state: TabState,
+    /// How long the connection that is up took to open.
+    pub connect_ms: Option<u32>,
 }
 
 /// The state every pane shares.
@@ -142,6 +171,43 @@ pub struct Shell {
     pub size: Size,
     /// Whether the help overlay is open.
     pub help: bool,
+    /// Which frame of [`SPINNER`] a connecting tab is showing.
+    pub spinner: usize,
+    /// When that frame went up. The clock comes from the caller, so this
+    /// module still reads none of its own.
+    spun_at: Option<Instant>,
+}
+
+impl Shell {
+    /// Move the spinner on if it is `spinning` and a frame is due, and say
+    /// whether the screen has to be painted again.
+    ///
+    /// An app with nothing connecting never returns `true`, which is what
+    /// keeps an idle run at zero frames.
+    pub fn tick(&mut self, now: Instant, spinning: bool) -> bool {
+        if !spinning {
+            self.spun_at = None;
+            return false;
+        }
+        if self
+            .spun_at
+            .is_some_and(|at| now.duration_since(at) < SPIN_EVERY)
+        {
+            return false;
+        }
+        self.spun_at = Some(now);
+        self.spinner = self.spinner.wrapping_add(1);
+        true
+    }
+
+    /// The glyph for a tab in this state, this spinner frame included.
+    #[must_use]
+    pub fn mark(&self, state: &TabState) -> &'static str {
+        match state {
+            TabState::Connecting => SPINNER[self.spinner % SPINNER.len()],
+            other => other.mark(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -165,6 +231,7 @@ impl App {
                     name: connection.name.clone(),
                     kind: connection.kind,
                     state: TabState::default(),
+                    connect_ms: None,
                 })
                 .collect(),
         }
@@ -181,9 +248,44 @@ impl App {
     /// it answers for the whole app and not just the tab on screen.
     #[must_use]
     pub fn busy(&self) -> bool {
+        self.connecting()
+    }
+
+    /// Whether any tab is connecting, which is the only thing that animates.
+    #[must_use]
+    pub fn connecting(&self) -> bool {
         self.tabs
             .iter()
             .any(|tab| tab.state == TabState::Connecting)
+    }
+
+    /// What the run loop found out about a connection.
+    ///
+    /// The footer says which tab it was, because the tab it happened to is
+    /// not always the tab on screen.
+    pub fn apply(&mut self, event: RuntimeEvent) {
+        let (index, state, connect_ms) = match event {
+            RuntimeEvent::Connecting { tab } => (tab, TabState::Connecting, None),
+            RuntimeEvent::Connected { tab, connect_ms } => {
+                (tab, TabState::Connected, Some(connect_ms))
+            }
+            RuntimeEvent::Failed { tab, message } => (tab, TabState::Failed(message), None),
+            RuntimeEvent::Disconnected { tab } => (tab, TabState::Disconnected, None),
+        };
+        let Some(tab) = self.tabs.get_mut(index) else {
+            return;
+        };
+        tab.state = state;
+        tab.connect_ms = connect_ms;
+        self.shell.status = format!(
+            "{} {} {}{}",
+            tab.state.mark(),
+            tab.name,
+            tab.state.label(),
+            connect_ms
+                .map(|ms| format!(" in {ms} ms"))
+                .unwrap_or_default(),
+        );
     }
 
     /// One event, turned into state changes and whatever has to happen
@@ -222,6 +324,13 @@ impl App {
                 }
             }
             KeyCode::Char('q') if !typing => return vec![Action::Quit],
+            // Not `control`: Ctrl-C is the terminal's, not a connect key.
+            KeyCode::Char('c') if !typing && !control && !self.tabs.is_empty() => {
+                return vec![Action::Connect(self.shell.active_tab)];
+            }
+            KeyCode::Char('C') if !typing && !control && !self.tabs.is_empty() => {
+                return vec![Action::Disconnect(self.shell.active_tab)];
+            }
             KeyCode::Char(digit @ '1'..='9') if !typing => {
                 let wanted = digit as usize - '1' as usize;
                 if wanted < self.tabs.len() {

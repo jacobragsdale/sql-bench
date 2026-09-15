@@ -6,7 +6,12 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
 use super::*;
-use crate::app::tests::{key, two_tabs};
+use crate::app::tests::{key, two_connections, two_tabs};
+
+/// A driver with the two tabs' connections behind it, connected to none.
+fn driver() -> Driver {
+    Driver::new(Theme::from_env(), &two_connections())
+}
 
 /// The keys of a replay: each one once, then nothing, for ever.
 struct Keys(std::vec::IntoIter<Event>);
@@ -53,7 +58,7 @@ fn terminal() -> Terminal<TestBackend> {
 fn drive(input: &mut dyn InputSource, trace: &Trace) -> App {
     let mut app = two_tabs();
     let mut terminal = terminal();
-    run_loop(&mut terminal, &mut app, input, trace).expect("the loop");
+    run_loop(&mut terminal, &mut app, input, trace, &mut driver()).expect("the loop");
     app
 }
 
@@ -66,6 +71,7 @@ fn a_run_draws_the_layout_and_q_ends_it() {
         &mut app,
         &mut Keys::new(&["Ctrl-T", "q"]),
         &Trace::new(None),
+        &mut driver(),
     )
     .expect("the loop");
     assert!(app.shell.should_quit);
