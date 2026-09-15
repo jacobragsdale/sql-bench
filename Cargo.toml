@@ -3,7 +3,7 @@ name = "sql-bench"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
-description = "A fast terminal workbench for SQL Server and Oracle"
+description = "A fast, lightweight terminal workbench for SQL Server and Oracle"
 license = "MIT"
 
 [dependencies]
