@@ -3,7 +3,7 @@
 use anyhow::Result;
 use clap::Parser;
 use sql_bench::cli::{self, Cli};
-use sql_bench::config;
+use sql_bench::{config, run};
 
 fn main() {
     if let Err(error) = run() {
@@ -17,9 +17,10 @@ fn run() -> Result<()> {
     let path = cli.config.clone().unwrap_or_else(config::default_path);
     // Read before anything is dispatched: a config that cannot be read is a
     // clear error now rather than a surprise on the first connection.
-    config::load(&path)?;
+    let config = config::load(&path)?;
     match cli.command.as_ref() {
         Some(command) => cli::not_implemented(command.name()),
-        None => cli::not_implemented("the interactive TUI"),
+        None if cli.replay.is_some() => cli::not_implemented("replay"),
+        None => run::run(&config),
     }
 }
