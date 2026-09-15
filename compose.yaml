@@ -1,0 +1,63 @@
+# Local databases for sql-bench development. Started by scripts/db-up.sh.
+#
+# Licensing: MSSQL_PID=Developer selects the free SQL Server Developer
+# edition, which Microsoft licenses for development and test use only --
+# never for production. Oracle Database Free is free to use, distribute and
+# even run in production, within its resource limits (1 CPU, 2 GB SGA/PGA,
+# 12 GB of user data). Both images are pulled from their vendor's registry
+# and ACCEPT_EULA=Y accepts the SQL Server EULA on your behalf.
+name: sql-bench
+
+services:
+  mssql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: sql-bench-mssql
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_PID: Developer
+      MSSQL_SA_PASSWORD: "Bench_Pass1!"
+    ports:
+      - "1433:1433"
+    volumes:
+      - mssql-data:/var/opt/mssql
+      - ./scripts/seed:/seed:ro
+    healthcheck:
+      test:
+        - CMD
+        - /opt/mssql-tools18/bin/sqlcmd
+        - -C
+        - -S
+        - localhost
+        - -U
+        - sa
+        - -P
+        - Bench_Pass1!
+        - -Q
+        - select 1
+      interval: 5s
+      timeout: 10s
+      retries: 60
+      start_period: 20s
+
+  oracle:
+    image: gvenzl/oracle-free:23-slim
+    container_name: sql-bench-oracle
+    environment:
+      ORACLE_PASSWORD: "Bench_Pass1!"
+      APP_USER: bench
+      APP_USER_PASSWORD: bench
+    ports:
+      - "1521:1521"
+    volumes:
+      - oracle-data:/opt/oracle/oradata
+      - ./scripts/seed:/seed:ro
+    healthcheck:
+      test: ["CMD", "/opt/oracle/healthcheck.sh"]
+      interval: 5s
+      timeout: 10s
+      retries: 90
+      start_period: 30s
+
+volumes:
+  mssql-data:
+  oracle-data:
