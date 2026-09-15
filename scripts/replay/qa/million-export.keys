@@ -1,0 +1,37 @@
+# T5.4 case 10: the whole read loop over a million row table at a hundred
+# thousand of them — G to the bottom, five pages back up, and an export of
+# every fetched row to a CSV. The budget is the run under 15 s and no frame
+# over 16 ms once the scan is done; scripts/qa/query-workflow.sh reads both
+# off the clock and the trace.
+#
+# Run with --max-rows 100000. Same statement on both backends.
+
+key c
+wait busy
+expect ●
+
+key Tab
+type select * from bench.events
+key Ctrl-R
+wait busy
+expect 100,000 rows (truncated)
+
+key Shift-Tab
+key Shift-Tab
+key G
+frame bottom
+key PageUp
+key PageUp
+key PageUp
+key PageUp
+key PageUp
+frame paged-up
+
+key e
+expect Export to: ~/sql-bench-
+key Ctrl-U
+type /tmp/sql-bench-qa-million.csv
+key Enter
+expect exported 100,000 rows to /tmp/sql-bench-qa-million.csv
+frame exported
+key Ctrl-Q

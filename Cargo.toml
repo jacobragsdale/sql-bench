@@ -19,6 +19,7 @@ time = { version = "0.3.55", features = ["formatting", "macros", "parsing"] }
 tokio = { version = "1.53.1", features = ["rt", "net", "time"] }
 tokio-util = { version = "0.7.19", features = ["compat"] }
 toml = "0.9.12"
+unicode-width = "0.2.2"
 
 [dev-dependencies]
 tempfile = "3.27.0"

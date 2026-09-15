@@ -9,28 +9,61 @@
 use std::borrow::Cow;
 use std::fmt::Write as _;
 
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
 use crate::db::model::{Cell, Column};
 
 /// How much of a cell a terminal wants to see before the rest is somebody
 /// else's problem. `--full` turns it off.
 pub const CELL_LIMIT: usize = 60;
 
-/// Width in characters, not in columns of a terminal font.
-// ponytail: a CJK name is drawn two cells wide and counted as one, so a table
-// of Chinese text leans. Reach for unicode-width — already in ratatui's tree —
-// if the grid ever needs the real answer; `cargo add` is what that costs.
-fn width(text: &str) -> usize {
-    text.chars().count()
+/// How many terminal columns a string is drawn in — the one width the grid
+/// and this module both measure with, so a table and the pane it came from
+/// line up on the same glyphs. A CJK name is two columns per character.
+#[must_use]
+pub fn width(text: &str) -> usize {
+    UnicodeWidthStr::width(text)
 }
 
-/// At most `limit` characters, the last of which says there were more.
-fn cut(text: &str, limit: Option<usize>) -> Cow<'_, str> {
-    let Some(limit) = limit.filter(|limit| *limit > 0 && width(text) > *limit) else {
+/// The start of `text` that is at most `columns` wide, with `…` for the rest
+/// when there is one. The `…` is a column of its own, so a cut never spills
+/// over the width it was given — and a wide glyph that would straddle the
+/// end is dropped rather than halved.
+#[must_use]
+pub fn cut_to(text: &str, columns: usize) -> Cow<'_, str> {
+    if columns == 0 || width(text) <= columns {
         return Cow::Borrowed(text);
-    };
-    let mut cut: String = text.chars().take(limit - 1).collect();
-    cut.push('…');
-    Cow::Owned(cut)
+    }
+    let mut kept = String::new();
+    let mut used = 0;
+    for character in text.chars() {
+        let cost = UnicodeWidthChar::width(character).unwrap_or(0);
+        if used + cost > columns - 1 {
+            break;
+        }
+        kept.push(character);
+        used += cost;
+    }
+    kept.push('…');
+    Cow::Owned(kept)
+}
+
+/// `text` padded to `columns` terminal columns, on the side that leaves the
+/// value where it reads best. Rust's own `{:width$}` counts characters, which
+/// is the bug this whole helper exists to keep out of two renderers.
+#[must_use]
+pub fn pad(text: &str, columns: usize, right: bool) -> String {
+    let padding = " ".repeat(columns.saturating_sub(width(text)));
+    if right {
+        padding + text
+    } else {
+        text.to_owned() + &padding
+    }
+}
+
+/// At most `limit` columns, the last of which says there were more.
+fn cut(text: &str, limit: Option<usize>) -> Cow<'_, str> {
+    limit.map_or(Cow::Borrowed(text), |limit| cut_to(text, limit))
 }
 
 /// What a cell reads as in a table: the one difference from
@@ -115,14 +148,11 @@ fn line(out: &mut String, cells: &[Cow<'_, str>], widths: &[usize], right: &[boo
         if index > 0 {
             row.push_str("  ");
         }
-        let padding = " ".repeat(widths[index].saturating_sub(width(cell)));
-        if right.get(index).copied().unwrap_or(false) {
-            row.push_str(&padding);
-            row.push_str(cell);
-        } else {
-            row.push_str(cell);
-            row.push_str(&padding);
-        }
+        row.push_str(&pad(
+            cell,
+            widths[index],
+            right.get(index).copied().unwrap_or(false),
+        ));
     }
     out.push_str(row.trim_end());
     out.push('\n');
@@ -359,11 +389,45 @@ mod tests {
         assert_eq!(whole.lines().nth(2).unwrap(), long);
     }
 
+    /// T5.4: the limit is terminal columns, so a cut lands between two wide
+    /// glyphs and never inside one — three of them and the `…` would be
+    /// seven columns in a table four wide.
     #[test]
     fn a_cut_lands_on_a_character_and_not_in_the_middle_of_one() {
         let long = "李".repeat(100);
         let table = table(&columns(&["t"]), &[vec![text(&long)]], Some(4));
-        assert_eq!(table.lines().nth(2).unwrap(), "李李李…");
+        assert_eq!(table.lines().nth(2).unwrap(), "李…");
+        assert_eq!(width(table.lines().nth(2).unwrap()), 3);
+    }
+
+    /// T5.4: the column after a CJK value used to lean, because a name two
+    /// terminal columns wide was padded as though it were one.
+    #[test]
+    fn a_wide_glyph_takes_two_columns_and_the_column_after_it_still_lines_up() {
+        let rows = vec![
+            vec![text("李雷"), text("CN")],
+            vec![text("Zoe"), text("DE")],
+            vec![text("山田太郎"), text("JP")],
+        ];
+        let table = table(&columns(&["name", "country"]), &rows, None);
+        let lines: Vec<&str> = table.lines().collect();
+        assert_eq!(
+            lines,
+            [
+                "name      country",
+                "--------  -------",
+                "李雷      CN",
+                "Zoe       DE",
+                "山田太郎  JP",
+            ]
+        );
+        for line in &lines {
+            assert_eq!(
+                width(&line[..line.find("  ").unwrap()]).max(8),
+                8,
+                "the name column is eight columns wide on every line: {line:?}"
+            );
+        }
     }
 
     #[test]

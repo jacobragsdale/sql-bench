@@ -9,7 +9,7 @@ expect connecting
 
 key ?
 expect ╭ Help
-expect Ctrl-T    anywhere    next tab
+expect Ctrl-T     next tab
 frame help-while-connecting
 key Esc
 expect-not ╭ Help

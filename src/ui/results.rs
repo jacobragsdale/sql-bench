@@ -17,6 +17,7 @@ use super::{placeholder, titled};
 use crate::app::results::{Results, Source, Status, cut, grouped_u64, shown};
 use crate::app::{App, Focus, TabState};
 use crate::db::model::{Cell, Column};
+use crate::export::pad;
 
 /// A pane taller than this gets a second header row with the column types.
 /// Shorter than that and the types would cost a fifth of the rows on screen.
@@ -174,7 +175,7 @@ fn head(
         }
         let width = widths[column];
         let text = columns.get(column).map(&what).unwrap_or_default();
-        spans.push(Span::styled(format!("{:<width$}", cut(text, width)), style));
+        spans.push(Span::styled(pad(&cut(text, width), width, false), style));
     }
     Line::from(spans)
 }
@@ -199,14 +200,10 @@ fn fitting(widths: &[usize], left: usize, width: usize) -> Vec<usize> {
     showing
 }
 
-/// One cell, cut to the column and padded to it — numbers to the right, so
-/// a column of them lines up on the digit that matters.
+/// One cell, cut to the column and padded to it in terminal columns —
+/// numbers to the right, so a column of them lines up on the digit that
+/// matters, and a wide glyph moves nothing along.
 fn padded(cell: Option<&Cell>, width: usize, right: bool) -> String {
     let text = cell.map_or(std::borrow::Cow::Borrowed(""), shown);
-    let text = cut(&text, width);
-    if right {
-        format!("{text:>width$}")
-    } else {
-        format!("{text:<width$}")
-    }
+    pad(&cut(&text, width), width, right)
 }

@@ -383,3 +383,51 @@ fn the_export_prompt_is_the_footer_with_a_cursor_on_it() {
         as_painted(Theme::new(false).cursor)
     );
 }
+
+/// T5.4: a name drawn two terminal columns per character used to be padded
+/// as though it were one, so every column after it leaned by a column per
+/// wide glyph. ratatui blanks the cell a wide glyph covers, so one character
+/// of a frame is one terminal column and the offsets below are the columns.
+#[test]
+fn a_wide_glyph_takes_two_columns_and_the_column_after_it_still_lines_up() {
+    let mut results = Results::default();
+    results.start(Instant::now(), 0, 1, false);
+    results.apply(QueryEvent::Columns(
+        [("name", "nvarchar"), ("country", "char")]
+            .map(|(name, type_name)| Column {
+                name: name.to_owned(),
+                type_name: type_name.to_owned(),
+            })
+            .to_vec(),
+    ));
+    results.apply(QueryEvent::Rows(
+        [("Zoë Bauer", "DE"), ("李雷", "CN"), ("山田太郎", "JP")]
+            .map(|(name, country)| {
+                vec![Cell::Text(name.to_owned()), Cell::Text(country.to_owned())]
+            })
+            .to_vec(),
+    ));
+    let terminal = frame(120, 40, &showing(results));
+    let rows: Vec<String> = (0..5).map(|row| body(&terminal, row)).collect();
+    assert_eq!(
+        rows,
+        [
+            "name       country",
+            "nvarchar   char",
+            "Zoë Bauer  DE",
+            "李 雷        CN",
+            "山 田 太 郎    JP",
+        ]
+    );
+    for (row, country) in rows.iter().zip(["country", "", "DE", "CN", "JP"]) {
+        if country.is_empty() {
+            continue;
+        }
+        let column = row.find(country).map(|byte| row[..byte].chars().count());
+        assert_eq!(
+            column,
+            Some(11),
+            "the second column starts at the same terminal column on every row: {row:?}"
+        );
+    }
+}

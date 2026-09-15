@@ -1,0 +1,70 @@
+# T5.4 cases 1, 2, 4, 11 and 12 on Oracle: unicode in the SQL and in the
+# rows, three hundred columns, NULL-only rows, every type in the grid, and a
+# CJK name that must not lean the column after it.
+#
+# One connection in the config, so this is tab 1 whichever backend it is;
+# scripts/qa/query-workflow.sh runs it at 400x24 and measures the frames.
+
+key c
+wait busy
+expect ●
+
+key Tab
+
+# 1: unicode in the statement and in the answer.
+type select name, country from bench.customers where name like '%ë%'
+key Ctrl-R
+wait busy
+expect Zoë Bauer
+frame unicode
+
+# 12: the row with 李雷 in it. The frame is where the alignment is measured:
+# the runner compares the column the country starts at on every row.
+key Ctrl-A
+key Ctrl-K
+type select name, country, email from bench.customers where id <= 5 order by id
+key Ctrl-R
+wait busy
+expect 李
+frame cjk
+
+# 4: a row of nothing but NULLs says so rather than leaving the columns blank.
+key Ctrl-A
+key Ctrl-K
+type select null as a, null as b from dual
+key Ctrl-R
+wait busy
+expect NULL         NULL
+frame nulls
+
+# 2: three hundred columns. $ walks the cell cursor to the last of them, and
+# the grid scrolls the window across to it.
+key Ctrl-A
+key Ctrl-K
+paste select 1 as c1, 2 as c2, 3 as c3, 4 as c4, 5 as c5, 6 as c6, 7 as c7, 8 as c8, 9 as c9, 10 as c10, 11 as c11, 12 as c12, 13 as c13, 14 as c14, 15 as c15, 16 as c16, 17 as c17, 18 as c18, 19 as c19, 20 as c20, 21 as c21, 22 as c22, 23 as c23, 24 as c24, 25 as c25, 26 as c26, 27 as c27, 28 as c28, 29 as c29, 30 as c30, 31 as c31, 32 as c32, 33 as c33, 34 as c34, 35 as c35, 36 as c36, 37 as c37, 38 as c38, 39 as c39, 40 as c40, 41 as c41, 42 as c42, 43 as c43, 44 as c44, 45 as c45, 46 as c46, 47 as c47, 48 as c48, 49 as c49, 50 as c50, 51 as c51, 52 as c52, 53 as c53, 54 as c54, 55 as c55, 56 as c56, 57 as c57, 58 as c58, 59 as c59, 60 as c60, 61 as c61, 62 as c62, 63 as c63, 64 as c64, 65 as c65, 66 as c66, 67 as c67, 68 as c68, 69 as c69, 70 as c70, 71 as c71, 72 as c72, 73 as c73, 74 as c74, 75 as c75, 76 as c76, 77 as c77, 78 as c78, 79 as c79, 80 as c80, 81 as c81, 82 as c82, 83 as c83, 84 as c84, 85 as c85, 86 as c86, 87 as c87, 88 as c88, 89 as c89, 90 as c90, 91 as c91, 92 as c92, 93 as c93, 94 as c94, 95 as c95, 96 as c96, 97 as c97, 98 as c98, 99 as c99, 100 as c100, 101 as c101, 102 as c102, 103 as c103, 104 as c104, 105 as c105, 106 as c106, 107 as c107, 108 as c108, 109 as c109, 110 as c110, 111 as c111, 112 as c112, 113 as c113, 114 as c114, 115 as c115, 116 as c116, 117 as c117, 118 as c118, 119 as c119, 120 as c120, 121 as c121, 122 as c122, 123 as c123, 124 as c124, 125 as c125, 126 as c126, 127 as c127, 128 as c128, 129 as c129, 130 as c130, 131 as c131, 132 as c132, 133 as c133, 134 as c134, 135 as c135, 136 as c136, 137 as c137, 138 as c138, 139 as c139, 140 as c140, 141 as c141, 142 as c142, 143 as c143, 144 as c144, 145 as c145, 146 as c146, 147 as c147, 148 as c148, 149 as c149, 150 as c150, 151 as c151, 152 as c152, 153 as c153, 154 as c154, 155 as c155, 156 as c156, 157 as c157, 158 as c158, 159 as c159, 160 as c160, 161 as c161, 162 as c162, 163 as c163, 164 as c164, 165 as c165, 166 as c166, 167 as c167, 168 as c168, 169 as c169, 170 as c170, 171 as c171, 172 as c172, 173 as c173, 174 as c174, 175 as c175, 176 as c176, 177 as c177, 178 as c178, 179 as c179, 180 as c180, 181 as c181, 182 as c182, 183 as c183, 184 as c184, 185 as c185, 186 as c186, 187 as c187, 188 as c188, 189 as c189, 190 as c190, 191 as c191, 192 as c192, 193 as c193, 194 as c194, 195 as c195, 196 as c196, 197 as c197, 198 as c198, 199 as c199, 200 as c200, 201 as c201, 202 as c202, 203 as c203, 204 as c204, 205 as c205, 206 as c206, 207 as c207, 208 as c208, 209 as c209, 210 as c210, 211 as c211, 212 as c212, 213 as c213, 214 as c214, 215 as c215, 216 as c216, 217 as c217, 218 as c218, 219 as c219, 220 as c220, 221 as c221, 222 as c222, 223 as c223, 224 as c224, 225 as c225, 226 as c226, 227 as c227, 228 as c228, 229 as c229, 230 as c230, 231 as c231, 232 as c232, 233 as c233, 234 as c234, 235 as c235, 236 as c236, 237 as c237, 238 as c238, 239 as c239, 240 as c240, 241 as c241, 242 as c242, 243 as c243, 244 as c244, 245 as c245, 246 as c246, 247 as c247, 248 as c248, 249 as c249, 250 as c250, 251 as c251, 252 as c252, 253 as c253, 254 as c254, 255 as c255, 256 as c256, 257 as c257, 258 as c258, 259 as c259, 260 as c260, 261 as c261, 262 as c262, 263 as c263, 264 as c264, 265 as c265, 266 as c266, 267 as c267, 268 as c268, 269 as c269, 270 as c270, 271 as c271, 272 as c272, 273 as c273, 274 as c274, 275 as c275, 276 as c276, 277 as c277, 278 as c278, 279 as c279, 280 as c280, 281 as c281, 282 as c282, 283 as c283, 284 as c284, 285 as c285, 286 as c286, 287 as c287, 288 as c288, 289 as c289, 290 as c290, 291 as c291, 292 as c292, 293 as c293, 294 as c294, 295 as c295, 296 as c296, 297 as c297, 298 as c298, 299 as c299, 300 as c300 from dual
+key Ctrl-R
+wait busy
+expect 1 rows
+key Shift-Tab
+key Shift-Tab
+expect C1
+key $
+expect C300
+frame wide
+key Shift-Tab
+
+# 11: every type bench.all_types holds, read against docs/TYPES.md. Two
+# frames, because two dozen columns do not fit across one.
+key Ctrl-A
+key Ctrl-K
+type select * from bench.all_types
+key Ctrl-R
+wait busy
+key Shift-Tab
+key Shift-Tab
+key 0
+frame types-left
+key $
+frame types-right
+
+key Ctrl-Q

@@ -78,5 +78,6 @@ if [ "${SQL_BENCH_TEST_DBS:-}" = 1 ]; then
     check "max-rows timing" scripts/qa/max-rows-timing.sh
     check "connection lifecycle" scripts/qa/connections.sh
     check "query replays" scripts/qa/run-queries.sh
+    check "the query workflow" scripts/qa/query-workflow.sh
     check "database outage" scripts/qa/db-outage.sh
 fi

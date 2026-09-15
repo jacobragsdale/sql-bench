@@ -1,0 +1,18 @@
+# T5.4 case 6: Ctrl-R with nothing in the pad says so in the footer instead
+# of running an empty statement, and F5 says the same in its own words.
+
+key c
+wait busy
+expect ●
+
+key Tab
+key Ctrl-R
+expect no statement under the cursor
+expect-not Running
+frame empty-ctrl-r
+
+key F5
+expect the pad is empty
+expect-not Running
+frame empty-f5
+key Ctrl-Q

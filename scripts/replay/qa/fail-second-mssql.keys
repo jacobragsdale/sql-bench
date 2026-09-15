@@ -1,0 +1,27 @@
+# T5.4 case 5 on SQL Server: F5 over a pad whose second statement the server
+# says no to. `docs/DESIGN.md` ("Results grid") fixes what that does: the
+# failure stops the run, so the third statement never runs; the footer says
+# which one it was; the pane shows the driver's own words; and the pad paints
+# that statement's lines in the error background until the next edit — which
+# scripts/qa/query-workflow.sh reads out of the styles dump.
+
+key c
+wait busy
+expect ●
+
+key Tab
+type select 1 as one
+key Enter
+key Enter
+type select * from bench.nope_not_here
+key Enter
+key Enter
+type select 3 as three
+key F5
+wait busy
+
+expect statement 2 of 3 failed
+expect Invalid object name
+expect-not Running
+frame fail-second
+key Ctrl-Q

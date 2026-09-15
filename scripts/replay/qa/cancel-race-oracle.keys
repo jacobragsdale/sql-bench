@@ -1,0 +1,28 @@
+# T5.4 case 7 on Oracle: Esc the instant after Ctrl-R, with no wait
+# between them. Whatever the driver had got to, the tab may not be left on
+# `Running`, the cancel has to land, and the next statement has to run on the
+# same tab — which means the driver opened a connection to replace the one it
+# threw away.
+
+key c
+wait busy
+expect ●
+
+key Tab
+type select count(*) from bench.events e1, bench.events e2
+key Ctrl-R
+key Esc
+wait busy
+expect cancelled after
+expect-not Running
+frame cancelled
+
+key Ctrl-A
+key Ctrl-K
+type select 42 as answer from dual
+key Ctrl-R
+wait busy
+expect answer
+expect 42
+frame after-cancel
+key Ctrl-Q
