@@ -422,6 +422,8 @@ epics:
     verify:
     - cargo test --all-targets
     - SQL_BENCH_CONFIG=config.local.toml scripts/perf.sh
+    verified: true
+    note: merged to main 2026-09-14; full DB suite and connect replay re-run by the coordinator
   - id: T2.5
     tag: qa
     title: 'T2.5 QA: driver conformance matrix and failure modes'
@@ -654,6 +656,8 @@ epics:
     - cargo test --all-targets
     - SQL_BENCH_CONFIG=config.local.toml cargo run -- --replay scripts/replay/connect.keys --size 120x40
       --frames-dir /tmp/sql-bench-frames
+    verified: true
+    note: merged to main 2026-09-14; full DB suite and connect replay re-run by the coordinator
   - id: T4.2
     tag: qa
     title: 'T4.2 QA: connection lifecycle under failure'
