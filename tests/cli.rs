@@ -70,3 +70,110 @@ fn a_query_the_server_refuses_prints_its_complaint_and_no_rows() {
     );
     assert!(output.stdout.is_empty(), "stdout stays empty on a failure");
 }
+
+/// The 100 KB value `scripts/seed` puts in `big_text`, as an `nvarchar(max)`
+/// on one server and a `CLOB` on the other.
+const BIG: usize = 102_400;
+
+#[test]
+fn a_hundred_kilobyte_value_survives_every_format() {
+    if std::env::var_os("SQL_BENCH_TEST_DBS").is_none() {
+        eprintln!("skipped: set SQL_BENCH_TEST_DBS=1 with the containers up");
+        return;
+    }
+    for conn in ["local-mssql", "local-oracle"] {
+        let sql = "select body from bench.big_text where id = 3";
+        let run = |format: &str| {
+            let output = sql_bench(&["query", "--conn", conn, "--format", format, "--full", sql]);
+            assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+            String::from_utf8(output.stdout).expect("every format is UTF-8")
+        };
+
+        // One header line, one record, and the record is the whole value:
+        // nothing here quotes, because the body has no comma and no quote.
+        let text = run("csv");
+        let csv: Vec<&str> = text.lines().collect();
+        assert_eq!(csv.len(), 2, "{conn}: csv is a header and one record");
+        assert_eq!(csv[1].chars().count(), BIG, "{conn}");
+
+        // `[`, the one object, `]` — and the object holds the whole value.
+        let json = run("json");
+        let lines: Vec<&str> = json.lines().collect();
+        assert_eq!(lines.len(), 3, "{conn}: {}", &json[..80.min(json.len())]);
+        assert_eq!(lines[0], "[");
+        assert_eq!(lines[2], "]");
+        let value = lines[1]
+            .split_once(": \"")
+            .and_then(|(_, rest)| rest.strip_suffix("\"}"))
+            .unwrap_or_else(|| panic!("{conn}: no string value in {}", &lines[1][..80]));
+        assert_eq!(value.chars().count(), BIG, "{conn}");
+
+        // Header, rule, row — and the rule is as wide as the value, which is
+        // what `--full` means.
+        let table: Vec<String> = run("table").lines().map(str::to_owned).collect();
+        assert_eq!(table.len(), 3, "{conn}");
+        assert_eq!(table[1].chars().count(), BIG, "{conn}");
+        assert_eq!(table[2].chars().count(), BIG, "{conn}");
+    }
+}
+
+#[test]
+fn a_statement_that_returns_no_columns_prints_nothing_and_succeeds() {
+    if std::env::var_os("SQL_BENCH_TEST_DBS").is_none() {
+        eprintln!("skipped: set SQL_BENCH_TEST_DBS=1 with the containers up");
+        return;
+    }
+    // Both leave the seed data as it was: one rolls its transaction back, the
+    // other puts the status back itself, because the procedure commits.
+    for (conn, sql) in [
+        (
+            "local-mssql",
+            "begin transaction; exec bench.sp_mark_shipped 1; rollback transaction",
+        ),
+        (
+            "local-oracle",
+            "begin bench.mark_shipped(1); \
+             update bench.orders set status = 'PAID' where id = 1; commit; end;",
+        ),
+    ] {
+        let table = sql_bench(&["query", "--conn", conn, sql]);
+        assert_eq!(table.status.code(), Some(0), "{}", stderr(&table));
+        assert!(table.stdout.is_empty(), "{conn}: a table of no columns");
+
+        let json = sql_bench(&["query", "--conn", conn, "--format", "json", sql]);
+        assert_eq!(json.status.code(), Some(0), "{}", stderr(&json));
+        assert_eq!(
+            String::from_utf8_lossy(&json.stdout),
+            "[]\n",
+            "{conn}: an empty array is still JSON"
+        );
+    }
+}
+
+#[test]
+fn two_columns_of_the_same_name_are_two_json_keys() {
+    if std::env::var_os("SQL_BENCH_TEST_DBS").is_none() {
+        eprintln!("skipped: set SQL_BENCH_TEST_DBS=1 with the containers up");
+        return;
+    }
+    for (conn, sql, keys) in [
+        (
+            "local-mssql",
+            "select 1 as a, 2 as a",
+            "\"a\": 1, \"a_2\": 2",
+        ),
+        (
+            "local-oracle",
+            "select 1 as a, 2 as a from dual",
+            "\"A\": \"1\", \"A_2\": \"2\"",
+        ),
+    ] {
+        let output = sql_bench(&["query", "--conn", conn, "--format", "json", sql]);
+        assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            format!("[\n  {{{keys}}}\n]\n"),
+            "{conn}: neither column may be lost to the other"
+        );
+    }
+}

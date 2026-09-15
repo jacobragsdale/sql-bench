@@ -86,8 +86,18 @@ impl Backend {
             self.driver = None;
             return Err(DbError::Cancelled);
         }
-        // A server complaint is a good session; anything else is not.
-        if !matches!(outcome, Ok(()) | Err(DbError::Query { .. })) {
+        // A server complaint is usually a good session — but not when the
+        // complaint *is* the session ending: a killed session and a stopped
+        // database both arrive as an ORA the same shape as a typo's
+        // (ORA-00028, ORA-01089, DPI-1080). Asking the driver costs one round
+        // trip on a path that already failed, and is the only answer that
+        // does not need a list of codes nobody can finish.
+        let good = match &outcome {
+            Ok(()) => true,
+            Err(DbError::Query { .. }) => driver.ping().is_ok(),
+            Err(_) => false,
+        };
+        if !good {
             self.driver = None;
         }
         outcome

@@ -182,14 +182,15 @@ pub fn json(columns: &[Column], rows: &[Vec<Cell>]) -> String {
     if rows.is_empty() {
         return "[]\n".to_owned();
     }
+    let keys = keys(columns);
     let mut out = String::from("[\n");
     for (index, row) in rows.iter().enumerate() {
         out.push_str("  {");
-        for (at, column) in columns.iter().enumerate() {
+        for (at, key) in keys.iter().enumerate() {
             if at > 0 {
                 out.push_str(", ");
             }
-            string(&mut out, &column.name);
+            string(&mut out, key);
             out.push_str(": ");
             value(&mut out, row.get(at));
         }
@@ -201,6 +202,27 @@ pub fn json(columns: &[Column], rows: &[Vec<Cell>]) -> String {
     }
     out.push_str("]\n");
     out
+}
+
+/// The column names as JSON keys, made unique. A result set may repeat a
+/// name — `select 1 as a, 2 as a` is legal on both servers, and so is a join
+/// of two tables with an `id` each — and every parser keeps only the last of
+/// two equal keys, so a column would go missing. The table and CSV formats
+/// are positional and need none of this.
+fn keys(columns: &[Column]) -> Vec<String> {
+    let mut used = std::collections::HashSet::with_capacity(columns.len());
+    let mut keys = Vec::with_capacity(columns.len());
+    for column in columns {
+        let mut key = column.name.clone();
+        let mut repeat = 1;
+        // A suffix can itself collide (`a`, `a_2`, `a`), so it counts on.
+        while !used.insert(key.clone()) {
+            repeat += 1;
+            key = format!("{}_{repeat}", column.name);
+        }
+        keys.push(key);
+    }
+    keys
 }
 
 fn value(out: &mut String, cell: Option<&Cell>) {
@@ -405,6 +427,20 @@ mod tests {
             json,
             "[\n  {\"n\": -7, \"f\": 1.5, \"d\": \"10.2500\", \"b\": \"true\", \
              \"t\": \"hi\", \"null\": null, \"bytes\": \"0x00ff\"}\n]\n"
+        );
+    }
+
+    #[test]
+    fn json_never_writes_the_same_key_twice() {
+        // `select 1 as a, 2 as a` is legal, and an object with two `a` keys
+        // loses one of them in every parser there is.
+        let json = json(
+            &columns(&["a", "a", "a_2", "b"]),
+            &[vec![Cell::Int(1), Cell::Int(2), Cell::Int(3), Cell::Int(4)]],
+        );
+        assert_eq!(
+            json.lines().nth(1).unwrap(),
+            "  {\"a\": 1, \"a_2\": 2, \"a_2_2\": 3, \"b\": 4}"
         );
     }
 
