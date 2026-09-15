@@ -98,6 +98,7 @@ mod mssql {
             ["fn_order_total", "tvf_orders_by_status"],
             "a table-valued function is a function"
         );
+        assert_eq!(named(&objects, ObjectKind::Sequence), ["order_seq"]);
         assert!(
             objects
                 .iter()
@@ -279,6 +280,7 @@ mod oracle {
         );
         assert_eq!(named(&objects, ObjectKind::Function), ["ORDER_TOTAL"]);
         assert_eq!(named(&objects, ObjectKind::Package), ["ORDER_PKG"]);
+        assert_eq!(named(&objects, ObjectKind::Sequence), ["ORDER_SEQ"]);
         assert!(
             objects
                 .iter()

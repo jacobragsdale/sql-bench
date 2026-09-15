@@ -245,3 +245,8 @@ RETURNS TABLE AS
 RETURN SELECT id, customer_id, ordered_at, total
        FROM bench.orders WHERE status = @status;
 GO
+
+-- The object tree browses sequences too, so the seed makes one.
+IF OBJECT_ID('bench.order_seq') IS NULL
+CREATE SEQUENCE bench.order_seq AS bigint START WITH 501 INCREMENT BY 1;
+GO

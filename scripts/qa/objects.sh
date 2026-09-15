@@ -149,7 +149,7 @@ MSSQL_table='all_types big_text binary_blobs customers events order_items orders
 MSSQL_view='v_customer_totals v_recent_orders'
 MSSQL_procedure='sp_customer_orders sp_mark_shipped'
 MSSQL_function='fn_order_total tvf_orders_by_status'
-MSSQL_sequence=''
+MSSQL_sequence='order_seq'
 MSSQL_sourced='sp_customer_orders sp_mark_shipped fn_order_total tvf_orders_by_status'
 MSSQL_customers=customers
 MSSQL_orders=orders
@@ -168,7 +168,7 @@ ORACLE_view='V_CUSTOMER_TOTALS V_RECENT_ORDERS'
 ORACLE_procedure='CUSTOMER_ORDERS MARK_SHIPPED'
 ORACLE_function='ORDER_TOTAL'
 ORACLE_package='ORDER_PKG'
-ORACLE_sequence=''
+ORACLE_sequence='ORDER_SEQ'
 ORACLE_sourced='CUSTOMER_ORDERS MARK_SHIPPED ORDER_TOTAL ORDER_PKG'
 ORACLE_customers=CUSTOMERS
 ORACLE_orders=ORDERS
@@ -505,10 +505,10 @@ counts=$(
     "$bin" objects --conn local-mssql --schema bench | sed 1,2d | grep -c . || true
     "$bin" objects --conn local-oracle --schema BENCH | sed 1,2d | grep -c . || true
 )
-if [ "$(echo $counts)" = "13 13" ]; then
-    ok "both databases are back to the seed: 13 objects in each"
+if [ "$(echo $counts)" = "14 14" ]; then
+    ok "both databases are back to the seed: 14 objects in each"
 else
-    bad "the databases hold [$(echo $counts)] objects, the seed is [13 13]"
+    bad "the databases hold [$(echo $counts)] objects, the seed is [14 14]"
 fi
 
 exit "$fail"

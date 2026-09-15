@@ -92,8 +92,10 @@ epics:
       -d bench -Q "select count(*) from bench.events"
     - docker exec sql-bench-oracle bash -c "echo 'select count(*) from bench.events;' | sqlplus -s bench/bench@FREEPDB1"
     verified: true
-    note: merged to main 2026-09-14; all acceptance criteria checked by the implementing agent and re-run
-      by the coordinator
+    note: 'merged to main 2026-09-14; re-verified from a fresh clone at T7.3: db-reset 39 s, both seeded
+      to customers=50 orders=500 order_items=2000 events=1000000, a second db-up.sh left the counts
+      unchanged. T7.3 added the sequence the seed had always been missing, so the Sequences branch of
+      the object tree is no longer empty and 14 objects are seeded in each database, not 13.'
   - id: T1.2
     tag: dev
     title: T1.2 Cargo skeleton, config loading, CLI shape, CI
@@ -158,8 +160,10 @@ epics:
     - cargo test --all-targets
     - cargo run -- --help
     verified: true
-    note: merged to main 2026-09-14; all acceptance criteria checked by the implementing agent and re-run
-      by the coordinator
+    note: 'merged to main 2026-09-14; re-verified at T7.3. Acceptance 3 is superseded: `query --conn x`
+      no longer exits 2 saying not implemented, because T2.3 implemented it. It now exits 1 with
+      `unknown connection ''x''; configured: local-mssql, local-oracle`, which is T2.3 acceptance 4.
+      Everything else holds.'
   - id: T1.3
     tag: qa
     title: 'T1.3 QA: environment reproducibility and config edge cases'
@@ -189,8 +193,9 @@ epics:
     - scripts/db-reset.sh
     - cargo test --all-targets
     verified: true
-    note: merged to main 2026-09-14; all acceptance criteria checked by the implementing agent and re-run
-      by the coordinator
+    note: 'merged to main 2026-09-14; re-verified at T7.3: PERF.md has the environment section and the
+      measured reset time, all five config cases have named tests, and the README steps run from a
+      fresh clone.'
 - id: E2
   title: E2 Drivers and headless query path
   description: 'The database layer, complete and verified before any TUI exists. Both backends behind
@@ -272,8 +277,9 @@ epics:
     - cargo test --all-targets
     - SQL_BENCH_TEST_DBS=1 cargo test --test mssql
     verified: true
-    note: merged to main 2026-09-14; all acceptance criteria checked by the implementing agent and re-run
-      by the coordinator
+    note: 'merged to main 2026-09-14; re-verified at T7.3: the mssql suite is green with the containers
+      up, all_types asserts an exact Cell per column, the cancel test asserts under a second, and no
+      tokio/tiberius/futures type appears in db/mod.rs or db/model.rs outside comments.'
   - id: T2.2
     tag: dev
     title: T2.2 Oracle backend (oracle crate over Instant Client)
@@ -321,8 +327,9 @@ epics:
     - cargo clippy --all-targets --all-features -- -D warnings
     - SQL_BENCH_TEST_DBS=1 cargo test --test oracle
     verified: true
-    note: merged to main 2026-09-14; acceptance re-run by the coordinator (Oracle suite green with client_lib_dir
-      alone after the run-path patch)
+    note: 'merged to main 2026-09-14; re-verified at T7.3: the oracle suite is green with client_lib_dir
+      alone, tests/oracle_no_client.rs asserts the exact missing-client message, and the only
+      `oracle::` outside src/db/oracle.rs is the crate''s own module path in db/mod.rs.'
   - id: T2.3
     tag: dev
     title: T2.3 Catalog queries and the headless subcommands query/objects/source
@@ -385,7 +392,11 @@ epics:
       2 * from bench.all_types"
     - SQL_BENCH_CONFIG=config.local.toml cargo run -- objects --conn local-oracle --schema BENCH
     verified: true
-    note: merged to main 2026-09-14; full DB suite and smoke replay re-run by the coordinator
+    note: 'merged to main 2026-09-14; re-verified at T7.3. Acceptance 2 was the one real gap in the
+      backlog: the Oracle listing was meant to include a sequence and no seed file ever created one,
+      so the Sequences branch of the object tree was always empty. T7.3 added order_seq to both seed
+      files, with the assertion in tests/catalog.rs and the names in scripts/qa/objects.sh; both
+      listings show it now. The rest re-ran green.'
   - id: T2.4
     tag: dev
     title: T2.4 Trace instrument and the bench subcommand
@@ -423,7 +434,9 @@ epics:
     - cargo test --all-targets
     - SQL_BENCH_CONFIG=config.local.toml scripts/perf.sh
     verified: true
-    note: merged to main 2026-09-14; full DB suite and connect replay re-run by the coordinator
+    note: 'merged to main 2026-09-14; re-verified at T7.3: one connect line and one query line per run in
+      the trace, a failed connect writes its connect line too, bench prints the phase table, perf.sh
+      appends to PERF.md, and the clock is read only behind trace.is_on().'
   - id: T2.5
     tag: qa
     title: 'T2.5 QA: driver conformance matrix and failure modes'
@@ -461,7 +474,9 @@ epics:
     verify:
     - SQL_BENCH_TEST_DBS=1 cargo test --all-targets
     verified: true
-    note: merged to main 2026-09-14; 196 tests green on main, containers healthy after the outage script
+    note: 'merged to main 2026-09-14; re-verified at T7.3: TYPES.md is filled from real output, every
+      failure mode has a test or a script under scripts/qa/, the timings are in PERF.md, and the
+      password grep is clean.'
 - id: E3
   title: E3 TUI shell and replay verification
   description: 'The terminal application frame: the event loop that never blocks, tabs, focus, footer,
@@ -522,8 +537,10 @@ epics:
     - cargo test --all-targets
     - cargo clippy --all-targets --all-features -- -D warnings
     verified: true
-    note: merged to main 2026-09-14; acceptance re-run by the coordinator (Oracle suite green with client_lib_dir
-      alone after the run-path patch)
+    note: 'merged to main 2026-09-14; re-verified at T7.3: the shell replays pass at five sizes, a config
+      with no connections draws the one pane that says where the config goes, and
+      every_key_the_help_lists_is_handled_where_it_says_it_works and
+      an_idle_app_draws_one_frame_and_nothing_more both pass.'
   - id: T3.2
     tag: dev
     title: 'T3.2 Replay mode: drive the real loop from a key script and dump frames as text'
@@ -573,7 +590,9 @@ epics:
     - cargo test --all-targets
     - cargo run -- --replay scripts/replay/smoke.keys --size 120x40 --frames-dir /tmp/sql-bench-frames
     verified: true
-    note: merged to main 2026-09-14; full DB suite and smoke replay re-run by the coordinator
+    note: 'merged to main 2026-09-14; re-verified at T7.3: the smoke replay runs from the installed
+      binary, exit 4 and exit 3 each have a test, CI runs the smoke script, and every key name the
+      parser takes is in the DESIGN.md table.'
   - id: T3.3
     tag: qa
     title: 'T3.3 QA: shell behaviour across sizes, themes and terminals'
@@ -606,8 +625,9 @@ epics:
     verify:
     - scripts/qa.sh
     verified: true
-    note: merged to main 2026-09-14; scripts/qa.sh 13/13 and 198 tests green on main after conflict resolution
-      with T4.1
+    note: 'merged to main 2026-09-14; re-verified at T7.3: qa.sh 23/23 with the databases up, panic
+      restore documented in DESIGN.md and asserted on a real pty, draw latency in PERF.md, p95 2.3 ms
+      at 200x60 against a 16 ms budget.'
 - id: E4
   title: E4 Connections in the TUI
   description: 'Opening, watching and closing database connections from the shell, with passwords resolved
@@ -662,7 +682,9 @@ epics:
     - SQL_BENCH_CONFIG=config.local.toml cargo run -- --replay scripts/replay/connect.keys --size 120x40
       --frames-dir /tmp/sql-bench-frames
     verified: true
-    note: merged to main 2026-09-14; full DB suite and connect replay re-run by the coordinator
+    note: 'merged to main 2026-09-14; re-verified at T7.3: connections.sh runs
+      scripts/replay/connect.keys and the six failure cases green, and a connect line reaches the
+      trace on a failed attempt as well as a successful one.'
   - id: T4.2
     tag: qa
     title: 'T4.2 QA: connection lifecycle under failure'
@@ -691,8 +713,8 @@ epics:
     verify:
     - scripts/qa/connections.sh
     verified: true
-    note: merged to main 2026-09-14; six failure cases green, no defects; the "query after outage" case
-      is deferred to T5.4
+    note: 'merged to main 2026-09-14; re-verified at T7.3: connections.sh exits 0 and leaves both
+      containers running and healthy; the query-after-outage case is covered by T5.4.'
 - id: E5
   title: E5 Scratch pad, query execution and results
   description: 'The core of the workbench: write SQL, run the statement under the cursor, watch results
@@ -754,8 +776,10 @@ epics:
     - SQL_BENCH_CONFIG=config.local.toml SQL_BENCH_STATE_DIR=/tmp/sb-state cargo run -- --replay scripts/replay/scratch.keys
       --size 120x40 --frames-dir /tmp/sql-bench-frames
     verified: true
-    note: merged to main 2026-09-14 with a follow-up that makes the help overlay per-pane and scrollable;
-      qa.sh 14/14
+    note: 'merged to main 2026-09-14 with a follow-up that makes the help overlay per-pane and
+      scrollable; re-verified at T7.3: the scratch frame matches the committed expectation and the
+      pad comes back after a restart, the splitter has its six-statement fixture, and
+      scripts/replay/scratch.keys presses Ctrl-C with nothing selected and runs on.'
   - id: T5.2
     tag: dev
     title: T5.2 Run statements and stream results into a virtualized grid
@@ -816,7 +840,9 @@ epics:
     - SQL_BENCH_CONFIG=config.local.toml cargo run -- --replay scripts/replay/run-oracle.keys --size 120x40
       --frames-dir /tmp/sql-bench-frames
     verified: true
-    note: merged to main 2026-09-15; 249 tests, qa.sh 14/14, run-queries.sh 8/8 re-run by the coordinator
+    note: 'merged to main 2026-09-15; re-verified at T7.3: run, cancel, error and multi replay green on
+      both backends, the 100k-cap scan inside its budget, and the cancelled and failed-statement
+      cases asserted by scripts/qa/query-workflow.sh.'
   - id: T5.3
     tag: dev
     title: T5.3 Cell inspector, copy and export
@@ -851,7 +877,8 @@ epics:
     - SQL_BENCH_CONFIG=config.local.toml cargo run -- --replay scripts/replay/inspect.keys --size 120x40
       --frames-dir /tmp/sql-bench-frames
     verified: true
-    note: merged to main 2026-09-15; 265 tests and run-queries.sh 9/9 re-run by the coordinator
+    note: 'merged to main 2026-09-15; re-verified at T7.3: inspect.keys exports a CSV that reads back as
+      4 rows.'
   - id: T5.4
     tag: qa
     title: 'T5.4 QA: query workflow end to end on both databases'
@@ -884,7 +911,8 @@ epics:
     verify:
     - scripts/qa.sh
     verified: true
-    note: merged to main 2026-09-15; 12 cases green on both backends, display-width fix, 284 tests
+    note: 'merged to main 2026-09-15; re-verified at T7.3: the whole query workflow green on both
+      backends inside scripts/qa.sh.'
 - id: E6
   title: E6 Object browser
   description: 'A lazily loaded tree of schemas, tables, views, procedures, functions and packages with
@@ -939,7 +967,9 @@ epics:
     - SQL_BENCH_CONFIG=config.local.toml cargo run -- --replay scripts/replay/objects-oracle.keys --size
       120x40 --frames-dir /tmp/sql-bench-frames
     verified: true
-    note: merged to main 2026-09-15; 282 tests, qa.sh 14/14, run-queries.sh 11/11 re-run by the coordinator
+    note: 'merged to main 2026-09-15; re-verified at T7.3: both object replays green, the Oracle branch
+      with the million-row table opens in 21 ms, and /cust keeps CUSTOMERS and V_CUSTOMER_TOTALS and
+      drops ORDERS.'
   - id: T6.2
     tag: qa
     title: 'T6.2 QA: object browser against every seeded object'
@@ -969,8 +999,8 @@ epics:
     verify:
     - scripts/qa/objects.sh
     verified: true
-    note: merged to main 2026-09-15; 45 checks green on both backends, Esc-clears-filter defect fixed,
-      286 tests
+    note: 'merged to main 2026-09-15; re-verified at T7.3: objects.sh green on both backends, now
+      including the sequence T2.3 asked for, and both databases back to the seed afterwards.'
 - id: E7
   title: E7 Performance, documentation and release
   description: 'Prove the budgets, write the docs a stranger needs, and publish.
@@ -1018,8 +1048,10 @@ epics:
     - scripts/perf.sh
     - cargo test --release -- --ignored
     verified: true
-    note: merged to main 2026-09-15; all seven budgets pass in perf.sh, stdin-EOF fixed, 287 tests + 4
-      release perf tests
+    note: 'merged to main 2026-09-15; re-verified at T7.3 from a fresh clone: all seven budgets pass in
+      perf.sh (startup 1 ms, key-to-frame p95 0.183 ms, 100k over 10k draw ratio 0.99, both scans
+      under 100 ms), cargo test --release -- --ignored is 4 green, and stdin-EOF exits in 24 ms with
+      the terminal given back.'
   - id: T7.2
     tag: dev
     title: 'T7.2 Documentation: README, DESIGN, config example, keys'
@@ -1055,8 +1087,12 @@ epics:
     - scripts/readme-frame.sh
     - cargo test --all-targets
     verified: true
-    note: merged to main 2026-09-15; README frame regenerated from a real run, key-table test green, DESIGN
-      audited claim by claim
+    note: 'merged to main 2026-09-15; re-verified at T7.3. The frame itself is current, but
+      scripts/readme-frame.sh --check was a coin toss: it masked the millisecond number without
+      masking the border fill and the footer gap that shrink when the number gains a digit, so a busy
+      machine failed it, which is exactly how it failed on the fresh clone. T7.3 squeezes those fill
+      runs on the lines that carry a clock and asserts the mask is blind to the clock width before it
+      trusts the diff. The key-table test and the DESIGN sections hold.'
   - id: T7.3
     tag: qa
     title: 'T7.3 QA: release verification and GitHub publication'
@@ -1085,6 +1121,16 @@ epics:
     - All checks green from a fresh clone.
     - 'docs/backlog.yaml has verified: true on every task.'
     - https://github.com/jacobragsdale/sql-bench is public with a green CI badge in README.
+    verified: true
+    note: 'verified 2026-09-15 from a fresh clone of main: build, fmt, clippy, 287 tests (the same with
+      SQL_BENCH_TEST_DBS=1), qa.sh 23/23, perf.sh 7 of 7 budgets, 4 release perf tests, every replay
+      script reached by qa.sh, perf.sh, readme-frame.sh or CI, and cargo install plus the smoke
+      replay from the installed binary. Two reds found and fixed here: the flaky README frame mask
+      (T7.2) and the sequence missing from both seed files (T2.3). No secrets: the only Bench_Pass1!
+      hits are the throwaway container password in compose.yaml, the seeds, config.local.toml,
+      scripts/, docs/, README.md, CLAUDE.md and two test fixtures, and there is no PAT, private key
+      or .env anywhere. The repository is public with its description, the five topics and a green CI
+      badge.'
     verify:
     - scripts/qa.sh
     - gh run list --repo jacobragsdale/sql-bench --limit 1
