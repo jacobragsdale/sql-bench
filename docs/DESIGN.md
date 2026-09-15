@@ -63,13 +63,26 @@ pub enum DbError { Connect(String), Query { message: String, line: Option<u32> }
 pub struct QueryOptions { pub batch_size: usize /* 500 */, pub max_rows: Option<usize> /* Some(10_000) */ }
 ```
 
+Values with no lossless Rust equivalent are carried as the text the driver
+produced. `Decimal` keeps every digit of an Oracle `NUMBER`; `DateTime` is
+whatever the driver formatted, and no timezone is invented.
+
+A `CLOB`, `NCLOB` or `BLOB` is read through a locator and stops at **1 MiB**.
+A truncated `CLOB` ends in `…` (cut on a character boundary); a truncated
+`BLOB` is simply the first mebibyte. A LOB column can hold four gigabytes and
+a workbench that copied one into memory because somebody typed `select *`
+would be a workbench that fell over. Raise `LOB_LIMIT` in `db/oracle.rs` if a
+real value is ever cut, but raise the memory budget with it.
+
 ## Connection handle (`src/db/mod.rs`)
 
 `Connection::open` blocks until connected (10 s timeout) and returns a handle
 whose worker thread owns the driver connection. `Connection::query` returns
-a `Receiver<QueryEvent>` immediately. `Connection::cancel` drops the driver
-connection; the next query reconnects. `Backend` is an enum with `Mssql` and
-`Oracle` variants; no trait.
+a `Receiver<QueryEvent>` immediately. `Connection::cancel` sets a flag: SQL
+Server has no way to say stop, so tiberius drops the socket; Oracle has
+`break_execution`, so a watcher thread interrupts the call OCI is inside.
+Either way the connection is spent and the next query opens a new one.
+`Backend` is an enum with `Mssql` and `Oracle` variants; no trait.
 
 ## Catalog (`src/db/catalog.rs`)
 

@@ -49,7 +49,12 @@ docs/              DESIGN.md, backlog.yaml (the work breakdown), PERF.md
 `config.local.toml` at the repo root names both as `local-mssql` and
 `local-oracle`. Oracle Instant Client lives at
 `~/.local/opt/oracle/instantclient_23_26` (env `SQL_BENCH_ORACLE_CLIENT_DIR`
-or `[oracle] client_lib_dir` in config override it).
+or `[oracle] client_lib_dir` in config override it). That directory has to be
+on the loader's path too — it is a zip install with no run path, so
+`libclntsh.so` cannot find `libnnz.so` without it. Either add it to
+`/etc/ld.so.conf.d/` and run `ldconfig`, or prefix every `cargo test` that
+touches Oracle with
+`LD_LIBRARY_PATH=$HOME/.local/opt/oracle/instantclient_23_26`.
 
 ## Checks before any commit
 
