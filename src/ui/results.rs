@@ -14,7 +14,7 @@ use ratatui::widgets::{Paragraph, Wrap};
 
 use super::theme::Theme;
 use super::{placeholder, titled};
-use crate::app::results::{Results, Status, cut, grouped_u64, shown};
+use crate::app::results::{Results, Source, Status, cut, grouped_u64, shown};
 use crate::app::{App, Focus, TabState};
 use crate::db::model::{Cell, Column};
 
@@ -52,6 +52,11 @@ pub(super) fn render(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         return;
     }
     let results = &tab.results;
+    // `s` on a procedure: the text that made it, read only.
+    if let Some(source) = results.source() {
+        text_view(frame, source, theme, inner);
+        return;
+    }
     // The driver's own words, wrapped: a complaint is as long as it is.
     if let Some(error) = results.failure() {
         frame.render_widget(
@@ -76,6 +81,29 @@ pub(super) fn render(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         return;
     }
     grid(frame, results, theme, inner, area.height > TYPES_ABOVE);
+}
+
+/// An object's source: a line number gutter and the lines that fit, which is
+/// every line the pane costs however long the package is.
+fn text_view(frame: &mut Frame, source: &Source, theme: &Theme, area: Rect) {
+    let height = usize::from(area.height);
+    let top = source.scroll.min(source.lines.len().saturating_sub(height));
+    let digits = source.lines.len().to_string().len();
+    let width = usize::from(area.width).saturating_sub(digits + 1);
+    let lines: Vec<Line> = source
+        .lines
+        .iter()
+        .enumerate()
+        .skip(top)
+        .take(height)
+        .map(|(number, text)| {
+            Line::from(vec![
+                Span::styled(format!("{:>digits$} ", number + 1), theme.dim),
+                Span::raw(cut(text, width).into_owned()),
+            ])
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 fn grid(frame: &mut Frame, results: &Results, theme: &Theme, area: Rect, types: bool) {

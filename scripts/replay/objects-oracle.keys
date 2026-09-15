@@ -1,0 +1,68 @@
+# T6.1: the object tree against Oracle, where every catalog name is upper
+# case. The container `scripts/db-up.sh` starts has to be up. Run it with a
+# state directory of its own — scripts/qa/run-queries.sh does — or the pad
+# starts with whatever the last run typed into it.
+
+key 2
+key c
+wait busy
+expect ● local-oracle
+# The schema the connection is in is listed first and open.
+expect ▾ BENCH
+
+key j
+key l
+wait busy
+expect CUSTOMERS
+
+# i: the columns of the table the cursor is on, as a grid.
+key j
+key j
+key j
+key j
+key i
+wait busy
+expect BENCH.CUSTOMERS columns
+expect EMAIL
+expect NVARCHAR2(100)
+
+# Enter: a hundred rows of it in the pad, spelled the way Oracle spells a
+# limit, on a line of its own.
+key Enter
+expect select * from BENCH.CUSTOMERS fetch first 100 rows only
+key Shift-Tab
+
+# The views, so the filter has something of each kind to keep. G is the last
+# schema, and the kinds of this one are the five rows above it.
+key G
+key k
+key k
+key k
+key k
+key k
+key l
+wait busy
+expect V_RECENT_ORDERS
+
+# /cust keeps what matches and the branches above it, and nothing else.
+key /
+type cust
+expect ╭ Objects /cust ─
+expect CUSTOMERS
+expect V_CUSTOMER_TOTALS
+expect-not ▸ ORDERS
+key Esc
+expect ▸ ORDERS
+
+# s: the text that made a procedure, in the results pane with line numbers.
+key h
+key j
+key l
+wait busy
+key j
+key s
+wait busy
+expect Source · BENCH.CUSTOMER_ORDERS
+expect PROCEDURE customer_orders
+frame objects-oracle
+key Ctrl-Q

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# T5.2: running statements, cancelling them and failing them, against both
-# containers. One replay per script per backend, each with a state directory
-# of its own so the scratch pad starts empty. Exits non-zero on the first
-# script that does not end at 0.
+# T5.2 and T6.1: running statements, cancelling them and failing them, and
+# browsing the objects of both containers. One replay per script per backend,
+# each with a state directory of its own so the scratch pad starts empty.
+# Exits non-zero on the first script that does not end at 0.
 #
 # Knobs: SQL_BENCH_CONFIG, SQL_BENCH_BIN (default: the debug build).
 set -euo pipefail
@@ -16,7 +16,7 @@ bin=${SQL_BENCH_BIN:-target/debug/sql-bench}
 [ -x "$bin" ] || cargo build --quiet
 
 fail=0
-for script in run cancel error multi; do
+for script in run cancel error multi objects; do
     for backend in mssql oracle; do
         name=$script-$backend
         start=$(date +%s%3N)

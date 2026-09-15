@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use crate::db::catalog::ColumnInfo;
 use crate::db::model::{Cell, Column, DbError, QueryEvent};
 
 /// The widest a column is drawn, however long its values are. A column of
@@ -78,6 +79,17 @@ pub enum Align {
     Left,
 }
 
+/// What `s` on a procedure put in the pane: its text, read only, with its
+/// own scroll. It is not a result set — there are no columns to move a cell
+/// cursor across — so it sits beside them rather than among them.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Source {
+    pub title: String,
+    pub lines: Vec<String>,
+    /// The first line showing; the renderer clamps it to the pane.
+    pub scroll: usize,
+}
+
 /// One result set of one statement.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Set {
@@ -102,6 +114,11 @@ pub struct Results {
     scroll: (usize, usize),
     /// What the last statement changed, when it changed rather than returned.
     pub rows_affected: Option<u64>,
+    /// The object source `s` is showing instead of a grid.
+    source: Option<Source>,
+    /// What the pane is showing when it is not the last statement's rows:
+    /// `bench.customers columns`.
+    label: Option<String>,
     /// The lines of the statements this run was asked for, in order, so the
     /// pad can flag the one that failed. They never leave the app.
     statements: Vec<Range<usize>>,
@@ -127,6 +144,8 @@ impl Results {
         self.sets.clear();
         self.shown = 0;
         self.rows_affected = None;
+        self.source = None;
+        self.label = None;
         if !keep_view {
             self.selected = (0, 0);
             self.scroll = (0, 0);
@@ -235,6 +254,9 @@ impl Results {
 
     /// One key of the results pane.
     pub fn key(&mut self, key: KeyEvent) -> Hit {
+        if self.source.is_some() {
+            return self.source_key(key);
+        }
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         #[allow(clippy::cast_possible_wrap)]
         let page = PAGE as isize;
@@ -386,6 +408,9 @@ impl Results {
     /// The pane's title, which is where every number about the last run is.
     #[must_use]
     pub fn title(&self) -> String {
+        if let Some(source) = &self.source {
+            return format!("Source · {} · {} lines", source.title, source.lines.len());
+        }
         let set = if self.sets.len() > 1 {
             format!(" · set {}/{}", self.shown(), self.sets.len())
         } else {
@@ -411,10 +436,13 @@ impl Results {
                         if *truncated { " (truncated)" } else { "" }
                     ),
                 };
-                format!(
-                    "Results{set} · {what} · {} ms",
-                    grouped(usize::try_from(elapsed.as_millis()).unwrap_or(usize::MAX))
-                )
+                match &self.label {
+                    Some(label) => format!("{label} · {what}"),
+                    None => format!(
+                        "Results{set} · {what} · {} ms",
+                        grouped(usize::try_from(elapsed.as_millis()).unwrap_or(usize::MAX))
+                    ),
+                }
             }
             Status::Failed {
                 error: DbError::Cancelled,
@@ -450,6 +478,85 @@ impl Results {
             left += 1;
         }
         (top, left)
+    }
+}
+
+/// The object browser's two views of the pane: a table's columns as a grid,
+/// and an object's source as text. Both replace whatever the last statement
+/// left, and the next statement replaces them.
+impl Results {
+    /// `i`: the columns as a result set, so the grid draws them the way it
+    /// draws everything else.
+    pub fn show_columns(&mut self, label: String, columns: &[ColumnInfo]) {
+        let rows: Vec<Vec<Cell>> = columns
+            .iter()
+            .map(|column| {
+                vec![
+                    Cell::Text(column.name.clone()),
+                    Cell::Text(column.type_text.clone()),
+                    Cell::Text(if column.nullable { "yes" } else { "no" }.to_owned()),
+                    Cell::Text(if column.is_pk { "yes" } else { "no" }.to_owned()),
+                ]
+            })
+            .collect();
+        let count = rows.len();
+        self.start(Instant::now(), 0, 1, false);
+        self.apply(QueryEvent::Columns(
+            ["name", "type", "nullable", "pk"]
+                .into_iter()
+                .map(|name| Column {
+                    name: name.to_owned(),
+                    type_name: String::new(),
+                })
+                .collect(),
+        ));
+        self.apply(QueryEvent::Rows(rows));
+        self.apply(QueryEvent::Done {
+            rows: count,
+            truncated: false,
+            connect_ms: 0,
+            first_row_ms: 0,
+            total_ms: 0,
+        });
+        self.label = Some(label);
+    }
+
+    /// `s`: the text that made the object, read only.
+    pub fn show_source(&mut self, title: String, text: &str) {
+        self.source = Some(Source {
+            title,
+            lines: text.lines().map(str::to_owned).collect(),
+            scroll: 0,
+        });
+    }
+
+    #[must_use]
+    pub const fn source(&self) -> Option<&Source> {
+        self.source.as_ref()
+    }
+
+    /// The source view's keys: the grid's movement keys, over lines.
+    fn source_key(&mut self, key: KeyEvent) -> Hit {
+        let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        #[allow(clippy::cast_possible_wrap)]
+        let page = PAGE as isize;
+        let Some(source) = self.source.as_mut() else {
+            return Hit::Ignored;
+        };
+        let last = source.lines.len().saturating_sub(1);
+        let by = |scroll: usize, delta: isize| scroll.saturating_add_signed(delta).min(last);
+        source.scroll = match key.code {
+            KeyCode::Char('d' | 'D') if control => by(source.scroll, page / 2),
+            KeyCode::Char('u' | 'U') if control => by(source.scroll, -page / 2),
+            KeyCode::Char('j') | KeyCode::Down => by(source.scroll, 1),
+            KeyCode::Char('k') | KeyCode::Up => by(source.scroll, -1),
+            KeyCode::PageDown => by(source.scroll, page),
+            KeyCode::PageUp => by(source.scroll, -page),
+            KeyCode::Char('g') => 0,
+            KeyCode::Char('G') => last,
+            _ => return Hit::Ignored,
+        };
+        Hit::Moved
     }
 }
 

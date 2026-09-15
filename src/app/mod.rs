@@ -3,6 +3,7 @@
 //! event goes in, a state change and a list of [`Action`]s come out, which is
 //! what makes the whole app testable without either.
 
+pub mod objects;
 pub mod results;
 pub mod scratch;
 
@@ -16,7 +17,9 @@ use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::Size;
 
 use crate::config::{Config, Kind};
-use crate::db::model::QueryEvent;
+use crate::db::catalog::{CatalogAnswer, CatalogRequest};
+use crate::db::model::{DbError, QueryEvent};
+use objects::Objects;
 use results::{Hit, Results};
 use scratch::{Outcome, Scratch};
 
@@ -70,6 +73,22 @@ pub const KEYS: &[(&str, &str, &str)] = &[
     ("]", RESULTS, "next result set"),
     ("m", RESULTS, "10,000 more rows"),
     ("Enter", RESULTS, "inspect the cell"),
+    ("j", OBJECTS, "down"),
+    ("k", OBJECTS, "up"),
+    ("l", OBJECTS, "expand or open"),
+    ("h", OBJECTS, "collapse or go up"),
+    ("Space", OBJECTS, "expand or collapse"),
+    ("Enter", OBJECTS, "select from it"),
+    ("s", OBJECTS, "source"),
+    ("i", OBJECTS, "columns"),
+    ("r", OBJECTS, "reload"),
+    ("/", OBJECTS, "filter"),
+    ("y", OBJECTS, "copy the name"),
+    ("Arrows", OBJECTS, "move about the tree"),
+    ("g", OBJECTS, "first row"),
+    ("G", OBJECTS, "last row"),
+    ("PageDown", OBJECTS, "page down"),
+    ("PageUp", OBJECTS, "page up"),
 ];
 
 pub const ANYWHERE: &str = "anywhere";
@@ -79,6 +98,8 @@ pub const NOT_SCRATCH: &str = "not Scratch";
 pub const SCRATCH: &str = "Scratch";
 
 pub const RESULTS: &str = "Results";
+
+pub const OBJECTS: &str = "Objects";
 
 /// The frames a connecting tab's mark cycles through, one every
 /// [`SPIN_EVERY`].
@@ -102,6 +123,7 @@ pub fn keys_for(
         match *place {
             SCRATCH => typing,
             RESULTS => focus == Focus::Results,
+            OBJECTS => focus == Focus::Objects,
             NOT_SCRATCH => !typing,
             _ => true,
         }
@@ -145,6 +167,11 @@ pub enum Action {
     },
     /// Best effort, into the terminal's clipboard.
     Copy(String),
+    /// Fill a branch of the object tree, or show what an object is made of.
+    LoadObjects {
+        tab: usize,
+        request: CatalogRequest,
+    },
 }
 
 /// What the run loop reports back about a connection. The app never opens
@@ -180,6 +207,12 @@ pub enum RuntimeEvent {
     Query {
         tab: usize,
         event: QueryEvent,
+    },
+    /// What a catalog query this tab asked for came back with.
+    Catalog {
+        tab: usize,
+        request: CatalogRequest,
+        result: Result<CatalogAnswer, DbError>,
     },
 }
 
@@ -269,6 +302,8 @@ pub struct Tab {
     pub scratch: Scratch,
     /// What the last statement run on this tab returned.
     pub results: Results,
+    /// What this connection holds, as far as it has been asked.
+    pub objects: Objects,
 }
 
 /// The state every pane shares.
@@ -353,6 +388,7 @@ impl App {
                     connect_ms: None,
                     scratch: Scratch::default(),
                     results: Results::default(),
+                    objects: Objects::new(connection.kind, &connection.user),
                 })
                 .collect(),
         }
@@ -369,7 +405,13 @@ impl App {
     /// for the whole app and not just the tab on screen.
     #[must_use]
     pub fn busy(&self) -> bool {
-        self.connecting() || self.running()
+        self.connecting() || self.running() || self.loading()
+    }
+
+    /// Whether any tab is waiting on a catalog query.
+    #[must_use]
+    pub fn loading(&self) -> bool {
+        self.tabs.iter().any(|tab| tab.objects.busy())
     }
 
     /// Whether any tab has a query in flight.
@@ -412,6 +454,11 @@ impl App {
                 return;
             }
             RuntimeEvent::Query { tab, event } => return self.query_event(tab, event),
+            RuntimeEvent::Catalog {
+                tab,
+                request,
+                result,
+            } => return self.catalog_event(tab, &request, &result),
             RuntimeEvent::Connecting { tab } => (tab, TabState::Connecting, None),
             RuntimeEvent::Connected { tab, connect_ms } => {
                 (tab, TabState::Connected, Some(connect_ms))
@@ -422,6 +469,9 @@ impl App {
         let Some(tab) = self.tabs.get_mut(index) else {
             return;
         };
+        // Whatever the tree held was that connection's; the run loop asks
+        // for the schemas again as soon as this one is up.
+        tab.objects.clear();
         tab.state = state;
         tab.connect_ms = connect_ms;
         self.shell.status = format!(
@@ -507,8 +557,17 @@ impl App {
         // The scratch pad types every key the shell does not keep for
         // itself, which is why the shell's keys are matched first.
         let typing = self.shell.focus == Focus::Scratch;
+        // So does the filter line, once `/` has opened it: `c` is a letter
+        // of a table's name there and not a connect key.
+        let filtering = self.shell.focus == Focus::Objects
+            && self.tab().is_some_and(|tab| tab.objects.filtering());
         match key.code {
             KeyCode::Char('q' | 'Q') if control => return vec![Action::Quit],
+            KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Esc | KeyCode::Enter
+                if filtering && !control =>
+            {
+                return self.objects_key(key);
+            }
             KeyCode::Char('t' | 'T') if control => {
                 if !self.tabs.is_empty() {
                     self.shell.active_tab = (self.shell.active_tab + 1) % self.tabs.len();
@@ -546,6 +605,7 @@ impl App {
                 }
             }
             _ if self.shell.focus == Focus::Results => return self.results_key(key),
+            _ if self.shell.focus == Focus::Objects => return self.objects_key(key),
             _ => {}
         }
         Vec::new()
@@ -589,6 +649,88 @@ impl App {
         }
     }
 
+    /// What a catalog query came back with: the tree's half, and — for `i`
+    /// and `s` — the results pane's.
+    fn catalog_event(
+        &mut self,
+        tab: usize,
+        request: &CatalogRequest,
+        result: &Result<CatalogAnswer, DbError>,
+    ) {
+        let Some(open) = self.tabs.get_mut(tab) else {
+            return;
+        };
+        open.objects.answer(request, result);
+        match (request, result) {
+            (
+                CatalogRequest::Columns {
+                    schema,
+                    table,
+                    show: true,
+                },
+                Ok(CatalogAnswer::Columns(columns)),
+            ) => open
+                .results
+                .show_columns(format!("{schema}.{table} columns"), columns),
+            (CatalogRequest::Source { schema, name, .. }, Ok(CatalogAnswer::Source(text))) => {
+                open.results.show_source(format!("{schema}.{name}"), text);
+            }
+            _ => {}
+        }
+        if let Err(error) = result {
+            self.shell.error = Some(error.to_string());
+        }
+    }
+
+    /// A load is on its way: the row it is for says so until it lands, and
+    /// [`App::busy`] says the app is working until then.
+    pub fn catalog_started(&mut self, tab: usize, request: &CatalogRequest) {
+        if let Some(open) = self.tabs.get_mut(tab) {
+            open.objects.started(request);
+        }
+    }
+
+    /// A key the object tree handles, and what it asks the run loop for.
+    fn objects_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        let tab = self.shell.active_tab;
+        let Some(open) = self.tabs.get_mut(tab) else {
+            return Vec::new();
+        };
+        let kind = open.kind;
+        match open.objects.key(key) {
+            objects::Hit::Ignored | objects::Hit::Moved => Vec::new(),
+            objects::Hit::Load(request) => vec![Action::LoadObjects { tab, request }],
+            objects::Hit::Select(object) => {
+                // On its own line: a select dropped into the middle of the
+                // line somebody was writing is two broken statements.
+                let sql = select_from(kind, &object.schema, &object.name);
+                let (line, column) = open.scratch.cursor();
+                let alone = column == 0
+                    || open
+                        .scratch
+                        .lines()
+                        .get(line)
+                        .is_some_and(|text| text.trim().is_empty());
+                open.scratch.paste(&if alone {
+                    format!("{sql}\n")
+                } else {
+                    format!("\n{sql}\n")
+                });
+                self.shell.focus = Focus::Scratch;
+                Vec::new()
+            }
+            objects::Hit::Copy(name) => {
+                self.shell.clipboard = name.clone();
+                self.shell.status = format!("copied {name}");
+                vec![Action::Copy(name)]
+            }
+            objects::Hit::Say(message) => {
+                self.shell.status = message;
+                Vec::new()
+            }
+        }
+    }
+
     /// A key the pad handles, and what the run loop owes it afterwards.
     fn scratch_key(&mut self, key: KeyEvent) -> Vec<Action> {
         let tab = self.shell.active_tab;
@@ -625,5 +767,14 @@ impl App {
                 vec![Action::Copy(text)]
             }
         }
+    }
+}
+
+/// The statement Enter drops in the pad: a hundred rows, spelled the way the
+/// backend spells a limit.
+fn select_from(kind: Kind, schema: &str, name: &str) -> String {
+    match kind {
+        Kind::Mssql => format!("select top 100 * from {schema}.{name}"),
+        Kind::Oracle => format!("select * from {schema}.{name} fetch first 100 rows only"),
     }
 }

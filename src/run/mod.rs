@@ -299,6 +299,7 @@ impl Driver {
         // frame: a scan reporting five hundred rows at a time is not five
         // hundred redraws.
         self.dirty |= self.runtime.poll_queries(app, trace);
+        self.dirty |= self.runtime.poll_catalog(app);
         for action in app.settle(Instant::now()) {
             self.act(terminal, app, action)?;
         }
@@ -406,6 +407,7 @@ impl Driver {
             Action::OpenEditor { tab } => self.open_editor(terminal, app, tab)?,
             Action::SaveScratch { tab } => self.save_scratch(app, tab),
             Action::Copy(text) => self.copy(&text),
+            Action::LoadObjects { tab, request } => self.runtime.load(app, tab, request),
         }
         Ok(())
     }

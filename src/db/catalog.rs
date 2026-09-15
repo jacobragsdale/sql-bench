@@ -42,6 +42,28 @@ impl ObjectKind {
         Self::Sequence,
     ];
 
+    /// How the tree names the branch that holds them.
+    #[must_use]
+    pub fn plural(self) -> &'static str {
+        match self {
+            Self::Table => "Tables",
+            Self::View => "Views",
+            Self::Procedure => "Procedures",
+            Self::Function => "Functions",
+            Self::Package => "Packages",
+            Self::Sequence => "Sequences",
+        }
+    }
+
+    /// Every kind this backend has: only Oracle has packages.
+    #[must_use]
+    pub fn all_for(backend: Kind) -> Vec<Self> {
+        Self::ALL
+            .into_iter()
+            .filter(|kind| backend == Kind::Oracle || *kind != Self::Package)
+            .collect()
+    }
+
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -137,22 +159,88 @@ pub struct ColumnInfo {
     pub is_pk: bool,
 }
 
+/// What the object tree asks the catalog for, and what came back.
+///
+/// One request is one query down the ordinary [`Connection::query`] path, so
+/// the tree loads the way a user's statement runs: the runtime issues
+/// [`CatalogRequest::sql`], collects the rows and hands them to
+/// [`CatalogRequest::answer`]. The blocking calls below are the same two
+/// halves with a `for` loop between them, for the CLI.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CatalogRequest {
+    Schemas,
+    Objects {
+        schema: String,
+        kind: ObjectKind,
+    },
+    /// `show` is `i` asking for them in the results pane as well as the tree.
+    Columns {
+        schema: String,
+        table: String,
+        show: bool,
+    },
+    Source {
+        schema: String,
+        name: String,
+        kind: ObjectKind,
+    },
+}
+
+/// The rows of a [`CatalogRequest`], parsed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CatalogAnswer {
+    Schemas(Vec<String>),
+    Objects(Vec<DbObject>),
+    Columns(Vec<ColumnInfo>),
+    Source(String),
+}
+
+impl CatalogRequest {
+    /// The one query that answers it.
+    #[must_use]
+    pub fn sql(&self, backend: Kind) -> String {
+        match self {
+            Self::Schemas => schemas_sql(backend),
+            Self::Objects { schema, kind } => objects_sql(backend, Some(schema), Some(*kind)),
+            Self::Columns { schema, table, .. } => columns_sql(backend, schema, table),
+            Self::Source { schema, name, kind } => source_sql(backend, schema, name, *kind),
+        }
+    }
+
+    /// What those rows mean.
+    pub fn answer(&self, backend: Kind, rows: Vec<Vec<Cell>>) -> Result<CatalogAnswer, DbError> {
+        Ok(match self {
+            Self::Schemas => CatalogAnswer::Schemas(parse_schemas(&rows)),
+            Self::Objects { .. } => CatalogAnswer::Objects(parse_objects(backend, rows)),
+            Self::Columns { .. } => CatalogAnswer::Columns(parse_columns(backend, &rows)),
+            Self::Source { schema, name, .. } => {
+                CatalogAnswer::Source(parse_source(backend, schema, name, &rows)?)
+            }
+        })
+    }
+}
+
 /// The schemas worth showing: on SQL Server everything but `sys`,
 /// `INFORMATION_SCHEMA`, `guest` and the fixed `db_*` roles; on Oracle every
 /// account Oracle did not create, plus the one we are logged in as.
 pub fn list_schemas(connection: &Connection) -> Result<Vec<String>, DbError> {
-    let sql = match connection.kind() {
+    let rows = rows(connection, &schemas_sql(connection.kind()))?;
+    Ok(parse_schemas(&rows))
+}
+
+fn schemas_sql(backend: Kind) -> String {
+    match backend {
         Kind::Mssql => "select s.name from sys.schemas s \
              where s.name not in ('sys', 'INFORMATION_SCHEMA', 'guest') \
                and s.name not like 'db[_]%' \
              order by s.name"
             .to_owned(),
         Kind::Oracle => format!("select username from all_users where {OWNERS} order by username"),
-    };
-    Ok(rows(connection, &sql)?
-        .into_iter()
-        .map(|row| text(&row, 0))
-        .collect())
+    }
+}
+
+fn parse_schemas(rows: &[Vec<Cell>]) -> Vec<String> {
+    rows.iter().map(|row| text(row, 0)).collect()
 }
 
 /// Everything of `kind` in `schema`, or everything in every schema worth
@@ -162,7 +250,13 @@ pub fn list_objects(
     schema: Option<&str>,
     kind: Option<ObjectKind>,
 ) -> Result<Vec<DbObject>, DbError> {
-    let sql = match connection.kind() {
+    let backend = connection.kind();
+    let rows = rows(connection, &objects_sql(backend, schema, kind))?;
+    Ok(parse_objects(backend, rows))
+}
+
+fn objects_sql(backend: Kind, schema: Option<&str>, kind: Option<ObjectKind>) -> String {
+    match backend {
         Kind::Mssql => {
             let types = kind.map_or_else(
                 || {
@@ -208,17 +302,19 @@ pub fn list_objects(
                 types = list(&types),
                 owner = schema.map_or_else(
                     || format!("o.owner in (select username from all_users where {OWNERS})"),
-                    |schema| format!("o.owner = {}", quoted(&fold(connection, schema)))
+                    |schema| format!("o.owner = {}", quoted(&fold(backend, schema)))
                 ),
             )
         }
-    };
-    let from_code = match connection.kind() {
+    }
+}
+
+fn parse_objects(backend: Kind, rows: Vec<Vec<Cell>>) -> Vec<DbObject> {
+    let from_code = match backend {
         Kind::Mssql => ObjectKind::from_mssql,
         Kind::Oracle => ObjectKind::from_oracle,
     };
-    Ok(rows(connection, &sql)?
-        .into_iter()
+    rows.into_iter()
         .filter_map(|row| {
             Some(DbObject {
                 schema: text(&row, 0),
@@ -227,7 +323,7 @@ pub fn list_objects(
                 modified: maybe(&row, 3),
             })
         })
-        .collect())
+        .collect()
 }
 
 /// The columns of a table or a view, in declaration order.
@@ -236,79 +332,77 @@ pub fn list_columns(
     schema: &str,
     table: &str,
 ) -> Result<Vec<ColumnInfo>, DbError> {
-    match connection.kind() {
-        Kind::Mssql => {
-            let sql = format!(
-                "select c.name, t.name, c.max_length, c.precision, c.scale, \
-                        case when c.is_nullable = 1 then 'Y' else 'N' end, \
-                        case when pk.column_id is null then 'N' else 'Y' end \
-                 from sys.columns c \
-                 join sys.objects o on o.object_id = c.object_id \
-                 join sys.schemas s on s.schema_id = o.schema_id \
-                 join sys.types t on t.user_type_id = c.user_type_id \
-                 left join (select ic.object_id, ic.column_id \
-                            from sys.index_columns ic \
-                            join sys.key_constraints kc \
-                              on kc.parent_object_id = ic.object_id \
-                             and kc.unique_index_id = ic.index_id \
-                            where kc.type = 'PK') pk \
-                        on pk.object_id = c.object_id and pk.column_id = c.column_id \
-                 where lower(s.name) = lower({schema}) and lower(o.name) = lower({table}) \
-                 order by c.column_id",
-                schema = quoted(schema),
-                table = quoted(table),
-            );
-            Ok(rows(connection, &sql)?
-                .into_iter()
-                .map(|row| ColumnInfo {
-                    name: text(&row, 0),
-                    type_text: mssql_type_text(
-                        &text(&row, 1),
-                        int(&row, 2),
-                        int(&row, 3),
-                        int(&row, 4),
-                    ),
-                    nullable: text(&row, 5) == "Y",
-                    is_pk: text(&row, 6) == "Y",
-                })
-                .collect())
-        }
-        Kind::Oracle => {
-            let sql = format!(
-                "select c.column_name, c.data_type, c.data_length, c.data_precision, \
-                        c.data_scale, c.char_used, c.char_length, c.nullable, \
-                        case when pk.column_name is null then 'N' else 'Y' end \
-                 from all_tab_columns c \
-                 left join (select cc.owner, cc.table_name, cc.column_name \
-                            from all_constraints k \
-                            join all_cons_columns cc \
-                              on cc.owner = k.owner and cc.constraint_name = k.constraint_name \
-                            where k.constraint_type = 'P') pk \
-                        on pk.owner = c.owner and pk.table_name = c.table_name \
-                       and pk.column_name = c.column_name \
-                 where c.owner = {schema} and c.table_name = {table} \
-                 order by c.column_id",
-                schema = quoted(&fold(connection, schema)),
-                table = quoted(&fold(connection, table)),
-            );
-            Ok(rows(connection, &sql)?
-                .into_iter()
-                .map(|row| ColumnInfo {
-                    name: text(&row, 0),
-                    type_text: oracle_type_text(
-                        &text(&row, 1),
-                        int(&row, 2),
-                        maybe(&row, 3).and_then(|text| text.parse().ok()),
-                        maybe(&row, 4).and_then(|text| text.parse().ok()),
-                        &text(&row, 5),
-                        int(&row, 6),
-                    ),
-                    nullable: text(&row, 7) == "Y",
-                    is_pk: text(&row, 8) == "Y",
-                })
-                .collect())
-        }
+    let backend = connection.kind();
+    let rows = rows(connection, &columns_sql(backend, schema, table))?;
+    Ok(parse_columns(backend, &rows))
+}
+
+fn columns_sql(backend: Kind, schema: &str, table: &str) -> String {
+    match backend {
+        Kind::Mssql => format!(
+            "select c.name, t.name, c.max_length, c.precision, c.scale, \
+                    case when c.is_nullable = 1 then 'Y' else 'N' end, \
+                    case when pk.column_id is null then 'N' else 'Y' end \
+             from sys.columns c \
+             join sys.objects o on o.object_id = c.object_id \
+             join sys.schemas s on s.schema_id = o.schema_id \
+             join sys.types t on t.user_type_id = c.user_type_id \
+             left join (select ic.object_id, ic.column_id \
+                        from sys.index_columns ic \
+                        join sys.key_constraints kc \
+                          on kc.parent_object_id = ic.object_id \
+                         and kc.unique_index_id = ic.index_id \
+                        where kc.type = 'PK') pk \
+                    on pk.object_id = c.object_id and pk.column_id = c.column_id \
+             where lower(s.name) = lower({schema}) and lower(o.name) = lower({table}) \
+             order by c.column_id",
+            schema = quoted(schema),
+            table = quoted(table),
+        ),
+        Kind::Oracle => format!(
+            "select c.column_name, c.data_type, c.data_length, c.data_precision, \
+                    c.data_scale, c.char_used, c.char_length, c.nullable, \
+                    case when pk.column_name is null then 'N' else 'Y' end \
+             from all_tab_columns c \
+             left join (select cc.owner, cc.table_name, cc.column_name \
+                        from all_constraints k \
+                        join all_cons_columns cc \
+                          on cc.owner = k.owner and cc.constraint_name = k.constraint_name \
+                        where k.constraint_type = 'P') pk \
+                    on pk.owner = c.owner and pk.table_name = c.table_name \
+                   and pk.column_name = c.column_name \
+             where c.owner = {schema} and c.table_name = {table} \
+             order by c.column_id",
+            schema = quoted(&fold(backend, schema)),
+            table = quoted(&fold(backend, table)),
+        ),
     }
+}
+
+fn parse_columns(backend: Kind, rows: &[Vec<Cell>]) -> Vec<ColumnInfo> {
+    rows.iter()
+        .map(|row| match backend {
+            Kind::Mssql => ColumnInfo {
+                name: text(row, 0),
+                type_text: mssql_type_text(&text(row, 1), int(row, 2), int(row, 3), int(row, 4)),
+                nullable: text(row, 5) == "Y",
+                is_pk: text(row, 6) == "Y",
+            },
+            Kind::Oracle => ColumnInfo {
+                name: text(row, 0),
+                type_text: oracle_type_text(
+                    &text(row, 1),
+                    int(row, 2),
+                    maybe(row, 3).and_then(|text| text.parse().ok()),
+                    maybe(row, 4).and_then(|text| text.parse().ok()),
+                    &text(row, 5),
+                    int(row, 6),
+                ),
+                nullable: text(row, 7) == "Y",
+                is_pk: text(row, 8) == "Y",
+            },
+        })
+        .collect()
 }
 
 /// The text that made an object. A table has none — its columns are what
@@ -322,77 +416,81 @@ pub fn object_source(
     if matches!(kind, ObjectKind::Table | ObjectKind::Sequence) {
         return Err(DbError::Unsupported(format!("a {kind} has no source text")));
     }
-    match connection.kind() {
-        Kind::Mssql => mssql_source(connection, schema, name),
-        Kind::Oracle => oracle_source(connection, schema, name, kind),
+    let backend = connection.kind();
+    let rows = rows(connection, &source_sql(backend, schema, name, kind))?;
+    parse_source(backend, schema, name, &rows)
+}
+
+/// `OBJECT_DEFINITION` is the whole batch that created the object on SQL
+/// Server; Oracle keeps a line per row in `ALL_SOURCE`, and a view's text in
+/// `ALL_VIEWS`. Either way one query answers, so the tree can run it the way
+/// it runs everything else.
+fn source_sql(backend: Kind, schema: &str, name: &str, kind: ObjectKind) -> String {
+    match backend {
+        // Ordered so that an exact match wins over one that differs by case,
+        // which needs a case-sensitive collation to happen at all.
+        Kind::Mssql => format!(
+            "select object_definition(o.object_id) \
+             from sys.objects o \
+             join sys.schemas s on s.schema_id = o.schema_id \
+             where lower(s.name) = lower({schema}) and lower(o.name) = lower({name}) \
+             order by case when s.name = {schema} and o.name = {name} then 0 else 1 end",
+            schema = quoted(schema),
+            name = quoted(name),
+        ),
+        Kind::Oracle if kind == ObjectKind::View => format!(
+            "select 'VIEW', text from all_views where owner = {} and view_name = {}",
+            quoted(&fold(backend, schema)),
+            quoted(&fold(backend, name)),
+        ),
+        // A package is two objects wearing one name; `PACKAGE` sorts before
+        // `PACKAGE BODY`, so the spec comes back first.
+        Kind::Oracle => format!(
+            "select type, text from all_source \
+             where owner = {} and name = {} and type in ({}) order by type, line",
+            quoted(&fold(backend, schema)),
+            quoted(&fold(backend, name)),
+            list(kind_source_types(kind)),
+        ),
     }
 }
 
-/// `OBJECT_DEFINITION` is the whole batch that created the object, and NULL
-/// when it was created `WITH ENCRYPTION` — which is not a failure, just a
-/// door somebody locked.
-fn mssql_source(connection: &Connection, schema: &str, name: &str) -> Result<String, DbError> {
-    let sql = format!(
-        "select object_definition(o.object_id) \
-         from sys.objects o \
-         join sys.schemas s on s.schema_id = o.schema_id \
-         where lower(s.name) = lower({schema}) and lower(o.name) = lower({name}) \
-         order by case when s.name = {schema} and o.name = {name} then 0 else 1 end",
-        schema = quoted(schema),
-        name = quoted(name),
-    );
-    let rows = rows(connection, &sql)?;
-    let Some(row) = rows.first() else {
-        return Err(missing(schema, name));
-    };
-    Ok(maybe(row, 0).unwrap_or_else(|| "-- source not available (encrypted)".to_owned()))
-}
-
-/// `ALL_SOURCE` line by line for everything with a body, `ALL_VIEWS` for a
-/// view. A package is two objects wearing one name, so both come back with a
-/// divider between them.
-fn oracle_source(
-    connection: &Connection,
+fn parse_source(
+    backend: Kind,
     schema: &str,
     name: &str,
-    kind: ObjectKind,
+    rows: &[Vec<Cell>],
 ) -> Result<String, DbError> {
-    let (schema, name) = (fold(connection, schema), fold(connection, name));
-    if kind == ObjectKind::View {
-        let sql = format!(
-            "select text from all_views where owner = {} and view_name = {}",
-            quoted(&schema),
-            quoted(&name),
+    let (schema, name) = (fold(backend, schema), fold(backend, name));
+    let Some(first) = rows.first() else {
+        return Err(missing(&schema, &name));
+    };
+    if backend == Kind::Mssql {
+        // NULL is an object created `WITH ENCRYPTION`, which is not a
+        // failure, just a door somebody locked.
+        return Ok(
+            maybe(first, 0).unwrap_or_else(|| "-- source not available (encrypted)".to_owned())
         );
-        let rows = rows(connection, &sql)?;
-        let Some(row) = rows.first() else {
-            return Err(missing(&schema, &name));
-        };
+    }
+    if text(first, 0) == "VIEW" {
         return Ok(format!(
             "CREATE OR REPLACE VIEW {schema}.{name} AS\n{}",
-            text(row, 0)
+            text(first, 1)
         ));
     }
-
-    let mut parts = Vec::new();
-    for object in kind_source_types(kind) {
-        let sql = format!(
-            "select text from all_source \
-             where owner = {} and name = {} and type = {} order by line",
-            quoted(&schema),
-            quoted(&name),
-            quoted(object),
-        );
-        let lines = rows(connection, &sql)?;
-        if !lines.is_empty() {
-            let body: String = lines.iter().map(|row| text(row, 0)).collect();
-            parts.push(format!("CREATE OR REPLACE {}", body.trim_end()));
+    let mut parts: Vec<(String, String)> = Vec::new();
+    for row in rows {
+        let (object, line) = (text(row, 0), text(row, 1));
+        match parts.last_mut() {
+            Some((last, body)) if *last == object => body.push_str(&line),
+            _ => parts.push((object, line)),
         }
     }
-    if parts.is_empty() {
-        return Err(missing(&schema, &name));
-    }
-    Ok(parts.join("\n/\n\n"))
+    Ok(parts
+        .iter()
+        .map(|(_, body)| format!("CREATE OR REPLACE {}", body.trim_end()))
+        .collect::<Vec<_>>()
+        .join("\n/\n\n"))
 }
 
 /// A package is stored as its spec and its body, under two `ALL_SOURCE`
@@ -476,8 +574,8 @@ fn oracle_type_text(
 /// Oracle folds an unquoted identifier to upper case when it stores it, so
 /// that is what its catalog is asked for. SQL Server stores what it was
 /// given, and the queries compare case-insensitively instead.
-fn fold(connection: &Connection, name: &str) -> String {
-    match connection.kind() {
+fn fold(backend: Kind, name: &str) -> String {
+    match backend {
         Kind::Oracle => name.to_uppercase(),
         Kind::Mssql => name.to_owned(),
     }

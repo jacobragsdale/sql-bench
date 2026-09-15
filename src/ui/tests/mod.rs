@@ -2,6 +2,7 @@
 //! text of a line, which is what rule 3 asks for: no screenshots.
 
 mod layout;
+mod objects;
 mod overlays;
 mod results;
 mod scratch;
