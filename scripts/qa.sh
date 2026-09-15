@@ -7,10 +7,13 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 export SQL_BENCH_CONFIG=config.local.toml
+# Every case starts from an empty scratch pad, and none of them touch the
+# pads of whoever is running this.
+export SQL_BENCH_STATE_DIR=$(mktemp -d)
 BIN=target/debug/sql-bench
 FRAMES=$(mktemp -d)
 LOG=$(mktemp)
-trap 'rm -rf "$FRAMES" "$LOG"' EXIT
+trap 'rm -rf "$FRAMES" "$LOG" "$SQL_BENCH_STATE_DIR"' EXIT
 
 cargo build --quiet
 

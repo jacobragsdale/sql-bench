@@ -4,7 +4,7 @@
 key Tab
 key q
 key ?
-expect ╭ Help ─
+expect ╭ Help · Scratch ─
 key Esc
 expect-not ╭ Help
 key Ctrl-Q

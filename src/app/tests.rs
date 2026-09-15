@@ -188,6 +188,34 @@ fn esc_closes_the_help_first_and_the_error_after() {
 }
 
 #[test]
+fn the_open_help_takes_the_scroll_keys_the_pane_would_have_had() {
+    let mut app = two_tabs();
+    app.shell.focus = Focus::Scratch;
+    press(&mut app, "?");
+    for spec in ["j", "Down", "PageDown"] {
+        press(&mut app, spec);
+    }
+    assert_eq!(app.shell.help_scroll, 2 + HELP_PAGE);
+    assert_eq!(
+        app.tabs[0].scratch.text(),
+        "",
+        "the pad typed the help's keys"
+    );
+    for spec in ["k", "Up", "PageUp"] {
+        press(&mut app, spec);
+    }
+    assert_eq!(app.shell.help_scroll, 0);
+
+    press(&mut app, "PageDown");
+    press(&mut app, "?");
+    assert!(!app.shell.help);
+    assert_eq!(app.shell.help_scroll, 0, "the next ? opens at the top");
+    // With it closed the pad has them back.
+    press(&mut app, "j");
+    assert_eq!(app.tabs[0].scratch.text(), "j");
+}
+
+#[test]
 fn a_tab_is_a_connection_from_the_config_and_starts_disconnected() {
     let app = two_tabs();
     assert_eq!(

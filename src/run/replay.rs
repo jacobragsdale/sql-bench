@@ -697,7 +697,7 @@ mod tests {
              key Tab\n\
              expect ╭ Scratch\n\
              key ?\n\
-             expect Ctrl-T    anywhere    next tab\n\
+             expect Ctrl-T        next tab\n\
              frame help\n\
              key Esc\n\
              expect-not ╭ Help\n\

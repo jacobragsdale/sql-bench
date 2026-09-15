@@ -119,6 +119,14 @@ columns, source. Never touches table data.
 | ? | anywhere | help |
 | q / Ctrl-Q | not Scratch / anywhere | quit |
 
+`?` opens the help over the layout: `<key>  <what it does>` for the keys of
+the focused pane only — `Help · Scratch` — with the key column as wide as the
+widest key it lists. It is never taller than the screen: a list that does not
+fit scrolls with j k, the arrows and PageUp/PageDown, which the pane under it
+does not see while it is open, and the title says which rows are showing
+(`Help · Scratch (1-11 of 20)`). `?` and Esc close it and put it back to the
+top.
+
 The scratch pad is one pad per connection, kept in
 `~/.local/state/sql-bench/scratch/<connection>.sql` — `$SQL_BENCH_STATE_DIR`
 moves the directory — written 500 ms after the last edit and on the way out,
@@ -198,7 +206,7 @@ Every failure names the line of the script it happened on.
 expect 1 local-mssql ○  2 local-oracle ○
 frame shell
 key ?
-expect Ctrl-T    anywhere    next tab
+expect Ctrl-T     next tab
 frame help
 key Esc
 expect-not ╭ Help

@@ -3,5 +3,5 @@
 # NO_COLOR check in scripts/qa.sh to read the styles of.
 
 key ?
-expect ╭ Help ─
+expect ╭ Help · Objects ─
 frame styles

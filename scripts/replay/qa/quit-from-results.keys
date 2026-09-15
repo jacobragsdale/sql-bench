@@ -1,9 +1,9 @@
-# Ctrl-Q with the Results pane focused, two panes along from the first.
+# Ctrl-Q with the Results pane focused, one Shift-Tab back from the first —
+# the way round that never types, Tab being the scratch pad's own key.
 
-key Tab
-key Tab
+key Shift-Tab
 key ?
-expect ╭ Help ─
+expect ╭ Help · Results ─
 key Esc
 key Ctrl-Q
 key ?

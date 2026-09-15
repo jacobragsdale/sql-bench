@@ -13,7 +13,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph, Wrap};
 
 use crate::app::scratch::Scratch;
-use crate::app::{App, Focus, KEYS, TabState, keys_for};
+use crate::app::{App, Focus, TabState, keys_for};
 use theme::Theme;
 
 /// Smaller than this and the three panes are narrower than their own titles,
@@ -91,7 +91,7 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
     );
     frame.render_widget(footer_line(app, theme, area.width), footer);
     if app.shell.help {
-        render_help(frame, area, theme);
+        render_help(frame, area, app, theme);
     }
 }
 
@@ -308,23 +308,46 @@ fn hints(focus: Focus, budget: usize) -> String {
     text
 }
 
-/// Every key, from the one table the footer hints come from too.
-fn render_help(frame: &mut Frame, area: Rect, theme: &Theme) {
-    let lines: Vec<Line> = KEYS
+/// The keys that work in the focused pane, from the one table the footer
+/// hints come from too. It never grows past the screen: what does not fit
+/// scrolls, and the title says which rows are showing.
+fn render_help(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+    let focus = app.shell.focus;
+    let rows: Vec<&(&str, &str, &str)> = keys_for(focus).collect();
+    let key_width = rows
         .iter()
-        .map(|(key, place, does)| {
+        .map(|(key, _, _)| key.chars().count())
+        .max()
+        .unwrap_or(0)
+        + 2;
+    #[allow(clippy::cast_possible_truncation)]
+    let height = (rows.len() as u16 + 2).min(area.height.saturating_sub(2));
+    let overlay = centered(area, 56, height);
+    let showing = usize::from(height.saturating_sub(2));
+    let top = app.shell.help_scroll.min(rows.len() - showing);
+    let lines: Vec<Line> = rows[top..top + showing]
+        .iter()
+        .map(|(key, _, does)| {
             Line::from(vec![
-                Span::styled(format!(" {key:<10}"), theme.accent),
-                Span::styled(format!("{place:<12}"), theme.dim),
+                Span::styled(format!("{key:<key_width$}"), theme.accent),
                 Span::raw((*does).to_owned()),
             ])
         })
         .collect();
-    #[allow(clippy::cast_possible_truncation)]
-    let overlay = centered(area, 56, lines.len() as u16 + 2);
+    let title = if showing < rows.len() {
+        format!(
+            " Help · {} ({}-{} of {}) ",
+            focus.title(),
+            top + 1,
+            top + showing,
+            rows.len()
+        )
+    } else {
+        format!(" Help · {} ", focus.title())
+    };
     frame.render_widget(Clear, overlay);
     frame.render_widget(
-        Paragraph::new(lines).block(titled(" Help ", theme.accent, theme.accent)),
+        Paragraph::new(lines).block(titled(&title, theme.accent, theme.accent)),
         overlay,
     );
 }
