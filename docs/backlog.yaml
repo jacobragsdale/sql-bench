@@ -936,6 +936,8 @@ epics:
       120x40 --frames-dir /tmp/sql-bench-frames
     - SQL_BENCH_CONFIG=config.local.toml cargo run -- --replay scripts/replay/objects-oracle.keys --size
       120x40 --frames-dir /tmp/sql-bench-frames
+    verified: true
+    note: merged to main 2026-09-15; 282 tests, qa.sh 14/14, run-queries.sh 11/11 re-run by the coordinator
   - id: T6.2
     tag: qa
     title: 'T6.2 QA: object browser against every seeded object'
