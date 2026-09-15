@@ -71,14 +71,14 @@ fn the_footer_hints_the_focused_panes_keys_and_says_where_the_connection_is() {
     );
 
     // The scratch pad types its own characters, so its hints are the keys
-    // that are not one — and there is room for all of them.
+    // that are not one, its own chords first.
     app.handle(Event::Key(key("Tab")));
     let terminal = frame(120, 40, &app);
     assert_eq!(
         line(&terminal, 39),
         footer_of(
             &terminal,
-            " Tab next pane  Shift-Tab previous pane  Ctrl-T next tab  ? help  Esc close help or error  Ctrl-Q quit",
+            " Shift-Tab previous pane  Ctrl-T next tab  Ctrl-R run the statement  F5 run all  Ctrl-E edit in $EDITOR",
             "○ disconnected",
         )
     );
@@ -157,7 +157,11 @@ fn an_error_takes_the_footer_over_until_it_is_closed() {
 fn the_focused_pane_is_the_one_with_the_accent_border() {
     let theme = Theme::new(false);
     let mut app = two_tabs();
-    for focused in 0..3 {
+    for (focused, focus) in [Focus::Objects, Focus::Scratch, Focus::Results]
+        .into_iter()
+        .enumerate()
+    {
+        app.shell.focus = focus;
         let terminal = frame(120, 40, &app);
         let corners = corners(&terminal);
         assert_eq!(corners.len(), 3, "three panes have three corners");
@@ -173,6 +177,5 @@ fn the_focused_pane_is_the_one_with_the_accent_border() {
                 "pane {pane} at ({x}, {y}) with {focused} focused"
             );
         }
-        app.handle(Event::Key(key("Tab")));
     }
 }

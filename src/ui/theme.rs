@@ -18,6 +18,11 @@ pub struct Theme {
     pub border: Style,
     pub error: Style,
     pub ok: Style,
+    /// The cell the scratch pad's cursor is on. A `TestBackend` has no
+    /// terminal cursor, so this is what makes it visible — and assertable.
+    pub cursor: Style,
+    /// What a Shift-arrow selection is painted with.
+    pub selection: Style,
 }
 
 impl Theme {
@@ -38,6 +43,8 @@ impl Theme {
             border: Style::new().fg(Color::DarkGray),
             error: Style::new().fg(Color::Red),
             ok: Style::new().fg(Color::Green),
+            cursor: Style::new().add_modifier(Modifier::REVERSED),
+            selection: Style::new().bg(Color::Cyan).fg(Color::Black),
         }
     }
 }

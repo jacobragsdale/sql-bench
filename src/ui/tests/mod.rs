@@ -3,6 +3,7 @@
 
 mod layout;
 mod overlays;
+mod scratch;
 mod styles;
 
 use ratatui::Terminal;

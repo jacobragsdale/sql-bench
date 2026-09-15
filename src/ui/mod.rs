@@ -12,6 +12,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph, Wrap};
 
+use crate::app::scratch::Scratch;
 use crate::app::{App, Focus, KEYS, TabState, keys_for};
 use theme::Theme;
 
@@ -79,14 +80,7 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
         objects,
         vec![placeholder("press c to connect", theme)],
     );
-    pane(
-        frame,
-        app,
-        theme,
-        Focus::Scratch,
-        scratch,
-        vec![placeholder("your SQL goes here", theme)],
-    );
+    scratch_pane(frame, app, theme, scratch);
     pane(
         frame,
         app,
@@ -128,6 +122,107 @@ fn results_body(app: &App, theme: &Theme) -> Vec<Line<'static>> {
         ],
         _ => vec![placeholder("nothing has run yet", theme)],
     }
+}
+
+/// The scratch pad: a line number gutter, the text with the cursor cell and
+/// the selection painted on it, and `[modified]` while the file is behind.
+///
+/// It draws its own block rather than going through [`pane`], because it is
+/// the one pane whose body has to know how wide the inside is.
+fn scratch_pane(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
+    let focused = app.shell.focus == Focus::Scratch;
+    let (title_style, border_style) = if focused {
+        (theme.accent, theme.accent)
+    } else {
+        (theme.dim, theme.border)
+    };
+    let scratch = app.tab().map(|tab| &tab.scratch);
+    let modified = scratch.is_some_and(Scratch::modified);
+    let title = if modified {
+        " Scratch [modified] "
+    } else {
+        " Scratch "
+    };
+    let block = titled(title, title_style, border_style);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let Some(scratch) = scratch else {
+        return;
+    };
+    if scratch.is_empty() && !focused {
+        frame.render_widget(
+            Paragraph::new(placeholder("your SQL goes here", theme)),
+            inner,
+        );
+        return;
+    }
+    frame.render_widget(
+        Paragraph::new(scratch_lines(scratch, theme, inner, focused)),
+        inner,
+    );
+}
+
+/// The rows of the pad that are on screen, gutter and all.
+fn scratch_lines(
+    scratch: &Scratch,
+    theme: &Theme,
+    area: Rect,
+    focused: bool,
+) -> Vec<Line<'static>> {
+    let height = usize::from(area.height);
+    let lines = scratch.lines();
+    let digits = lines.len().to_string().len();
+    // The gutter is the widest number and the space after it.
+    let width = usize::from(area.width).saturating_sub(digits + 1).max(1);
+    let (top, left) = scratch.window(height, width);
+    let (cursor_line, cursor_column) = scratch.cursor();
+    let selection = scratch.selection();
+    lines
+        .iter()
+        .enumerate()
+        .skip(top)
+        .take(height)
+        .map(|(number, text)| {
+            let characters: Vec<char> = text.chars().collect();
+            // Only as far as there is something to paint: a cursor past the
+            // end of the line, the end of the selection, or the text.
+            let mut last = characters.len();
+            if focused && number == cursor_line {
+                last = last.max(cursor_column + 1);
+            }
+            if let Some((_, (end_line, end_column))) = selection
+                && number == end_line
+            {
+                last = last.max(end_column);
+            }
+            let mut spans = vec![Span::styled(
+                format!("{:>digits$} ", number + 1, digits = digits),
+                theme.dim,
+            )];
+            let mut run = String::new();
+            let mut run_style = Style::default();
+            for column in left..last.min(left + width) {
+                let style = if focused && (number, column) == (cursor_line, cursor_column) {
+                    theme.cursor
+                } else if selection
+                    .is_some_and(|(from, to)| (number, column) >= from && (number, column) < to)
+                {
+                    theme.selection
+                } else {
+                    Style::default()
+                };
+                if style != run_style && !run.is_empty() {
+                    spans.push(Span::styled(std::mem::take(&mut run), run_style));
+                }
+                run_style = style;
+                run.push(characters.get(column).copied().unwrap_or(' '));
+            }
+            if !run.is_empty() {
+                spans.push(Span::styled(run, run_style));
+            }
+            Line::from(spans)
+        })
+        .collect()
 }
 
 fn placeholder(text: &str, theme: &Theme) -> Line<'static> {

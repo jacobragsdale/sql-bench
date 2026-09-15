@@ -8,9 +8,12 @@ use ratatui::backend::TestBackend;
 use super::*;
 use crate::app::tests::{key, two_connections, two_tabs};
 
-/// A driver with the two tabs' connections behind it, connected to none.
+/// A driver with the two tabs' connections behind it, connected to none,
+/// and nowhere to save a scratch pad: a test writes no state of its own.
 fn driver() -> Driver {
-    Driver::new(Theme::from_env(), &two_connections())
+    let mut driver = Driver::new(Theme::from_env(), &two_connections());
+    driver.keep_scratch_in(crate::run::state::Store::new(None));
+    driver
 }
 
 /// The keys of a replay: each one once, then nothing, for ever.
@@ -88,9 +91,12 @@ fn a_run_draws_the_layout_and_q_ends_it() {
 
 #[test]
 fn the_loop_ends_when_the_input_is_exhausted_even_without_a_quit() {
-    let app = drive(&mut Keys::new(&["Tab", "Tab"]), &Trace::new(None));
+    let app = drive(
+        &mut Keys::new(&["Shift-Tab", "Shift-Tab"]),
+        &Trace::new(None),
+    );
     assert!(!app.shell.should_quit);
-    assert_eq!(app.shell.focus, crate::app::Focus::Results);
+    assert_eq!(app.shell.focus, crate::app::Focus::Scratch);
 }
 
 #[test]
@@ -126,7 +132,7 @@ fn a_key_is_a_frame_and_a_traced_run_says_how_long_it_took_to_draw() {
     let directory = tempfile::tempdir().expect("a directory");
     let path = directory.path().join("trace.tsv");
     drive(
-        &mut Keys::new(&["Tab", "Tab", "q"]),
+        &mut Keys::new(&["Tab", "Shift-Tab", "q"]),
         &Trace::new(Some(path.clone())),
     );
     let written = std::fs::read_to_string(&path).expect("a trace file");
@@ -136,4 +142,15 @@ fn a_key_is_a_frame_and_a_traced_run_says_how_long_it_took_to_draw() {
         .count();
     // The first frame, and then one for each key: the quit is not drawn.
     assert_eq!(frames, 3, "{written}");
+}
+
+#[test]
+fn osc_52_carries_the_selection_as_base64() {
+    // The three lengths that matter: a multiple of three, and each of the
+    // two paddings.
+    assert_eq!(super::base64(b"sql"), "c3Fs");
+    assert_eq!(super::base64(b"select 1"), "c2VsZWN0IDE=");
+    assert_eq!(super::base64(b"select 12"), "c2VsZWN0IDEy");
+    assert_eq!(super::base64(b"s"), "cw==");
+    assert_eq!(super::base64(b""), "");
 }

@@ -38,7 +38,8 @@ pub(crate) fn key(spec: &str) -> KeyEvent {
     if spec == "1-9" {
         return KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE);
     }
-    let mut parts: Vec<&str> = spec.split('-').collect();
+    let mut parts: Vec<&str> = spec.rsplitn(2, '-').collect();
+    parts.reverse();
     let last = parts.pop().expect("a key to press");
     let mut modifiers = KeyModifiers::NONE;
     for part in parts {
@@ -52,6 +53,20 @@ pub(crate) fn key(spec: &str) -> KeyEvent {
         "Tab" if modifiers.contains(KeyModifiers::SHIFT) => KeyCode::BackTab,
         "Tab" => KeyCode::Tab,
         "Esc" => KeyCode::Esc,
+        "Enter" => KeyCode::Enter,
+        "Backspace" => KeyCode::Backspace,
+        "Delete" => KeyCode::Delete,
+        "Home" => KeyCode::Home,
+        "End" => KeyCode::End,
+        "Up" => KeyCode::Up,
+        "Down" => KeyCode::Down,
+        "Left" => KeyCode::Left,
+        "Right" => KeyCode::Right,
+        "PageUp" => KeyCode::PageUp,
+        "PageDown" => KeyCode::PageDown,
+        // The one row that names four keys; the left one stands for them.
+        "Arrows" => KeyCode::Left,
+        "F5" => KeyCode::F(5),
         other => {
             let mut characters = other.chars();
             let character = characters.next().expect("a key to press");
@@ -66,19 +81,40 @@ fn press(app: &mut App, spec: &str) -> Vec<Action> {
     app.handle(Event::Key(key(spec)))
 }
 
+/// An app where every key in [`KEYS`] has something left to do: the second
+/// tab showing so a tab key can move, an error to close, and — for the
+/// scratch pad's keys — a statement to run, a word to delete, an edit to
+/// take back and a selection to copy.
+fn ready(focus: Focus) -> App {
+    let mut app = two_tabs();
+    app.shell.focus = focus;
+    app.shell.active_tab = 1;
+    app.shell.error = Some("boom".to_owned());
+    let scratch = &mut app.tabs[1].scratch;
+    scratch.set_text("select count(*) from bench.events;");
+    for _ in 0..12 {
+        scratch.handle(key("Right"));
+    }
+    // An edit, so Ctrl-Z has a burst to take back, and a selection over it
+    // so Ctrl-C has something to copy.
+    scratch.handle(key("x"));
+    scratch.handle(key("Shift-Left"));
+    app
+}
+
 #[test]
 fn every_key_the_help_lists_is_handled_where_it_says_it_works() {
     for (spec, place, does) in KEYS {
         for focus in [Focus::Objects, Focus::Scratch, Focus::Results] {
-            if *place == NOT_SCRATCH && focus == Focus::Scratch {
+            let elsewhere = match *place {
+                NOT_SCRATCH => focus == Focus::Scratch,
+                SCRATCH => focus != Focus::Scratch,
+                _ => false,
+            };
+            if elsewhere {
                 continue;
             }
-            // Set up so that every key has something left to do: the second
-            // tab showing, so a tab key can move, and an error to close.
-            let mut app = two_tabs();
-            app.shell.focus = focus;
-            app.shell.active_tab = 1;
-            app.shell.error = Some("boom".to_owned());
+            let mut app = ready(focus);
             let before = app.clone();
             let actions = press(&mut app, spec);
             assert!(
@@ -92,14 +128,20 @@ fn every_key_the_help_lists_is_handled_where_it_says_it_works() {
 #[test]
 fn tab_and_shift_tab_cycle_the_focus_both_ways() {
     let mut app = two_tabs();
-    for expected in [Focus::Scratch, Focus::Results, Focus::Objects] {
-        press(&mut app, "Tab");
-        assert_eq!(app.shell.focus, expected);
-    }
     for expected in [Focus::Results, Focus::Scratch, Focus::Objects] {
         press(&mut app, "Shift-Tab");
         assert_eq!(app.shell.focus, expected);
     }
+    press(&mut app, "Tab");
+    assert_eq!(app.shell.focus, Focus::Scratch);
+
+    // Tab is the pad's own key once it has the focus: it types two spaces,
+    // and Shift-Tab is the way out.
+    press(&mut app, "Tab");
+    assert_eq!(app.shell.focus, Focus::Scratch);
+    assert_eq!(app.tabs[0].scratch.text(), "  ");
+    press(&mut app, "Shift-Tab");
+    assert_eq!(app.shell.focus, Focus::Objects);
 }
 
 #[test]
@@ -261,8 +303,33 @@ fn the_keys_of_a_pane_are_its_own_and_the_ones_that_work_anywhere() {
     let scratch: Vec<&str> = keys_for(Focus::Scratch).map(|(key, ..)| *key).collect();
     assert_eq!(
         scratch,
-        ["Tab", "Shift-Tab", "Ctrl-T", "?", "Esc", "Ctrl-Q"],
-        "the scratch pad keeps the keys that are not characters"
+        [
+            "Shift-Tab",
+            "Ctrl-T",
+            "Ctrl-R",
+            "F5",
+            "Ctrl-E",
+            "Ctrl-Z",
+            "Ctrl-C",
+            "Shift-Arrows",
+            "Tab",
+            "Home",
+            "End",
+            "Ctrl-A",
+            "Ctrl-U",
+            "Ctrl-K",
+            "Ctrl-W",
+            "Ctrl-Left",
+            "Ctrl-Right",
+            "?",
+            "Esc",
+            "Ctrl-Q",
+        ],
+        "the pad's own keys, and the ones that are not characters"
     );
-    assert_eq!(keys_for(Focus::Objects).count(), KEYS.len());
+    let objects: Vec<&str> = keys_for(Focus::Objects).map(|(key, ..)| *key).collect();
+    assert!(
+        !objects.contains(&"Ctrl-R"),
+        "no pane is offered another pane's keys: {objects:?}"
+    );
 }

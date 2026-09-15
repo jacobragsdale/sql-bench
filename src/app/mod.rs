@@ -3,6 +3,8 @@
 //! event goes in, a state change and a list of [`Action`]s come out, which is
 //! what makes the whole app testable without either.
 
+pub mod scratch;
+
 #[cfg(test)]
 pub(crate) mod tests;
 
@@ -12,21 +14,37 @@ use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::Size;
 
 use crate::config::{Config, Kind};
+use scratch::{Outcome, Scratch};
 
 /// Every key this build handles: the key, where it works, what it does.
 ///
 /// The help overlay, the footer hints and the key test all read this table
 /// and nothing else, so a key that is not in it is a key nobody is told
 /// about — and a key in it that [`App::handle`] ignores fails the test.
-/// `where` is [`ANYWHERE`] or [`NOT_SCRATCH`], because those are the only two
-/// answers a key that does not type text can give.
+/// `where` is [`ANYWHERE`], [`NOT_SCRATCH`] for a key the pad types instead,
+/// or [`SCRATCH`] for one that is the pad's own.
 pub const KEYS: &[(&str, &str, &str)] = &[
-    ("Tab", ANYWHERE, "next pane"),
+    ("Tab", NOT_SCRATCH, "next pane"),
     ("Shift-Tab", ANYWHERE, "previous pane"),
     ("Ctrl-T", ANYWHERE, "next tab"),
     ("1-9", NOT_SCRATCH, "select tab"),
     ("c", NOT_SCRATCH, "connect"),
     ("C", NOT_SCRATCH, "disconnect"),
+    ("Ctrl-R", SCRATCH, "run the statement"),
+    ("F5", SCRATCH, "run all"),
+    ("Ctrl-E", SCRATCH, "edit in $EDITOR"),
+    ("Ctrl-Z", SCRATCH, "undo the last edits"),
+    ("Ctrl-C", SCRATCH, "copy the selection"),
+    ("Shift-Arrows", SCRATCH, "select"),
+    ("Tab", SCRATCH, "two spaces"),
+    ("Home", SCRATCH, "line start"),
+    ("End", SCRATCH, "line end"),
+    ("Ctrl-A", SCRATCH, "line start"),
+    ("Ctrl-U", SCRATCH, "delete to line start"),
+    ("Ctrl-K", SCRATCH, "delete to line end"),
+    ("Ctrl-W", SCRATCH, "delete the word before"),
+    ("Ctrl-Left", SCRATCH, "word left"),
+    ("Ctrl-Right", SCRATCH, "word right"),
     ("?", ANYWHERE, "help"),
     ("Esc", ANYWHERE, "close help or error"),
     ("q", NOT_SCRATCH, "quit"),
@@ -36,6 +54,8 @@ pub const KEYS: &[(&str, &str, &str)] = &[
 pub const ANYWHERE: &str = "anywhere";
 
 pub const NOT_SCRATCH: &str = "not Scratch";
+
+pub const SCRATCH: &str = "Scratch";
 
 /// The frames a connecting tab's mark cycles through, one every
 /// [`SPIN_EVERY`].
@@ -49,19 +69,47 @@ pub const SPIN_EVERY: Duration = Duration::from_millis(100);
 pub fn keys_for(
     focus: Focus,
 ) -> impl Iterator<Item = &'static (&'static str, &'static str, &'static str)> {
-    KEYS.iter()
-        .filter(move |(_, place, _)| *place == ANYWHERE || focus != Focus::Scratch)
+    KEYS.iter().filter(move |(_, place, _)| {
+        let typing = focus == Focus::Scratch;
+        match *place {
+            SCRATCH => typing,
+            NOT_SCRATCH => !typing,
+            _ => true,
+        }
+    })
 }
 
 /// What the app asks the run loop to do. The app itself never does IO, so
 /// everything with a side effect leaves through here.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Action {
     Quit,
     /// Open (or re-open) this tab's connection.
     Connect(usize),
     /// Close it, cancelling whatever it is running.
     Disconnect(usize),
+    /// Run the statement the scratch pad's cursor is in *(T5.2)*.
+    RunStatement {
+        tab: usize,
+        sql: String,
+    },
+    /// Run every statement in the pad, in order *(T5.2)*.
+    RunAll {
+        tab: usize,
+        statements: Vec<String>,
+    },
+    /// Hand this tab's pad to `$VISUAL` or `$EDITOR` and take back what it
+    /// saves.
+    OpenEditor {
+        tab: usize,
+    },
+    /// Write this tab's pad to its file: the settle after the last edit, and
+    /// once more on the way out.
+    SaveScratch {
+        tab: usize,
+    },
+    /// Best effort, into the terminal's clipboard.
+    Copy(String),
 }
 
 /// What the run loop reports back about a connection. The app never opens
@@ -156,6 +204,9 @@ pub struct Tab {
     pub state: TabState,
     /// How long the connection that is up took to open.
     pub connect_ms: Option<u32>,
+    /// The SQL this connection is being written against, loaded from and
+    /// saved to `<state dir>/scratch/<name>.sql`.
+    pub scratch: Scratch,
 }
 
 /// The state every pane shares.
@@ -173,6 +224,9 @@ pub struct Shell {
     pub help: bool,
     /// Which frame of [`SPINNER`] a connecting tab is showing.
     pub spinner: usize,
+    /// What Ctrl-C last copied. The terminal's own clipboard is a best
+    /// effort the run loop makes; this one is always there.
+    pub clipboard: String,
     /// When that frame went up. The clock comes from the caller, so this
     /// module still reads none of its own.
     spun_at: Option<Instant>,
@@ -232,6 +286,7 @@ impl App {
                     kind: connection.kind,
                     state: TabState::default(),
                     connect_ms: None,
+                    scratch: Scratch::default(),
                 })
                 .collect(),
         }
@@ -293,6 +348,12 @@ impl App {
     pub fn handle(&mut self, event: Event) -> Vec<Action> {
         match event {
             Event::Key(key) if key.kind == KeyEventKind::Press => self.key(key),
+            Event::Paste(text) if self.shell.focus == Focus::Scratch => {
+                if let Some(tab) = self.tabs.get_mut(self.shell.active_tab) {
+                    tab.scratch.paste(&text);
+                }
+                Vec::new()
+            }
             Event::Resize(columns, rows) => {
                 self.shell.size = Size::new(columns, rows);
                 Vec::new()
@@ -301,10 +362,29 @@ impl App {
         }
     }
 
+    /// The clock, once a turn: what the pads that have stopped being typed
+    /// into owe the disk.
+    ///
+    /// The app reads no clock of its own, so this is how a save 500 ms after
+    /// the last edit happens without one — and [`App::settling`] is what
+    /// keeps the loop turning long enough for it to come round.
+    pub fn settle(&mut self, now: Instant) -> Vec<Action> {
+        (0..self.tabs.len())
+            .filter(|tab| self.tabs[*tab].scratch.settle(now))
+            .map(|tab| Action::SaveScratch { tab })
+            .collect()
+    }
+
+    /// Whether any pad is waiting to be written.
+    #[must_use]
+    pub fn settling(&self) -> bool {
+        self.tabs.iter().any(|tab| tab.scratch.settling())
+    }
+
     fn key(&mut self, key: KeyEvent) -> Vec<Action> {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
-        // ponytail: the scratch pad has no editor yet (T4.1), so all it does
-        // here is swallow the keys that would type into it.
+        // The scratch pad types every key the shell does not keep for
+        // itself, which is why the shell's keys are matched first.
         let typing = self.shell.focus == Focus::Scratch;
         match key.code {
             KeyCode::Char('q' | 'Q') if control => return vec![Action::Quit],
@@ -313,7 +393,7 @@ impl App {
                     self.shell.active_tab = (self.shell.active_tab + 1) % self.tabs.len();
                 }
             }
-            KeyCode::Tab => self.shell.focus = self.shell.focus.next(),
+            KeyCode::Tab if !typing => self.shell.focus = self.shell.focus.next(),
             KeyCode::BackTab => self.shell.focus = self.shell.focus.previous(),
             KeyCode::Char('?') => self.shell.help = !self.shell.help,
             KeyCode::Esc => {
@@ -323,15 +403,16 @@ impl App {
                     self.shell.error = None;
                 }
             }
-            KeyCode::Char('q') if !typing => return vec![Action::Quit],
-            // Not `control`: Ctrl-C is the terminal's, not a connect key.
-            KeyCode::Char('c') if !typing && !control && !self.tabs.is_empty() => {
+            _ if typing => return self.scratch_key(key),
+            KeyCode::Char('q') => return vec![Action::Quit],
+            // Not `control`: Ctrl-C is the copy key, not a connect key.
+            KeyCode::Char('c') if !control && !self.tabs.is_empty() => {
                 return vec![Action::Connect(self.shell.active_tab)];
             }
-            KeyCode::Char('C') if !typing && !control && !self.tabs.is_empty() => {
+            KeyCode::Char('C') if !control && !self.tabs.is_empty() => {
                 return vec![Action::Disconnect(self.shell.active_tab)];
             }
-            KeyCode::Char(digit @ '1'..='9') if !typing => {
+            KeyCode::Char(digit @ '1'..='9') => {
                 let wanted = digit as usize - '1' as usize;
                 if wanted < self.tabs.len() {
                     self.shell.active_tab = wanted;
@@ -340,5 +421,43 @@ impl App {
             _ => {}
         }
         Vec::new()
+    }
+
+    /// A key the pad handles, and what the run loop owes it afterwards.
+    fn scratch_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        let tab = self.shell.active_tab;
+        let Some(open) = self.tabs.get_mut(tab) else {
+            return Vec::new();
+        };
+        let kind = open.kind;
+        match open.scratch.handle(key) {
+            Outcome::Unchanged | Outcome::Edited => Vec::new(),
+            Outcome::RunStatement => match open.scratch.statement_at_cursor(kind) {
+                Some((sql, _)) => vec![Action::RunStatement { tab, sql }],
+                None => {
+                    self.shell.status = "no statement under the cursor".to_owned();
+                    Vec::new()
+                }
+            },
+            Outcome::RunAll => {
+                let statements: Vec<String> = open
+                    .scratch
+                    .statements(kind)
+                    .into_iter()
+                    .map(|(sql, _)| sql)
+                    .collect();
+                if statements.is_empty() {
+                    self.shell.status = "the pad is empty".to_owned();
+                    return Vec::new();
+                }
+                vec![Action::RunAll { tab, statements }]
+            }
+            Outcome::OpenEditor => vec![Action::OpenEditor { tab }],
+            Outcome::Copy(text) => {
+                self.shell.status = format!("copied {} characters", text.chars().count());
+                self.shell.clipboard = text.clone();
+                vec![Action::Copy(text)]
+            }
+        }
     }
 }
