@@ -1,0 +1,21 @@
+# T4.2 case 3a: the database is stopped while the tab is connected, and the
+# reconnect that follows has to fail rather than hang.
+#
+# The runner waits for `connected.txt`, stops the container, and has the whole
+# `wait` below to finish doing it — ten seconds, against a `docker stop -t 5`
+# that is done in six. It starts the container again as soon as this script is
+# done, so the server is away for the rest of this wait and no longer.
+key c
+wait busy
+expect ●
+expect connected in
+frame connected
+
+wait 10000
+key c
+wait busy
+expect ✗
+expect localhost:
+expect c to retry
+frame reconnect-failed
+key q

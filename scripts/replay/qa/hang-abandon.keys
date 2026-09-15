@@ -1,0 +1,45 @@
+# T4.2 case 4: a `password_cmd` that sleeps for thirty seconds.
+#
+# The connect thread is stuck in it, so what is being proved is that the loop
+# is not: the help overlay opens and closes while the tab spins, `C` abandons
+# the attempt, and `wait busy` comes back at once rather than in thirty
+# seconds. The runner times the run to say which of the two it was.
+key c
+expect connecting
+
+key ?
+expect ╭ Help
+expect Ctrl-T    anywhere    next tab
+frame help-while-connecting
+key Esc
+expect-not ╭ Help
+
+key C
+wait busy
+expect ○
+expect disconnected
+frame abandoned
+
+# An abandoned attempt animates nothing, however long it goes on sleeping.
+wait 100
+wait 100
+wait 100
+wait 100
+wait 100
+wait 100
+wait 100
+wait 100
+wait 100
+wait 100
+wait 100
+wait 100
+wait 100
+wait 100
+wait 100
+wait 100
+wait 100
+wait 100
+wait 100
+wait 100
+frame abandoned-idle
+key q
