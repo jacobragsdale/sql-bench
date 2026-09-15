@@ -690,6 +690,9 @@ epics:
     - Every defect found has a fix and a regression test.
     verify:
     - scripts/qa/connections.sh
+    verified: true
+    note: merged to main 2026-09-14; six failure cases green, no defects; the "query after outage" case
+      is deferred to T5.4
 - id: E5
   title: E5 Scratch pad, query execution and results
   description: 'The core of the workbench: write SQL, run the statement under the cursor, watch results
