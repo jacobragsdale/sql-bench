@@ -197,9 +197,17 @@ expect-not ╭ Help
 key q
 ```
 
-## Trace format *(T2.4)*
+## Trace format
 
-One line per event: `unix_ms\tkind\tk=v...`. Kinds: connect, query, results, frame, turn.
+`SQL_BENCH_TRACE=<file>` appends one line per event: `unix_ms\tkind\tk=v...`.
+Unset, no clock is read at all.
+
+| kind | fields |
+|---|---|
+| connect | conn, ms |
+| query | conn, rows, truncated, connect_ms, first_row_ms, total_ms |
+| frame | draw_ms |
+| turn | total_ms, draw_ms, input_ms |
 
 ## Budgets *(T7.1 records the numbers in PERF.md)*
 

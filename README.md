@@ -64,7 +64,7 @@ sql-bench query   --conn local-mssql 'select top 10 * from bench.customers'
 sql-bench query   --conn local-mssql --format json --max-rows 100 -   # SQL on stdin
 sql-bench objects --conn local-mssql --schema bench --kind procedure
 sql-bench source  --conn local-mssql bench.sp_customer_orders
-sql-bench bench   --conn local-mssql 'select 1'
+sql-bench bench   --conn local-mssql --runs 20 'select 1'
 ```
 
 `query` writes rows to stdout — an aligned table, `--format csv` or
@@ -72,6 +72,12 @@ sql-bench bench   --conn local-mssql 'select 1'
 reads only the rows. It exits 1 on a database complaint, printing the
 server's own message and nothing at all on stdout.
 
-The TUI and `bench` are stubs until their tickets land; each says so and
-exits 2. `docs/DESIGN.md` is the contract they are built against and
-`docs/backlog.yaml` is the work breakdown.
+`bench` runs the statement `--runs N` times through one ordinary connection
+and prints min/p50/p95/max in milliseconds for each phase — connect, first
+row, total — and the rows per second. `scripts/perf.sh` runs the canonical
+queries on both containers and appends the numbers to `docs/PERF.md`.
+
+`SQL_BENCH_TRACE=<file>` appends one line per connect and one per query,
+tab separated; unset, no clock is read. `docs/DESIGN.md` lists the fields,
+is the contract everything here is built against, and `docs/backlog.yaml`
+is the work breakdown.
