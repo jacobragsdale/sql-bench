@@ -33,7 +33,7 @@ src/app/           pure state: shell (tabs, focus, status), scratch, results, ob
 src/ui/            rendering + theme; tests in src/ui/tests/
 src/run/           terminal loop, replay mode, trace
 tests/             integration tests, skipped unless SQL_BENCH_TEST_DBS=1
-scripts/           db-up.sh, db-down.sh, seed SQL, perf.sh
+scripts/           db-up.sh, db-down.sh, db-reset.sh, seed SQL, perf.sh
 docs/              DESIGN.md, backlog.yaml (the work breakdown), PERF.md
 ```
 
