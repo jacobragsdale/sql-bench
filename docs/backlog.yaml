@@ -1,0 +1,1057 @@
+# sql-bench work breakdown. Source of truth for the Azure DevOps project
+# (scripts/ado-import.py pushes it) and the brief every implementing agent
+# reads. IDs are stable; the `ado` field is filled in by the importer.
+#
+# Every task has: goal, context, scope (in / out), notes (how), acceptance
+# (what a reviewer checks), verify (commands that must pass). Tags: dev | qa.
+
+project:
+  name: sql-bench
+  description: >
+    A fast, lightweight terminal workbench for SQL Server and Oracle: manage
+    connections, run queries from a scratch pad, browse database objects and
+    stored procedure source. Rust + ratatui, sibling of ticket-tui and az-tui.
+
+epics:
+
+# ---------------------------------------------------------------------------
+- id: E1
+  title: "E1 Foundation: local databases and project skeleton"
+  description: >
+    Everything a contributor needs before writing a feature: both databases
+    running locally under a free license with realistic seed data, a Rust
+    project that builds, lints and tests in CI, configuration loading, and
+    the design document that every later ticket refers back to.
+  tasks:
+
+  - id: T1.1
+    tag: dev
+    title: "T1.1 Local SQL Server and Oracle via compose, with seed data"
+    goal: >
+      One command brings up SQL Server 2022 Developer and Oracle 23ai Free in
+      Docker, waits until both accept logins, and loads an identical seed
+      schema into each. A second command tears them down.
+    context: >
+      Images are already pulled on the dev machine:
+      mcr.microsoft.com/mssql/server:2022-latest and gvenzl/oracle-free:23-slim.
+      Docker 29 is installed; the current user can run docker without sudo.
+      SQL Server's image has no init-script hook, so seeding runs sqlcmd
+      inside the container after it is healthy
+      (/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P ...).
+      The gvenzl Oracle image runs *.sql from /container-entrypoint-initdb.d
+      once on first start as the APP_USER, and supports ORACLE_PASSWORD,
+      APP_USER, APP_USER_PASSWORD env vars.
+    scope:
+      in:
+        - >-
+          compose.yaml with services mssql (port 1433, MSSQL_PID=Developer,
+          ACCEPT_EULA=Y, SA password Bench_Pass1!) and oracle (port 1521,
+          service FREEPDB1, APP_USER bench / bench). Named volumes so data
+          survives restarts. Healthchecks on both.
+        - >-
+          scripts/seed/mssql.sql and scripts/seed/oracle.sql creating the SAME
+          logical schema in each dialect, in a schema named `bench` on both
+          (SQL Server: CREATE SCHEMA bench in database `bench`; Oracle: the
+          user `bench` is the schema).
+        - >-
+          scripts/db-up.sh: `docker compose up -d`, wait for both healthchecks
+          (max 5 minutes, Oracle first start is slow), seed SQL Server via
+          sqlcmd in the container, verify each database answers
+          `select count(*) from bench.customers` = 50, print a one-line
+          summary per database. Idempotent: re-running on seeded databases
+          must not fail or duplicate rows.
+        - >-
+          scripts/db-down.sh: `docker compose down` (add -v flag pass-through
+          to also drop volumes).
+        - >-
+          scripts/db-reset.sh: down -v then up.
+      out:
+        - >-
+          Any Rust code.
+        - >-
+          Any GUI/desktop database tooling.
+    notes: |
+      Seed schema (same on both):
+        bench.customers(id int pk, name nvarchar/nvarchar2(100), email
+          varchar(200) unique, country char(2), created_at datetime2/timestamp,
+          credit_limit decimal(12,2) nullable)  — 50 rows, include names with
+          non-ASCII characters (e.g. "Zoë", "Ægir", "李雷") and a NULL
+          credit_limit on at least 5 rows.
+        bench.orders(id int pk, customer_id fk, ordered_at datetime2/timestamp,
+          status varchar(20), total decimal(12,2)) — 500 rows.
+        bench.order_items(id int pk, order_id fk, sku varchar(40), qty int,
+          unit_price decimal(10,2)) — 2000 rows.
+        bench.events(id bigint pk, customer_id int, kind varchar(30),
+          payload varchar(200), at datetime2/timestamp) — 1,000,000 rows,
+          generated in SQL (SQL Server: cross-joined numbers CTE with
+          OPTION (MAXRECURSION 0) or a tally via sys.all_objects; Oracle:
+          CONNECT BY LEVEL <= 1000000 in an INSERT /*+ APPEND */ ... SELECT).
+          Must load in under 3 minutes on a laptop.
+        bench.big_text(id int pk, body nvarchar(max)/clob) — 3 rows, one with
+          a 100 KB body.
+        bench.binary_blobs(id int pk, data varbinary(max)/blob) — 2 rows.
+        bench.all_types — one row exercising every commonly seen type:
+          SQL Server: bit, tinyint, smallint, int, bigint, decimal(18,4),
+          numeric(10,2), money, float, real, char(5), varchar(20),
+          nvarchar(20), text, date, time, datetime, datetime2, datetimeoffset,
+          uniqueidentifier, varbinary(8), xml. Every column also NULL in a
+          second row.
+          Oracle: number, number(10,2), binary_float, binary_double, char(5),
+          varchar2(20), nvarchar2(20), date, timestamp, timestamp with time
+          zone, interval day to second, raw(8), clob, blob. Every column
+          also NULL in a second row.
+        View bench.v_customer_totals (customer name, order count, sum total).
+        View bench.v_recent_orders (last 100 orders joined to customers).
+        Procedure bench.sp_customer_orders(@customer_id) / bench.customer_orders(p_customer_id, p_cur OUT SYS_REFCURSOR)
+          returning that customer's orders.
+        Procedure bench.sp_mark_shipped(@order_id) / bench.mark_shipped(p_order_id)
+          updating status.
+        Function bench.fn_order_total(@order_id) / bench.order_total(p_order_id)
+          returning the sum of its items.
+        Oracle only: package bench.order_pkg with one procedure and one
+          function, so the object browser has a package to show.
+        SQL Server only: one table-valued function bench.tvf_orders_by_status.
+      Both seed files must be re-runnable: guard every CREATE with an
+      existence check (SQL Server: IF OBJECT_ID(...) IS NULL; Oracle:
+      a PL/SQL block that swallows ORA-00955) and skip inserts when
+      bench.customers already has rows.
+    acceptance:
+      - "`scripts/db-up.sh` on a machine with the images pulled exits 0 and prints one summary line per database including the row counts of customers, orders, order_items and events."
+      - "Running `scripts/db-up.sh` a second time exits 0 and the counts are unchanged."
+      - "`docker exec` sqlcmd `select count(*) from bench.events` returns 1000000 on SQL Server; the same through Oracle's sqlplus (inside the container: `sqlplus bench/bench@FREEPDB1`) returns 1000000."
+      - "Every object listed in notes exists on both databases (procedures, views, function; package on Oracle; TVF on SQL Server)."
+      - "`scripts/db-down.sh -v` followed by `scripts/db-up.sh` yields a fresh seeded state."
+      - "compose.yaml and both seed files contain a header comment explaining the free-license terms used (MSSQL_PID=Developer is non-production only; Oracle Free is free for any use up to its resource limits)."
+    verify:
+      - scripts/db-up.sh
+      - scripts/db-up.sh
+      - docker exec sql-bench-mssql /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P 'Bench_Pass1!' -d bench -Q "select count(*) from bench.events"
+      - docker exec sql-bench-oracle bash -c "echo 'select count(*) from bench.events;' | sqlplus -s bench/bench@FREEPDB1"
+
+  - id: T1.2
+    tag: dev
+    title: "T1.2 Cargo skeleton, config loading, CLI shape, CI"
+    goal: >
+      A Rust crate that builds clean under clippy -D warnings, loads
+      connections from a TOML config, exposes the final CLI shape with
+      stub subcommands, and runs fmt/clippy/test in GitHub Actions.
+    context: >
+      Mirror ticket-tui's structure (lib + thin main + run module). Read
+      CLAUDE.md in this repo and docs/DESIGN.md first. The dependency list is
+      fixed by DESIGN.md; do not add others.
+    scope:
+      in:
+        - >-
+          Cargo.toml (edition 2024, rust-version 1.88, release profile lto thin
+          + strip) with exactly these dependencies: anyhow, clap (derive),
+          crossterm 0.29, ratatui 0.30, serde (derive), toml 0.9, tiberius
+          (default-features=false, features tds73 + rustls), tokio (rt,
+          net, time), tokio-util (compat), futures-util, oracle 0.6, time
+          0.3 (formatting, macros, parsing), shellexpand-free path expansion
+          done by hand (expand a leading ~ yourself; no extra crate),
+          tempfile (dev-dependency).
+        - >-
+          src/config.rs — see notes for the schema. Loads from
+          `$SQL_BENCH_CONFIG`, else `~/.config/sql-bench/config.toml`. Missing
+          file = empty config, not an error. Parse error = error naming the
+          file and line. Password resolution order: `password`, then
+          `password_env` (read env var), then `password_cmd` (run via `sh -c`,
+          trim trailing newline). Resolution is lazy: it happens when a
+          connection is opened, never at load.
+        - >-
+          src/cli.rs — clap with subcommands `query`, `objects`, `source`,
+          `bench` (all "not implemented yet" stubs returning exit 2) and the
+          TUI as the default. Global flags: `--config PATH`, `--replay FILE`,
+          `--size COLSxROWS`, `--frames-dir DIR` (parsed, unused for now).
+        - >-
+          src/db/model.rs with the Cell, Column, QueryEvent types exactly as
+          in DESIGN.md, plus `Cell::display(&self) -> Cow<str>` used by every
+          renderer and exporter.
+        - >-
+          src/lib.rs, src/main.rs, an empty-but-compiling src/app, src/ui,
+          src/run.
+        - >-
+          config.example.toml (documented) and config.local.toml (both local
+          docker connections, committed, used by tests and by the dev loop).
+        - >-
+          .github/workflows/ci.yml copied from ticket-tui's shape: fmt,
+          clippy -D warnings, test, release build on ubuntu-latest (Oracle
+          client is not on CI; the integration tests skip without
+          SQL_BENCH_TEST_DBS so CI stays green).
+        - >-
+          README.md stub: what it is, how to run db-up, how to build.
+      out:
+        - >-
+          Any driver code (T2.1/T2.2).
+        - >-
+          Any rendering.
+    notes: |
+      Config schema:
+        [oracle]
+        client_lib_dir = "~/.local/opt/oracle/instantclient_23_26"   # optional
+
+        [[connection]]
+        name = "local-mssql"          # unique, used on the command line
+        kind = "mssql"                # or "oracle"
+        host = "localhost"
+        port = 1433                   # default 1433 / 1521 by kind
+        database = "bench"            # mssql only
+        service = "FREEPDB1"          # oracle only (service name)
+        user = "sa"
+        password = "..."              # or password_env = "VAR" or password_cmd = "pass show x"
+        trust_cert = true             # mssql only, default false
+        encrypt = true                # mssql only, default true
+      Validation at load: duplicate names, unknown kind, mssql without
+      database, oracle without service, more than one password source — each
+      is an error naming the connection.
+      Unit tests for config live in src/config.rs: every validation error,
+      ~ expansion, missing file, env override, password_cmd via `printf`.
+    acceptance:
+      - "`cargo build`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo fmt --check`, `cargo test` all pass."
+      - "`cargo run -- --help` lists query, objects, source, bench and the global flags."
+      - "`cargo run -- query --conn x 'select 1'` exits 2 with a message saying not implemented."
+      - "`SQL_BENCH_CONFIG=config.local.toml cargo run -- --help` works and a deliberately broken config (unknown kind) fails with an error naming the connection and the file."
+      - "Config unit tests cover every validation error listed in notes."
+      - "CI workflow file exists and its steps match the checks in CLAUDE.md."
+    verify:
+      - cargo fmt --all -- --check
+      - cargo clippy --all-targets --all-features -- -D warnings
+      - cargo test --all-targets
+      - cargo run -- --help
+
+  - id: T1.3
+    tag: qa
+    title: "T1.3 QA: environment reproducibility and config edge cases"
+    goal: >
+      Prove a fresh contributor can go from clone to seeded databases to green
+      tests by following README alone, and that config loading fails loudly on
+      every bad input.
+    context: >
+      Depends on T1.1 and T1.2 merged. You are the first user of the
+      instructions: follow them literally and fix what is wrong or unclear.
+    scope:
+      in:
+        - >-
+          Run scripts/db-reset.sh and time it; record the wall time in
+          docs/PERF.md under "Environment".
+        - >-
+          Run the full check list in CLAUDE.md.
+        - >-
+          Add config tests that are missing for: empty file, file with only
+          [oracle], a connection with password_cmd that exits non-zero (must
+          surface the command's stderr), a name with spaces (allowed) and a
+          port of 0 (rejected).
+        - >-
+          Fix README/CLAUDE.md inaccuracies found on the way.
+      out:
+        - >-
+          New features.
+    acceptance:
+      - "docs/PERF.md exists with the environment section and measured reset time."
+      - "The five listed config cases have tests and pass."
+      - "README steps, followed literally in a fresh shell, succeed."
+    verify:
+      - scripts/db-reset.sh
+      - cargo test --all-targets
+
+# ---------------------------------------------------------------------------
+- id: E2
+  title: "E2 Drivers and headless query path"
+  description: >
+    The database layer, complete and verified before any TUI exists. Both
+    backends behind one small sync API driven from a worker thread, the
+    headless subcommands that exercise it from the shell, and the tracing
+    that measures it.
+  tasks:
+
+  - id: T2.1
+    tag: dev
+    title: "T2.1 db::Connection worker API and SQL Server backend (tiberius)"
+    goal: >
+      A synchronous `db::Connection` handle that owns a worker thread, opens a
+      SQL Server connection with tiberius, runs a query, and streams typed row
+      batches back over a channel. Cancelling drops the connection.
+    context: >
+      tiberius is async-only. The worker thread builds a
+      tokio current_thread runtime and blocks on it; nothing async leaks past
+      src/db/mssql.rs. Connect over tokio::net::TcpStream with
+      tokio_util::compat. The local container uses a self-signed certificate:
+      honour `trust_cert` by calling Config::trust_cert(). Authentication is
+      SQL login (AuthMethod::sql_server). tiberius returns a QueryStream of
+      QueryItem::Metadata / QueryItem::Row; multiple result sets are possible
+      (emit Columns again when a new result set starts). Row types come from
+      tiberius::ColumnType; convert with try_get::<T> per type and fall back
+      to a string.
+    scope:
+      in:
+        - >-
+          src/db/mod.rs: `Connection::open(&ConnectionConfig, &Config) -> Result<Connection, DbError>`
+          (blocks until connected or failed, with a 10 s timeout),
+          `Connection::query(&self, sql: &str, opts: QueryOptions) -> Receiver<QueryEvent>`,
+          `Connection::cancel(&self)` (drops the underlying connection; the
+          in-flight query's receiver ends with QueryEvent::Error(DbError::Cancelled);
+          a following query reconnects transparently),
+          `Connection::kind()`, `Connection::name()`.
+          QueryOptions { batch_size: usize (default 500), max_rows: Option<usize> (default Some(10_000)) }.
+          When max_rows is reached emit QueryEvent::Done { truncated: true } and
+          stop consuming (drop the stream; the driver cancels the rest).
+        - >-
+          src/db/mssql.rs implementing the worker for kind = mssql.
+        - >-
+          src/db/model.rs: fill in `DbError` (Connect(String), Query { message, line: Option<u32> }, Cancelled, Timeout, Unsupported(String)); every variant Display.
+        - >-
+          Type mapping (SQL Server → Cell): bit→Bool; tinyint/smallint/int/bigint→Int;
+          decimal/numeric/money/smallmoney→Decimal(string, scale preserved);
+          float/real→Float; char/varchar/nchar/nvarchar/text/ntext/xml→Text;
+          date/time/datetime/datetime2/datetimeoffset→DateTime(RFC 3339-ish text, exactly as the value, no timezone invented);
+          uniqueidentifier→Text (lowercase hyphenated); binary/varbinary/image→Bytes; NULL→Null.
+        - >-
+          Statements that return no rows (UPDATE, EXEC without result set)
+          emit RowsAffected(n) then Done.
+        - >-
+          Unit tests without a database for: the worker's channel protocol
+          using a fake backend (cfg(test) enum variant is acceptable), the
+          max_rows truncation, cancel semantics.
+        - >-
+          Integration tests in tests/mssql.rs, skipped unless SQL_BENCH_TEST_DBS=1,
+          reading config.local.toml, covering: select 1; the all_types row and
+          its NULL row (assert every Cell variant); unicode names from
+          customers; a syntax error surfaces DbError::Query with the server's
+          message; `select * from bench.events` with max_rows 10_000 ends
+          truncated in under 2 s; RowsAffected for an UPDATE inside a
+          rolled-back transaction; two result sets from one batch.
+      out:
+        - >-
+          Oracle (T2.2), catalog queries (T2.3), the CLI wiring (T2.3).
+    notes: |
+      Worker protocol (private): enum Request { Query { sql, opts, reply: Sender<QueryEvent> }, Cancel, Close }.
+      The worker loop: recv Request; for Query, run it and send events until Done or the
+      reply receiver is dropped (stop early: a dropped receiver means the UI moved on).
+      Reconnect on the next Query after a cancel; surface DbError::Connect if it fails.
+      Time each phase with std::time::Instant and put them in QueryEvent::Done { elapsed_connect, elapsed_first_row, elapsed_total, rows, truncated }.
+      Keep tiberius types out of db/mod.rs and db/model.rs entirely.
+    acceptance:
+      - "`SQL_BENCH_TEST_DBS=1 cargo test --test mssql` passes with the containers up; `cargo test` without the variable passes and reports the integration tests as skipped (ignored or early return with an eprintln)."
+      - "The all_types test asserts an exact expected Cell for every column, including the NULL row."
+      - "Cancelling a `waitfor delay '00:00:10'` query returns within 1 s with DbError::Cancelled, and the next query on the same Connection succeeds."
+      - "No `tokio`, `tiberius` or `futures` type appears in db/mod.rs or db/model.rs signatures."
+      - "clippy, fmt, unit tests green."
+    verify:
+      - cargo clippy --all-targets --all-features -- -D warnings
+      - cargo test --all-targets
+      - SQL_BENCH_TEST_DBS=1 cargo test --test mssql
+
+  - id: T2.2
+    tag: dev
+    title: "T2.2 Oracle backend (oracle crate over Instant Client)"
+    goal: >
+      The same `db::Connection` API for kind = oracle, using the `oracle`
+      crate. The Instant Client directory comes from config or env; a
+      missing client produces one clear error.
+    context: >
+      The oracle crate binds ODPI-C statically and loads libclntsh.so at
+      runtime. Instant Client 23 is at ~/.local/opt/oracle/instantclient_23_26
+      on the dev machine. Configure the lib dir with oracle::InitParams
+      (oracle_client_lib_dir) once per process before the first connection;
+      fall back to LD_LIBRARY_PATH if nothing is configured. The crate is
+      synchronous, so the worker thread is a plain loop. Connect string form:
+      //host:port/service. Fetch with Statement::query and rows_fetched
+      configured to the batch size (StmtParam / prefetch_rows). Use
+      SqlValue::oracle_type() to choose the mapping.
+    scope:
+      in:
+        - >-
+          src/db/oracle.rs implementing the worker.
+        - >-
+          Client dir resolution: config [oracle].client_lib_dir, then
+          SQL_BENCH_ORACLE_CLIENT_DIR, then none. An init failure yields
+          DbError::Connect("Oracle client library not found; set [oracle] client_lib_dir or SQL_BENCH_ORACLE_CLIENT_DIR (see README)").
+        - >-
+          Type mapping (Oracle → Cell): NUMBER with scale 0 and precision <= 18 → Int; other NUMBER → Decimal (text); BINARY_FLOAT/BINARY_DOUBLE → Float; CHAR/VARCHAR2/NCHAR/NVARCHAR2/CLOB/NCLOB → Text (CLOB read fully up to 1 MiB, then truncated with a trailing "…" and Cell::Text; note it in DESIGN.md); DATE/TIMESTAMP/TIMESTAMP WITH TIME ZONE/WITH LOCAL TIME ZONE → DateTime (text as Oracle formats it via to_string of the crate's Timestamp); INTERVAL → Text; RAW/BLOB → Bytes (BLOB read up to 1 MiB); ROWID → Text; NULL → Null.
+        - >-
+          PL/SQL blocks (`begin ... end;`) execute as statements with RowsAffected(0).
+        - >-
+          Cancel: oracle::Connection::break_execution() then drop and reconnect on next query.
+        - >-
+          Integration tests in tests/oracle.rs mirroring tests/mssql.rs case for case, plus: a PL/SQL block executes; a 100 KB CLOB round-trips; `select * from bench.events` truncates at 10_000 rows in under 2 s; the trailing semicolon problem (Oracle rejects `select 1 from dual;` with ORA-00933 — the worker strips ONE trailing semicolon for non-PL/SQL statements and leaves PL/SQL blocks intact).
+      out:
+        - >-
+          Catalog queries (T2.3).
+    acceptance:
+      - "`SQL_BENCH_TEST_DBS=1 cargo test --test oracle` passes with the container up."
+      - "With SQL_BENCH_ORACLE_CLIENT_DIR pointing at an empty directory and no config entry, opening an oracle connection fails with the exact message in scope."
+      - "Trailing-semicolon test passes both ways (stripped for SELECT, kept for BEGIN...END;)."
+      - "No `oracle::` type appears outside src/db/oracle.rs."
+    verify:
+      - cargo clippy --all-targets --all-features -- -D warnings
+      - SQL_BENCH_TEST_DBS=1 cargo test --test oracle
+
+  - id: T2.3
+    tag: dev
+    title: "T2.3 Catalog queries and the headless subcommands query/objects/source"
+    goal: >
+      From the shell, run any query against any configured connection and see
+      the result as an aligned table, CSV or JSON; list database objects; and
+      print a procedure's source. These subcommands are the verification
+      surface for everything after them.
+    context: >
+      Depends on T2.1 and T2.2. Catalog data is ordinary SQL per backend,
+      executed through the same Connection::query path, in src/db/catalog.rs.
+    scope:
+      in:
+        - >-
+          src/db/catalog.rs: `list_schemas`, `list_objects(schema, kind)`,
+          `list_columns(schema, table)`, `object_source(schema, name, kind)`.
+          ObjectKind = Table | View | Procedure | Function | Package (oracle) | Sequence.
+          DbObject { schema, name, kind, modified: Option<String> }.
+          ColumnInfo { name, type_text (e.g. "nvarchar(100)"/"VARCHAR2(100 CHAR)"), nullable, is_pk }.
+          SQL Server sources: sys.schemas, sys.objects (type in U,V,P,FN,IF,TF,SO),
+          sys.columns + sys.types + sys.key_constraints/index_columns for pk,
+          OBJECT_DEFINITION(object_id) for source (NULL for encrypted → "-- source not available (encrypted)").
+          Oracle sources: ALL_USERS filtered to non-Oracle-maintained (ORACLE_MAINTAINED = 'N') plus the current schema,
+          ALL_OBJECTS (TABLE, VIEW, PROCEDURE, FUNCTION, PACKAGE, SEQUENCE), ALL_TAB_COLUMNS + ALL_CONSTRAINTS/ALL_CONS_COLUMNS for pk,
+          ALL_SOURCE ordered by LINE for procedures/functions/packages (PACKAGE and PACKAGE BODY concatenated with a divider), ALL_VIEWS.TEXT for views (LONG column: read via the crate's LONG support or DBMS_METADATA.GET_DDL as fallback).
+          Table DDL is out of scope; `source` for a table prints its columns.
+        - >-
+          `sql-bench query --conn NAME [--format table|csv|json] [--max-rows N] [--timeout S] SQL|-`
+          (`-` reads stdin). Table format: header, separator, aligned columns,
+          numbers right-aligned, NULL rendered as `NULL`, cells truncated at 60
+          chars with `…` unless `--full`. Footer line: `N rows (truncated at M) in X ms`
+          to stderr so stdout stays parseable. Exit 1 on DbError, printing the
+          server message. CSV via a hand-written RFC 4180 quoter (no crate). JSON:
+          array of objects, Cell::Null → null, Int/Float → numbers, all else strings.
+        - >-
+          `sql-bench objects --conn NAME [--schema S] [--kind K]` printing schema, kind, name, modified as a table.
+        - >-
+          `sql-bench source --conn NAME SCHEMA.NAME` printing the source, exit 1 if not found.
+        - >-
+          Tests: unit tests for table/CSV/JSON formatting from fixed Cells (quoting, unicode width via a small width function — treat every char as width 1 except that the formatter must not panic on multi-byte; use unicode-width from ratatui's dependency tree only if already present, otherwise char count); integration tests in tests/catalog.rs for both backends: schemas include bench, objects of every kind seeded in T1.1 are listed, columns of customers match the seed (name, type text, nullable, pk), source of the procedures contains a known line, the Oracle package returns both spec and body.
+      out:
+        - >-
+          TUI.
+    acceptance:
+      - "`cargo run -- query --conn local-mssql 'select top 3 id, name from bench.customers'` and the Oracle equivalent print a 3-row aligned table; `--format csv` and `--format json` are valid CSV/JSON (json verified with python3 -m json.tool)."
+      - "`cargo run -- objects --conn local-oracle --schema BENCH` lists tables, views, procedures, functions, package and sequence; the SQL Server run lists the TVF as a function."
+      - "`cargo run -- source --conn local-mssql bench.sp_customer_orders` prints the CREATE PROCEDURE text; the Oracle run for bench.order_pkg prints spec then body."
+      - "A wrong connection name exits 1 with `unknown connection 'x'; configured: a, b`."
+      - "A query error exits 1 and prints the server message; stdout is empty."
+      - "Integration tests for both backends pass."
+    verify:
+      - cargo test --all-targets
+      - SQL_BENCH_TEST_DBS=1 cargo test --all-targets
+      - SQL_BENCH_CONFIG=config.local.toml cargo run -- query --conn local-mssql --format json "select top 2 * from bench.all_types"
+      - SQL_BENCH_CONFIG=config.local.toml cargo run -- objects --conn local-oracle --schema BENCH
+
+  - id: T2.4
+    tag: dev
+    title: "T2.4 Trace instrument and the bench subcommand"
+    goal: >
+      One optional trace file that records every measurable phase, and a
+      subcommand that runs a query N times and reports p50/p95 for each phase,
+      so performance is a number in a file rather than a feeling.
+    context: >
+      Copy ticket-tui's approach: TICKET_TUI_TRACE became SQL_BENCH_TRACE. No
+      clock is read unless the variable is set. One line per event, tab
+      separated, machine readable.
+    scope:
+      in:
+        - >-
+          src/trace.rs: `Trace::from_env()`; `trace.event(kind, fields)` appends `unix_ms\tkind\tk=v\tk=v` lines. Kinds so far: `connect` (conn, ms), `query` (conn, rows, truncated, connect_ms, first_row_ms, total_ms). Later tickets add `frame` and `turn`.
+        - >-
+          Hook the db worker so every query emits one `query` line when tracing is on.
+        - >-
+          `sql-bench bench --conn NAME [--runs N=20] [--max-rows M] SQL` runs the query N times sequentially through the normal Connection and prints a table: phase, min, p50, p95, max in ms; phases connect (first run only), first_row, total. Also prints rows/s.
+        - >-
+          scripts/perf.sh: brings nothing up; assumes db-up; runs bench for three canonical queries on both backends (select 1; top 100 customers; events with max-rows 10000 and 100000) and appends a dated block to docs/PERF.md.
+        - >-
+          Unit test for percentile math and trace line formatting.
+      out:
+        - >-
+          Frame timing (T3.1 adds it).
+    acceptance:
+      - "`SQL_BENCH_TRACE=/tmp/t.log cargo run -- query --conn local-mssql 'select 1'` leaves exactly one `query` line (plus one `connect` line) in the file with all fields."
+      - "`cargo run -- bench --conn local-oracle --runs 5 'select 1 from dual'` prints the phase table."
+      - "scripts/perf.sh appends a block to docs/PERF.md with numbers for both backends."
+      - "Without SQL_BENCH_TRACE set, `Instant::now` is not called in the trace module (guarded by `if let Some(trace)`)."
+    verify:
+      - cargo test --all-targets
+      - SQL_BENCH_CONFIG=config.local.toml scripts/perf.sh
+
+  - id: T2.5
+    tag: qa
+    title: "T2.5 QA: driver conformance matrix and failure modes"
+    goal: >
+      Independently verify the driver layer from the shell against both
+      databases, close every gap found, and write the conformance table that
+      documents what each type becomes.
+    context: >
+      Depends on E2 dev tickets merged. Use only the headless subcommands and
+      the integration tests; you are checking the work, not re-doing it. When
+      something is wrong, fix it in the driver and add the test that would
+      have caught it.
+    scope:
+      in:
+        - >-
+          Produce docs/TYPES.md: a table per backend of database type → Cell
+          variant → example display, generated by actually running `query
+          --format json` against bench.all_types and pasting the result.
+        - >-
+          Failure modes to exercise and, where not already tested, add tests for:
+          wrong password (message must not include the password), unreachable
+          host (fails within the 10 s timeout, not longer), database stopped
+          mid-query (`docker stop` while streaming events → Error, and the
+          next query after `docker start` reconnects), a 100 KB clob/nvarchar(max)
+          through every output format, a query returning zero columns
+          (`exec bench.sp_mark_shipped 1`), a query with 300 columns, a column
+          name with spaces and unicode, duplicated column names.
+        - >-
+          Verify that `max_rows` truncation of the 1M row table stops network
+          consumption: total time for --max-rows 10000 must be < 2 s and for
+          100000 < 8 s on both backends; record numbers in docs/PERF.md.
+        - >-
+          Confirm no password appears in any trace line or error message
+          (grep the trace file and captured stderr).
+      out:
+        - >-
+          New CLI features.
+    acceptance:
+      - "docs/TYPES.md exists with both tables filled from real output."
+      - "Every failure mode listed has a passing test or a documented reason it cannot be tested automatically (the docker stop case may be a script under scripts/qa/ rather than a cargo test)."
+      - "Timing numbers recorded in docs/PERF.md."
+      - "Password grep returns nothing."
+    verify:
+      - SQL_BENCH_TEST_DBS=1 cargo test --all-targets
+
+# ---------------------------------------------------------------------------
+- id: E3
+  title: "E3 TUI shell and replay verification"
+  description: >
+    The terminal application frame: the event loop that never blocks, tabs,
+    focus, footer, theme, and the replay mode that lets every later feature
+    be verified by feeding keys and reading frames as text.
+  tasks:
+
+  - id: T3.1
+    tag: dev
+    title: "T3.1 App/UI/Run skeleton with tabs, focus, footer, theme and frame tracing"
+    goal: >
+      `sql-bench` with no arguments opens a TUI showing one tab per configured
+      connection, a three-pane layout (objects left, scratch top-right,
+      results bottom-right), a footer with key hints and connection status,
+      and quits cleanly. Nothing connects yet; every pane is a placeholder.
+    context: >
+      Read ticket-tui's src/app/shell.rs, src/ui/theme.rs and src/run/events.rs
+      (at ~/dev/ticket-tui) for the shape; copy the minimum, not the files.
+      The loop must be generic over the ratatui backend so replay (T3.2) can
+      run it on TestBackend: `run::run_loop<B: Backend>(terminal: &mut Terminal<B>, app: &mut App, input: &mut dyn InputSource) -> Result<()>` where InputSource yields Option<crossterm Event> with a timeout.
+    scope:
+      in:
+        - >-
+          src/app/mod.rs: App { shell: Shell, tabs: Vec<Tab> }; Shell { active_tab, focus: Focus (Objects|Scratch|Results), status: String, error: Option<String>, should_quit, size }; Tab { connection: name + kind, state: Disconnected|Connecting|Connected|Failed(msg) }.
+          `App::handle(&mut self, event: Event) -> Vec<Action>` where Action is the request list the run loop executes (for now: Quit only; Connect etc. come later). Keys: Tab / Shift-Tab cycle focus; Ctrl-T next tab, 1-9 select tab when focus != Scratch; q quits when focus != Scratch; Ctrl-Q quits always; ? toggles a help overlay listing every key; Esc closes overlay/error.
+        - >-
+          src/ui/mod.rs + theme.rs: render(frame, app). Tab bar line 1 (`1 local-mssql ● 2 local-oracle ○`, filled dot connected, hollow disconnected, ✗ failed); bordered panes with titles; focused pane border uses the accent colour; footer: left = key hints for the focused pane, right = `● connected 4ms` / `○ disconnected` / `✗ error`. Theme: tokens (accent, dim, border, error, ok) with NO_COLOR support; no per-widget colours anywhere else.
+        - >-
+          src/run/mod.rs: terminal init/restore (with panic hook restore), the loop: drain input for at most 50 ms, poll actions, redraw only when something changed (dirty flag), trace `frame` (draw_ms) and `turn` (>30 ms only) lines when SQL_BENCH_TRACE is set.
+        - >-
+          Minimum size handling: below 60x15 draw a single centered message instead of the layout.
+        - >-
+          Tests in src/ui/tests/: render at 120x40 and assert the tab bar line, all three pane titles, footer hints; focus cycling changes which border is accented (assert via cell style at a known coordinate); help overlay lists every key; 40x10 shows the too-small message; NO_COLOR renders with no colour styles.
+      out:
+        - >-
+          Connecting, running queries, object loading (E4-E6).
+    acceptance:
+      - "`SQL_BENCH_CONFIG=config.local.toml cargo run` opens the TUI, shows both tabs, Tab moves focus, ? shows help, q quits and restores the terminal (verify `stty -a` sane afterwards)."
+      - "With no config at all, the TUI opens with a single message pane explaining where the config goes and how to write one, and q quits."
+      - "All UI tests pass and every key in the help overlay is handled in App::handle (test iterates the help list and asserts handle does not return the unchanged state for each)."
+      - "SQL_BENCH_TRACE records frame lines with draw_ms; an idle app draws no frames (assert by running the loop for 500 ms with no input in a test and counting frame lines: expect 1)."
+    verify:
+      - cargo test --all-targets
+      - cargo clippy --all-targets --all-features -- -D warnings
+
+  - id: T3.2
+    tag: dev
+    title: "T3.2 Replay mode: drive the real loop from a key script and dump frames as text"
+    goal: >
+      `sql-bench --replay keys.txt --size 120x40 --frames-dir out/` runs the
+      real application (real config, real databases when later tickets connect
+      them) on a TestBackend, feeding the keys in the file, writing named
+      frames as plain text files, and exits 0. This is how every feature after
+      this is verified.
+    context: >
+      Depends on T3.1's backend-generic loop. TestBackend::buffer gives the
+      cells; write each line trimmed of trailing spaces. Waits are polled
+      against App state (App::busy(): any tab Connecting or a query in flight).
+    scope:
+      in:
+        - >-
+          src/run/replay.rs: script parser and runner. One command per line; blank lines and `#` comments ignored. Commands:
+          `key <name>` — Enter, Esc, Tab, BackTab, Up, Down, Left, Right, PageUp, PageDown, Home, End, F1..F12, Backspace, Delete, Space, single chars, `Ctrl-x`, `Alt-x`, `Shift-Tab`.
+          `type <text>` — one KeyEvent per char (spaces allowed, rest of line).
+          `paste <text>` — one Event::Paste.
+          `wait busy` — until App::busy() is false, timeout 60 s → exit 3 with the frame dumped as `timeout.txt`.
+          `wait <ms>` — sleep.
+          `wait text <substring>` — until the substring appears anywhere on the current frame, timeout 30 s → exit 3.
+          `frame <name>` — write `<frames-dir>/<name>.txt` now.
+          `resize <cols>x<rows>`.
+          `expect <substring>` — assert the substring is on the current frame; on failure exit 4, print the frame to stderr with the line number of the script.
+          `expect-not <substring>` — the inverse.
+        - >-
+          Exit codes: 0 ok, 3 timeout, 4 expectation failed, 1 other error. Every failure prints the script line number.
+        - >-
+          A frame is written with a header line `# <name> <cols>x<rows>` then rows; trailing whitespace trimmed; box-drawing characters kept.
+        - >-
+          Also `--frame-styles`: with it, a second file `<name>.styles.txt` lists, per row, runs of (fg, bg, modifiers) so colour assertions are possible headlessly.
+        - >-
+          Tests: parser unit tests for every command and every key name; an end-to-end test running a script against the T3.1 app (Tab, expect focused title, ? , expect help, frame) with a config of zero connections.
+        - >-
+          docs/DESIGN.md gets a "Verifying" section describing replay with an example script, and scripts/replay/ gets `smoke.keys` (open, help, quit) that CI runs.
+      out:
+        - >-
+          Mouse events.
+    acceptance:
+      - "`cargo run -- --replay scripts/replay/smoke.keys --size 120x40 --frames-dir /tmp/f` exits 0 and /tmp/f contains the named frames as readable text with the tab bar visible."
+      - "An `expect` that fails exits 4 and prints the frame and script line number to stderr."
+      - "`wait busy` on an app that never becomes idle exits 3 within the timeout."
+      - "CI runs the smoke script."
+      - "Every key name in the parser is documented in DESIGN.md."
+    verify:
+      - cargo test --all-targets
+      - cargo run -- --replay scripts/replay/smoke.keys --size 120x40 --frames-dir /tmp/sql-bench-frames
+
+  - id: T3.3
+    tag: qa
+    title: "T3.3 QA: shell behaviour across sizes, themes and terminals"
+    goal: >
+      Exercise the shell through replay at many sizes and both colour modes,
+      and confirm terminal restore on every exit path.
+    context: >
+      Depends on T3.1 and T3.2. Use replay scripts and the frames they dump;
+      add scripts under scripts/replay/qa/ and keep them in the repo.
+    scope:
+      in:
+        - >-
+          Replay scripts at 60x15, 80x24, 120x40, 200x60, 40x10 (too small), and a resize mid-run from 120x40 to 60x15 and back; every frame must have no truncated pane title and no overflow (assert with expect on titles).
+        - >-
+          NO_COLOR=1 run with --frame-styles proving no colours are emitted.
+        - >-
+          Panic path: add a hidden `--panic-after-ms N` dev flag (cfg(debug_assertions) only) and verify the terminal is restored (script: run it, then `stty -a | grep -c echo` shows echo restored).
+        - >-
+          Ctrl-Q from every focus quits; q in Scratch types q.
+        - >-
+          Help overlay content matches the footer hints (no key listed in one and missing in the other).
+        - >-
+          Record key-to-frame latency from the trace at 200x60: p95 draw_ms must be under 5 ms with placeholders; write it to docs/PERF.md.
+      out:
+        - >-
+          Mouse.
+    acceptance:
+      - "All QA replay scripts exit 0 and are wired into `scripts/qa.sh` which CI runs."
+      - "Panic restore verified and documented in DESIGN.md."
+      - "docs/PERF.md has the draw latency numbers."
+    verify:
+      - scripts/qa.sh
+
+# ---------------------------------------------------------------------------
+- id: E4
+  title: "E4 Connections in the TUI"
+  description: >
+    Opening, watching and closing database connections from the shell, with
+    passwords resolved lazily and every failure readable on screen.
+  tasks:
+
+  - id: T4.1
+    tag: dev
+    title: "T4.1 Connect, disconnect, reconnect and status per tab"
+    goal: >
+      Each tab connects on demand on its own worker, shows Connecting with a
+      spinner, Connected with the connect time, or Failed with the message;
+      the user can connect, disconnect and reconnect with keys; the app never
+      waits for a connection.
+    context: >
+      Depends on E2 and E3. Connect runs on the tab's worker thread through
+      db::Connection::open inside a spawned thread that sends a ConnectResult
+      back; the run loop polls it. Password resolution (env/cmd) happens on
+      that thread too, so a slow `pass` does not freeze the UI.
+    scope:
+      in:
+        - >-
+          Actions: Connect(tab), Disconnect(tab). Keys: `c` connect / reconnect the active tab (any focus except Scratch), `C` (Shift-c) disconnect, both also in the help overlay and footer. Selecting a tab does not auto-connect; the first query or object browse on a disconnected tab triggers Connect and queues the request (one queued request max; the footer says `connecting… then running`).
+        - >-
+          `--connect NAME` and `--connect-all` flags to connect at startup (after the first frame is drawn, never before).
+        - >-
+          The tab bar dot animates while connecting (spinner chars ⠋⠙⠹⠸ rotate on a 100 ms tick, and only then; idle app still draws no frames).
+        - >-
+          Failed state shows the message in the results pane in the error colour with the hint `c to retry`; the message includes the host:port and the driver's error but never the password.
+        - >-
+          Disconnect while a query runs cancels it first.
+        - >-
+          run loop: a `Runtime` holding per-tab Option<db::Connection> and the pending channels; `poll_connections` and `poll_queries` return whether a redraw is needed.
+        - >-
+          Tests: app-level (Connect action emitted on `c`, status transitions on results), UI (tab bar dot per state, failure message rendering), replay script scripts/replay/connect.keys used by QA against the real databases: `key c`, `wait busy`, `expect ● local-mssql`, `key 2`, `key c`, `wait busy`, `expect ● local-oracle`, `key C`, `expect ○ local-oracle`.
+      out:
+        - >-
+          Editing connections from inside the TUI (out of scope for the whole project; config file only).
+    acceptance:
+      - "`SQL_BENCH_CONFIG=config.local.toml cargo run -- --replay scripts/replay/connect.keys --size 120x40 --frames-dir /tmp/f` exits 0 with both databases up."
+      - "With the Oracle container stopped, the same script's Oracle step shows a Failed state with an ORA-/connection refused message within the 10 s timeout and the UI stays responsive during the wait (a `key ?` sent during Connecting shows the help overlay in the next frame)."
+      - "Trace shows a `connect` line per attempt."
+      - "Unit and UI tests pass."
+    verify:
+      - cargo test --all-targets
+      - SQL_BENCH_CONFIG=config.local.toml cargo run -- --replay scripts/replay/connect.keys --size 120x40 --frames-dir /tmp/sql-bench-frames
+
+  - id: T4.2
+    tag: qa
+    title: "T4.2 QA: connection lifecycle under failure"
+    goal: >
+      Break connections every way a real network does and confirm the TUI
+      reports each one and recovers.
+    context: >
+      Depends on T4.1. Replay scripts plus docker start/stop from a shell
+      script under scripts/qa/.
+    scope:
+      in:
+        - >-
+          Cases: wrong password (edit a throwaway config), wrong port, database stopped while connected then a query run (must show error and offer retry; `c` then succeeds after `docker start`), password_cmd that hangs (`sleep 30`): UI must stay responsive and `C` must abandon the attempt, connect-all at startup with one database down.
+        - >-
+          Confirm the spinner stops (no frame lines in the trace) within one second after every transition settles.
+        - >-
+          Each case is a script under scripts/qa/connections.sh that exits non-zero on failure and is added to scripts/qa.sh.
+      out:
+        - >-
+          Nothing new in the app unless a case fails.
+    acceptance:
+      - "scripts/qa/connections.sh exits 0 with both containers up (it stops and starts them itself and leaves them running)."
+      - "Every defect found has a fix and a regression test."
+    verify:
+      - scripts/qa/connections.sh
+
+# ---------------------------------------------------------------------------
+- id: E5
+  title: "E5 Scratch pad, query execution and results"
+  description: >
+    The core of the workbench: write SQL, run the statement under the
+    cursor, watch results stream into a grid that stays fast at any row
+    count, inspect cells, cancel, export.
+  tasks:
+
+  - id: T5.1
+    tag: dev
+    title: "T5.1 Scratch pad editor with persistence and $EDITOR round trip"
+    goal: >
+      A multi-line text pane per connection where the user types SQL,
+      persisted to disk on every settle, with an external-editor escape hatch
+      for anything heavier than light editing.
+    context: >
+      Depends on E3. Copy the shape of ticket-tui's text_input.rs and
+      run/editor.rs. The pad is a Vec<String> of lines plus a cursor (line, col
+      in chars) and a scroll offset; no rope, no undo tree.
+    scope:
+      in:
+        - >-
+          src/app/scratch.rs: insert char, newline, backspace, delete, left/right/up/down (up/down keep the column when possible), Home/End, Ctrl-Left/Right word jump, PageUp/PageDown, Ctrl-A/Ctrl-E line start/end, Ctrl-U delete to line start, Ctrl-K delete to line end, Ctrl-W delete word back, bracketed paste (multi-line), Tab inserts two spaces, Ctrl-Z single-level undo of the last edit burst (ponytail: one snapshot taken when a burst starts, i.e. after 500 ms idle; document the ceiling).
+        - >-
+          Vertical and horizontal scrolling so the cursor is always visible; a line number gutter; the cursor rendered with the reversed style at its cell (no terminal cursor in TestBackend, so the cell style is the assertion).
+        - >-
+          Selection with Shift-arrows; copy with Ctrl-C when a selection exists (into an internal clipboard and, best effort, the system clipboard via OSC 52 write to stdout; not on TestBackend). Ctrl-C without a selection does nothing (never quits).
+        - >-
+          Persistence: `~/.local/state/sql-bench/scratch/<connection-name>.sql` written 500 ms after the last edit and on quit; loaded on start. Directory created on demand.
+        - >-
+          Ctrl-E: suspend the TUI, write the pad to a temp file, run `$VISUAL` or `$EDITOR` (error in the footer if neither is set), reload the file into the pad, resume the TUI. In replay mode Ctrl-E is a no-op that sets the status `editor unavailable in replay`.
+        - >-
+          Statement detection for T5.2: `Scratch::statement_at_cursor() -> (String, Range)` splits on lines that are exactly `;`-terminated (a `;` at end of a line ends the statement), on a line equal to `GO` (case-insensitive) for SQL Server, on a `/` alone on a line for Oracle, and on blank lines. A PL/SQL block (`begin`/`declare` ... `end;`) is one statement even though it contains semicolons: the splitter tracks begin/end depth case-insensitively.
+        - >-
+          Tests: every edit operation on a fixed buffer; the splitter on a fixture with six statements including a PL/SQL block, a GO batch, and a trailing statement without a terminator; persistence round trip through a temp dir (override the state dir with SQL_BENCH_STATE_DIR); UI tests for gutter, cursor cell style, horizontal scroll with a 200-char line.
+      out:
+        - >-
+          Syntax highlighting, autocomplete, multiple cursors, mouse.
+    acceptance:
+      - "Replay script scripts/replay/scratch.keys types a three-line query, moves around, deletes a word, undoes, and the final frame matches an expected frame checked into scripts/replay/expected/scratch.txt (compare with diff in scripts/qa.sh)."
+      - "Restarting the app shows the same pad content (replay: type, quit, start again, expect text)."
+      - "Splitter tests pass for all six fixtures."
+      - "Ctrl-C with no selection does not quit (replay expect)."
+    verify:
+      - cargo test --all-targets
+      - SQL_BENCH_CONFIG=config.local.toml SQL_BENCH_STATE_DIR=/tmp/sb-state cargo run -- --replay scripts/replay/scratch.keys --size 120x40 --frames-dir /tmp/sql-bench-frames
+
+  - id: T5.2
+    tag: dev
+    title: "T5.2 Run statements and stream results into a virtualized grid"
+    goal: >
+      Ctrl-R runs the statement under the cursor, F5 runs the whole pad, rows
+      stream into the results pane as they arrive, the grid renders only the
+      visible window whatever the row count, Esc cancels, errors show the
+      server message.
+    context: >
+      Depends on T4.1, T5.1 and E2. QueryEvents arrive on the tab's channel;
+      the run loop drains them each turn (all available, then redraw once)
+      into app.results. Rendering must cost O(visible rows × visible
+      columns), never O(rows fetched).
+    scope:
+      in:
+        - >-
+          src/app/results.rs: Results { columns, rows: Vec<Vec<Cell>>, widths (computed incrementally per batch, capped at 40 chars, min header width), selected (row, col), scroll (row, col), status: Idle|Running{since}|Done{rows, truncated, elapsed}|Failed(DbError), rows_affected }.
+          Keys in Results focus: j/k/Up/Down, h/l/Left/Right move the cell cursor; PageUp/PageDown; g/G first/last row; 0/$ first/last column; Ctrl-D/Ctrl-U half page; Enter opens the cell inspector (T5.3).
+        - >-
+          Ctrl-R in Scratch: run statement_at_cursor(); F5: run the whole pad (each statement in sequence, the results pane shows the last result set and a summary line `3 statements, 2 result sets, 1 rows affected`); Esc while Running: cancel (Connection::cancel) and the status shows `cancelled after 1.2 s, 4500 rows`.
+        - >-
+          Multiple result sets: the pane header gets `set 1/2`, `[`/`]` switch sets.
+        - >-
+          Results title: `Results · 1,234 rows (truncated) · 42 ms` or `Running · 2.1 s · 4,500 rows` (updates each tick while running). The fetch limit is `max_rows` from a `--max-rows` flag defaulting to 10,000; when truncated, `m` fetches the next 10,000 by re-running with a higher cap (ponytail: re-run, not a server cursor; document).
+        - >-
+          Error state: the pane shows the message wrapped, with the line number when the driver gave one, and the scratch pad highlights the statement that failed (background token) until the next edit.
+        - >-
+          Cell display: Null as `NULL` in the dim colour; numbers right-aligned; DateTime as-is; Bytes as `0x` + first 16 bytes hex + `…`; Text with newlines collapsed to `⏎` in the grid; truncated cells end with `…`.
+        - >-
+          Column header shows the type on a second header line when the pane is taller than 8 rows.
+        - >-
+          Widths recomputed per batch only for the new rows; a row cache is not needed: render reads app.results.rows[scroll..scroll+visible].
+        - >-
+          Trace: `query` lines already exist; add `results` line (rows, batches, first_batch_ms).
+        - >-
+          Tests: results state machine with synthetic QueryEvents; grid rendering at 120x40 with 20 columns × 50 rows asserting alignment and truncation; a test that pushes 100,000 synthetic rows and measures a single draw under 5 ms in release-like conditions (use `#[ignore]` with a documented `cargo test --release -- --ignored` invocation and assert < 20 ms in debug); replay scripts run.keys (select from customers, expect a known cell), cancel.keys (waitfor delay / dbms_session.sleep, Esc, expect cancelled), error.keys (bad SQL, expect the server message), multi.keys (two statements with F5).
+      out:
+        - >-
+          Sorting/filtering the grid client-side (not in this project).
+    acceptance:
+      - "All four replay scripts exit 0 against both databases (two variants of each where the SQL differs)."
+      - "`select * from bench.events` with default max rows shows `10,000 rows (truncated)` within 3 s and scrolling to G is instant (draw_ms < 5 in the trace at 120x40)."
+      - "Esc during a 10 s sleep query cancels within 1 s and the next Ctrl-R works."
+      - "A syntax error shows the server's message and the failed statement is highlighted in the pad."
+      - "Unit, UI and perf tests pass."
+    verify:
+      - cargo test --all-targets
+      - SQL_BENCH_CONFIG=config.local.toml cargo run -- --replay scripts/replay/run-mssql.keys --size 120x40 --frames-dir /tmp/sql-bench-frames
+      - SQL_BENCH_CONFIG=config.local.toml cargo run -- --replay scripts/replay/run-oracle.keys --size 120x40 --frames-dir /tmp/sql-bench-frames
+
+  - id: T5.3
+    tag: dev
+    title: "T5.3 Cell inspector, copy and export"
+    goal: >
+      Read a whole cell value, copy a cell or row, and export the current
+      result set to CSV or JSON on disk, all from the results pane.
+    context: >
+      Depends on T5.2. Reuse the CSV/JSON writers from T2.3 (move them to
+      src/export.rs if they are still in cli.rs).
+    scope:
+      in:
+        - >-
+          Enter on a cell opens an overlay showing the full value (wrapped, scrollable with j/k, showing the type name and byte/char length; Bytes shown as a hex dump 16 per line); Esc closes.
+        - >-
+          y copies the cell display text, Y copies the row as tab-separated, into the internal clipboard and via OSC 52 (best effort). Footer confirms `copied 1 cell`.
+        - >-
+          e opens a small prompt `Export to: ` prefilled with `~/sql-bench-<conn>-<timestamp>.csv`; Enter writes CSV, `.json` extension writes JSON; the footer confirms rows and path; errors (permission) show in the footer. Export writes all fetched rows (not only visible).
+        - >-
+          Tests: inspector rendering for a long text and for bytes; copy sets the internal clipboard; export writes a file whose content equals the T2.3 formatter output; replay inspect.keys.
+      out:
+        - >-
+          Excel, clipboard managers, exporting more than fetched rows.
+    acceptance:
+      - "Replay scripts/replay/inspect.keys runs against local-mssql: selects the 100 KB row from big_text, opens the inspector, expects the char count, exports to /tmp and `expect` the footer confirmation; the exported file parses as CSV with the right row count."
+      - "Unit and UI tests pass."
+    verify:
+      - cargo test --all-targets
+      - SQL_BENCH_CONFIG=config.local.toml cargo run -- --replay scripts/replay/inspect.keys --size 120x40 --frames-dir /tmp/sql-bench-frames
+
+  - id: T5.4
+    tag: qa
+    title: "T5.4 QA: query workflow end to end on both databases"
+    goal: >
+      Walk the full write-run-read-export loop on both databases through
+      replay with awkward inputs and prove the performance budgets hold.
+    context: >
+      Depends on E5 dev tickets. Scripts under scripts/replay/qa/ and
+      scripts/qa.sh.
+    scope:
+      in:
+        - >-
+          Cases: unicode in SQL and results; a 300-column result; a result with a 100 KB cell in the grid (must not slow scrolling); NULL-only rows; F5 over a pad with a failing second statement (first result stays visible? define and document the behaviour, then test it); Ctrl-R on an empty pad (footer says nothing to run); cancel immediately after run (race: must not leave the tab stuck Running); running while disconnected (auto-connect then run); 1M row query with --max-rows 100000 then G, PageUp ×5, export to CSV: total under 15 s and no frame over 16 ms after the query finishes.
+        - >-
+          Compare the grid's rendering of bench.all_types against docs/TYPES.md.
+        - >-
+          Record every number in docs/PERF.md.
+      out:
+        - >-
+          New features.
+    acceptance:
+      - "All QA scripts pass on both databases via scripts/qa.sh."
+      - "Defects fixed with regression tests; docs/PERF.md updated."
+    verify:
+      - scripts/qa.sh
+
+# ---------------------------------------------------------------------------
+- id: E6
+  title: "E6 Object browser"
+  description: >
+    A lazily loaded tree of schemas, tables, views, procedures, functions and
+    packages with columns and source one key away, and shortcuts that drop
+    starter SQL into the scratch pad.
+  tasks:
+
+  - id: T6.1
+    tag: dev
+    title: "T6.1 Object tree with lazy loading, filter, columns and source viewer"
+    goal: >
+      The left pane lists schemas; expanding one loads its object kinds;
+      expanding a kind loads its objects; selecting a table shows its columns
+      and a procedure shows its source in the results pane; Enter on a table
+      drops a select into the pad; `/` filters the tree.
+    context: >
+      Depends on E4 and T2.3. Every load is a catalog call on the tab's
+      worker; the node shows `…` while loading. Loaded nodes are cached for
+      the session; `r` on a node reloads it.
+    scope:
+      in:
+        - >-
+          src/app/objects.rs: a flat Vec<Node> with depth and expanded flags (no recursive structs); Node kinds Schema, Kind(ObjectKind), Object(DbObject), Column(ColumnInfo). Keys in Objects focus: j/k move, l/Right/Enter expand or activate, h/Left collapse or go to parent, Space toggle, r reload node, / start filter (typed text narrows the visible objects to those containing it, case-insensitive; Esc clears), Enter on a table or view inserts `select top 100 * from schema.name` (SQL Server) or `select * from schema.name fetch first 100 rows only` (Oracle) at the pad cursor on its own line and moves focus to Scratch, `s` on a procedure/function/package shows source in the results pane (read-only text view with j/k, line numbers), `i` on a table shows columns in the results pane as a grid (name, type, nullable, pk), `y` copies the qualified name.
+        - >-
+          Oracle schemas listing excludes Oracle-maintained users; the connection's own schema is listed first and expanded automatically on connect. SQL Server lists all schemas with at least one object; dbo first, then bench.
+        - >-
+          The tree remembers expanded state per connection for the session only.
+        - >-
+          Errors loading a node show in the node line (`✗ ORA-…`) and in the footer.
+        - >-
+          Tests: tree state (expand/collapse/filter/flat-list invariants), UI rendering with indentation and glyphs (▸ ▾), source viewer rendering; replay objects-mssql.keys and objects-oracle.keys: connect, expand bench, expand Tables, expect customers, `i`, expect a known column, navigate to Procedures, `s`, expect a known source line, Enter on customers, expect the select in the pad.
+      out:
+        - >-
+          DDL generation, editing objects, dependencies, indexes.
+    acceptance:
+      - "Both replay scripts exit 0 against the local databases."
+      - "Expanding a schema on Oracle with the 1M row table present takes under 1 s (catalog queries must not touch table data)."
+      - "Filtering with `/cust` shows customers and v_customer_totals and hides orders."
+      - "Unit and UI tests pass."
+    verify:
+      - cargo test --all-targets
+      - SQL_BENCH_CONFIG=config.local.toml cargo run -- --replay scripts/replay/objects-mssql.keys --size 120x40 --frames-dir /tmp/sql-bench-frames
+      - SQL_BENCH_CONFIG=config.local.toml cargo run -- --replay scripts/replay/objects-oracle.keys --size 120x40 --frames-dir /tmp/sql-bench-frames
+
+  - id: T6.2
+    tag: qa
+    title: "T6.2 QA: object browser against every seeded object"
+    goal: >
+      Every object T1.1 seeded is reachable, its columns and source are
+      right, and the tree stays responsive.
+    context: >
+      Depends on T6.1. Cross-check the tree against `objects` and `source`
+      subcommand output.
+    scope:
+      in:
+        - >-
+          A script that runs `objects` for every kind on both databases and a replay that walks the whole tree, expanding every kind, and expects each seeded object name; compare source shown for every procedure/function/package with the `source` subcommand output (write the frame, diff the relevant lines).
+        - >-
+          Encrypted procedure on SQL Server (create one WITH ENCRYPTION in a QA setup step) shows the not-available message.
+        - >-
+          Tree with 1,000 tables (create them in a throwaway schema in the QA script, drop after) still expands under 2 s and scrolls with draw_ms < 5.
+        - >-
+          Filter with no matches shows `no objects match`.
+      out:
+        - >-
+          New features.
+    acceptance:
+      - "scripts/qa/objects.sh exits 0 on both databases and is in scripts/qa.sh."
+      - "Defects fixed with regression tests; numbers in docs/PERF.md."
+    verify:
+      - scripts/qa/objects.sh
+
+# ---------------------------------------------------------------------------
+- id: E7
+  title: "E7 Performance, documentation and release"
+  description: >
+    Prove the budgets, write the docs a stranger needs, and publish.
+  tasks:
+
+  - id: T7.1
+    tag: dev
+    title: "T7.1 Performance pass against the budgets"
+    goal: >
+      Measure startup, key-to-frame, and the three canonical queries in a
+      release build, fix whatever misses the budget, and leave the numbers
+      and the method in docs/PERF.md.
+    context: >
+      Depends on E5 and E6. Budgets (release build, 120x40): startup to first
+      frame < 50 ms with no connections; key-to-frame p95 < 16 ms with a
+      10,000-row result on screen; draw_ms independent of fetched rows
+      (10k vs 100k within 20%); `select 1` round trip < 5 ms on SQL Server
+      and < 5 ms on Oracle after connect; 1M-row scan at max-rows 100k under 8 s.
+    scope:
+      in:
+        - >-
+          scripts/perf.sh extended: builds release, measures startup with 10 runs of `--replay scripts/replay/quit.keys` (time from process start to first `frame` trace line; hyperfine is not installed, use the trace timestamps), runs the replay perf scripts, parses the trace, prints a table and appends to docs/PERF.md with the git commit hash.
+        - >-
+          Fix misses. Likely suspects: recomputing column widths over all rows per frame, formatting every Cell per frame (format only visible cells), cloning result rows into the widget, unbounded status string formatting each tick.
+        - >-
+          A `#[ignore]` perf test suite runnable with `cargo test --release -- --ignored` asserting the budgets with a 2x margin, so a regression is a test failure not a doc drift.
+      out:
+        - >-
+          Async rendering, GPU, anything clever.
+    acceptance:
+      - "docs/PERF.md has a dated block with every budget and its measured value, all within budget, with the commit hash."
+      - "`cargo test --release -- --ignored` passes."
+    verify:
+      - scripts/perf.sh
+      - cargo test --release -- --ignored
+
+  - id: T7.2
+    tag: dev
+    title: "T7.2 Documentation: README, DESIGN, config example, keys"
+    goal: >
+      A stranger can install, configure, connect and be productive from
+      README alone, and a contributor can find every design decision in
+      DESIGN.md.
+    context: >
+      Follow ticket-tui's README/DESIGN split and voice. The README's
+      screenshot is a text frame produced by replay (scripts/replay/readme.keys),
+      not an image, so it stays accurate.
+    scope:
+      in:
+        - >-
+          README.md: what it is, install (cargo install --path ., Oracle Instant Client steps for Linux and macOS, libaio note for Arch), config (copy config.example.toml), the three-pane frame, every key grouped by pane, the headless subcommands with examples, local databases for development, license (MIT).
+        - >-
+          docs/DESIGN.md completed: architecture (the four rules), the worker protocol, type mapping tables (link TYPES.md), statement splitting rules, replay format, trace format, budgets (link PERF.md), decisions log (why tiberius, why oracle crate not ODBC, why re-run instead of server cursor, why no rope, why enum not trait).
+        - >-
+          config.example.toml complete with comments for every key.
+        - >-
+          `--help` texts reviewed for consistency with README.
+        - >-
+          LICENSE (MIT, Jacob Ragsdale, 2026).
+      out:
+        - >-
+          A website.
+    acceptance:
+      - "README frame is regenerated by `scripts/readme-frame.sh` and matches the committed one (CI check)."
+      - "Every key in the help overlay appears in README; a test compares the two lists (expose the key table from app for the test)."
+      - "DESIGN.md sections listed in scope all exist and are non-empty."
+    verify:
+      - scripts/readme-frame.sh
+      - cargo test --all-targets
+
+  - id: T7.3
+    tag: qa
+    title: "T7.3 QA: release verification and GitHub publication"
+    goal: >
+      Full green run of everything, a clean clone builds and passes, the
+      public GitHub repository exists with CI green on main.
+    context: >
+      Depends on every other ticket. The repository is jacobragsdale/sql-bench
+      (public). Do not publish until every item below passes.
+    scope:
+      in:
+        - >-
+          Fresh clone into a temp dir; `scripts/db-reset.sh`; full CLAUDE.md check list; `scripts/qa.sh`; `scripts/perf.sh`; every replay script; `cargo install --path .` and run the installed binary once with `--replay scripts/replay/smoke.keys`.
+        - >-
+          Review every ticket's acceptance list in docs/backlog.yaml against the code and mark each `verified: true` with a one-line note, or open a fix.
+        - >-
+          Confirm no secrets in the repo (grep for Bench_Pass1 outside compose/seed/config.local/docs, PAT patterns, .env).
+        - >-
+          Push main, confirm the GitHub Actions run is green, add repository description and topics (rust, ratatui, sql-server, oracle, tui).
+      out:
+        - >-
+          Crates.io publish, binaries/releases.
+    acceptance:
+      - "All checks green from a fresh clone."
+      - "docs/backlog.yaml has verified: true on every task."
+      - "https://github.com/jacobragsdale/sql-bench is public with a green CI badge in README."
+    verify:
+      - scripts/qa.sh
+      - gh run list --repo jacobragsdale/sql-bench --limit 1
