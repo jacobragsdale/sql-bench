@@ -1,0 +1,26 @@
+# The two containers `scripts/db-up.sh` starts, and the Instant Client the
+# Oracle driver loads. Committed on purpose: these passwords open nothing
+# but a throwaway database on localhost, and every dev loop and integration
+# test wants the same two names.
+
+[oracle]
+client_lib_dir = "~/.local/opt/oracle/instantclient_23_26"
+
+[[connection]]
+name = "local-mssql"
+kind = "mssql"
+host = "localhost"
+port = 1433
+database = "bench"
+user = "sa"
+password = "Bench_Pass1!"
+trust_cert = true
+
+[[connection]]
+name = "local-oracle"
+kind = "oracle"
+host = "localhost"
+port = 1521
+service = "FREEPDB1"
+user = "bench"
+password = "bench"
