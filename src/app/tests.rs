@@ -950,6 +950,41 @@ fn the_filter_keeps_what_matches_and_the_branches_above_it() {
 }
 
 #[test]
+fn esc_clears_a_filter_enter_committed() {
+    let mut app = browsing();
+    app.shell.focus = Focus::Objects;
+    press(&mut app, "/");
+    for character in ["c", "u", "s", "t"] {
+        press(&mut app, character);
+    }
+    // Enter keeps the filter and gives the keys back; Esc is still the way
+    // out of one, and used to leave the pane narrowed with no way back.
+    press(&mut app, "Enter");
+    assert_eq!(app.tabs[1].objects.filter(), "cust");
+    assert!(!app.tabs[1].objects.filtering());
+    press(&mut app, "Esc");
+    assert_eq!(app.tabs[1].objects.filter(), "");
+    assert!(rows(&app.tabs[1].objects).contains(&"    orders".to_owned()));
+}
+
+#[test]
+fn a_filter_nothing_matches_leaves_no_rows_at_all() {
+    let mut app = browsing();
+    app.shell.focus = Focus::Objects;
+    press(&mut app, "/");
+    for character in ["z", "z", "z"] {
+        press(&mut app, character);
+    }
+    assert!(
+        rows(&app.tabs[1].objects).is_empty(),
+        "which is what the pane draws `no objects match` over"
+    );
+    press(&mut app, "Enter");
+    press(&mut app, "Esc");
+    assert!(rows(&app.tabs[1].objects).contains(&"    orders".to_owned()));
+}
+
+#[test]
 fn enter_on_a_table_puts_a_select_in_the_pad_and_moves_the_focus_to_it() {
     let mut app = browsing();
     app.shell.focus = Focus::Objects;

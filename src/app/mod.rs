@@ -611,6 +611,14 @@ impl App {
                     self.shell.inspector = None;
                 } else if self.tab().is_some_and(|tab| tab.results.running()) {
                     return vec![Action::Cancel(self.shell.active_tab)];
+                } else if self.shell.focus == Focus::Objects
+                    && self
+                        .tab()
+                        .is_some_and(|tab| !tab.objects.filter().is_empty())
+                {
+                    // Enter gives the keys back but keeps the filter, so Esc
+                    // has to reach the tree to be the way out of one.
+                    return self.objects_key(key);
                 } else {
                     self.shell.error = None;
                 }
