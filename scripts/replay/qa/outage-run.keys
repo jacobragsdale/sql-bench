@@ -1,0 +1,28 @@
+# T5.4 case 9 (deferred from T4.2), the half that needs the server away: a
+# tab that has just run a statement, a container stopped under it, and the
+# Ctrl-R that follows.
+#
+# scripts/qa/query-workflow.sh waits for `connected.txt`, stops the
+# container, and has the ten second wait below to do it in; it starts the
+# container again the moment this script is done, so the server is away for
+# that wait and the failed connect after it and no longer. The other half —
+# Ctrl-R once the container is healthy again — is run-disconnected.keys.
+
+key c
+wait busy
+expect ●
+
+key Tab
+type select count(*) as n from bench.customers
+key Ctrl-R
+wait busy
+expect 50
+frame connected
+
+wait 10000
+key Ctrl-R
+wait busy
+expect Results · failed
+expect-not Running
+frame outage-error
+key Ctrl-Q

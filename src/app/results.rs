@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::db::model::{Cell, Column, DbError, QueryEvent};
+use crate::export::width as width_of;
 
 /// The widest a column is drawn, however long its values are. A column of
 /// 2 kB payloads would otherwise push every other column off the screen.
@@ -240,7 +241,7 @@ impl Results {
                     continue;
                 };
                 if *width < WIDTH_CAP {
-                    *width = (*width).max(shown(cell).chars().count()).min(WIDTH_CAP);
+                    *width = (*width).max(width_of(&shown(cell))).min(WIDTH_CAP);
                 }
                 if let Some(align) = set.align.get_mut(index) {
                     *align = match (*align, cell) {
@@ -518,18 +519,10 @@ fn span(widths: &[usize], from: usize, to: usize) -> usize {
         .saturating_sub(2)
 }
 
-// ponytail: widths are counted in characters, so a CJK name drawn two cells
-// wide leans the columns after it — the same ceiling `export::width` names,
-// and the same fix: ratatui's own `Span::width` if a grid of Chinese text is
-// ever worth the rewrite.
 /// A header is as wide as the longer of its two lines, because the type row
 /// is drawn under the name in the same column.
 fn header_width(column: &Column) -> usize {
-    column
-        .name
-        .chars()
-        .count()
-        .max(column.type_name.chars().count())
+    width_of(&column.name).max(width_of(&column.type_name))
 }
 
 /// What a cell reads as in the grid. It differs from [`Cell::display`] in
@@ -651,15 +644,11 @@ fn wrapped(text: &str) -> Vec<String> {
     lines
 }
 
-/// A cell cut to `width` characters, the last of which says there was more.
+/// A cell cut to `width` terminal columns, the last of which says there was
+/// more.
 #[must_use]
 pub fn cut(text: &str, width: usize) -> Cow<'_, str> {
-    if width == 0 || text.chars().count() <= width {
-        return Cow::Borrowed(text);
-    }
-    let mut cut: String = text.chars().take(width - 1).collect();
-    cut.push('…');
-    Cow::Owned(cut)
+    crate::export::cut_to(text, width)
 }
 
 /// `1,234`: a row count is read, not computed with.
@@ -906,6 +895,10 @@ mod tests {
         assert_eq!(shown(&Cell::Bytes(vec![0xff])), "0xff");
         assert_eq!(cut("abcdef", 4), "abc…");
         assert_eq!(cut("abcd", 4), "abcd");
+        // T5.4: a column is terminal columns and a wide glyph is two of
+        // them, so four of these do not fit in a column four wide.
+        assert_eq!(cut("李雷李雷", 4), "李…");
+        assert_eq!(cut("李雷", 4), "李雷");
         assert_eq!(grouped(1_234_567), "1,234,567");
         assert_eq!(grouped(999), "999");
     }

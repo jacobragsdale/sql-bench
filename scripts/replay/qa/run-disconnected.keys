@@ -1,0 +1,17 @@
+# T5.4 case 8: Ctrl-R on a tab nobody connected. The run is queued, the
+# connection is opened for it, and the rows arrive without a second key.
+#
+# Also case 9's other half: the same keys against a container that has just
+# been started again have to reconnect and answer.
+
+key Tab
+type select count(*) as n from bench.customers
+key Ctrl-R
+expect connecting… then running
+frame connecting
+
+wait busy
+expect ●
+expect 50
+frame reconnected-rows
+key Ctrl-Q

@@ -27,6 +27,7 @@ against. Sections marked *(T7.2)* are completed by that ticket.
 | tokio (`rt`, `net`, `time`), tokio-util (`compat`), futures-util | tiberius is async; confined to `db/mssql.rs` |
 | oracle 0.6 | Oracle over ODPI-C; needs Instant Client at runtime |
 | time 0.3 | timestamps in traces and exports |
+| unicode-width 0.2 | how many terminal columns a glyph is drawn in; the grid and `export::table` align on it *(T5.4)* |
 | tempfile (dev) | tests |
 
 Why tiberius: the only maintained pure-Rust TDS client; no OpenSSL, no

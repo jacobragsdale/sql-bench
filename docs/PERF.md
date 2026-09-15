@@ -100,3 +100,41 @@ runner.
 `draw_ms` carries three decimals since T3.3. A draw of this shell is a
 fraction of a millisecond, and a number rounded to whole ones cannot be held
 to a 5 ms budget — every frame above would have read 0, 1 or 2.
+
+## Query workflow (T5.4)
+
+`scripts/qa/query-workflow.sh`, release build, 2026-09-15, on the machine
+above. Twelve cases through the replay scripts in `scripts/replay/qa/`,
+against both containers: unicode in the SQL and in the rows, a 300-column
+result, a 100 kB cell, NULL-only rows, F5 over a failing second statement,
+Ctrl-R on an empty pad, Esc the instant after Ctrl-R, Ctrl-R on a
+disconnected tab, a container stopped under a connected one, a million-row
+scan capped at 100,000 and exported, the grid against
+[TYPES.md](TYPES.md), and CJK alignment. Wall clock of the whole replay
+process — start, connect, run, keys, frames and exit — median of three runs.
+
+| case | local-mssql | local-oracle | budget |
+|---|---|---|---|
+| unicode, 300 columns, NULL-only rows, `all_types`, CJK (one script) | 263 ms | 311 ms | — |
+| 100 kB cell: 16 frames of j/k, worst `draw_ms` | 0.861 | 0.644 | 16 ms |
+| Esc straight after Ctrl-R, then another statement | 168 ms | 193 ms | — |
+| Ctrl-R on a disconnected tab: connect and rows | 68 ms | 112 ms | — |
+| 1M rows at `--max-rows 100000`, `G`, `PageUp` ×5, CSV export | 209 ms | 249 ms | 15 s |
+| the same run's worst `draw_ms` after the scan was done | 0.490 | 0.308 | 16 ms |
+
+The million-row case is the one with a budget worth stating: 100,000 rows
+fetched, the cell cursor walked to the bottom and five pages back up, and
+100,000 rows written to a CSV, all inside a quarter of a second — two orders
+of magnitude under the 15 s the ticket allowed. Both draw budgets are met by
+a factor of twenty: the grid formats the window it shows and never the scan,
+so a 102,400 character cell costs the 40 columns it is cut to.
+
+The outage case (T4.2's deferred one) runs last and one container at a time:
+each was stopped for **10 s** — the wait its replay script spends — and
+docker called it healthy again **16 s** after it went down. The query that
+crossed the outage failed with the driver's own words (`cannot connect: An
+error occured during the attempt of performing I/O` on SQL Server,
+`DPI-1080: connection was closed by ORA-03113` on Oracle) rather than
+hanging, and a Ctrl-R on a disconnected tab afterwards connected and returned
+rows in 65 ms and 111 ms. The whole script, both backends and both outages,
+is 35 s.

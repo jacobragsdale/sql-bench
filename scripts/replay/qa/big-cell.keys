@@ -1,0 +1,40 @@
+# T5.4 case 3: a hundred kilobyte cell in the grid. The value is cut to the
+# column with an `…` and never formatted whole, so moving the cell cursor
+# over it costs what any other row costs — which is what the `draw_ms` budget
+# scripts/qa/query-workflow.sh reads off the trace holds it to.
+#
+# bench.big_text is three rows: a short body, a NULL and the 102,400
+# character one. Same statement on both backends.
+
+key c
+wait busy
+expect ●
+
+key Tab
+type select id, body from bench.big_text order by id
+key Ctrl-R
+wait busy
+expect 3 rows
+
+key Shift-Tab
+key Shift-Tab
+key l
+expect Lorem ipsu
+expect …
+frame big-cell
+
+# Up and down the whole set, twice over, every key its own frame.
+key j
+key j
+key j
+key k
+key k
+key k
+key j
+key j
+key k
+key j
+key k
+key k
+frame big-cell-scrolled
+key Ctrl-Q

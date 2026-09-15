@@ -7,7 +7,10 @@ cell reads as on screen.
 Both tables are real output, not a design. The types are what
 `sql-bench source --conn <conn> <table>` reports (`ALL_TAB_COLUMNS` /
 `sys.columns`, the same query the Objects pane uses); the examples are the
-row `scripts/seed` writes into `bench.all_types`, printed with
+row `scripts/seed` writes into `bench.all_types` — except SQL Server's
+`nvarchar(max)` and `varbinary(max)`, which that table has no column for:
+those two are row 1 of `bench.big_text` and of `bench.binary_blobs`. Printed
+with
 
 ```
 SQL_BENCH_CONFIG=config.local.toml sql-bench query --conn local-mssql \
@@ -68,8 +71,8 @@ every width of an integer into one wire type, so `tinyint`, `smallint` and
 | `TIMESTAMP(6) WITH TIME ZONE` | `DateTime` | `2024-05-17 13:45:30.123456 +02:00` |
 | `INTERVAL DAY(2) TO SECOND(6)` | `Text` | `+02 03:04:05.600000` |
 | `RAW(8)` | `Bytes` | `0x0102030405060708` |
-| `CLOB` | `Text` | `short body` |
-| `BLOB` | `Bytes` | `0x0102030405` |
+| `CLOB` | `Text` | `clob value` |
+| `BLOB` | `Bytes` | `0xaabbcc` |
 
 A `NUMBER` of 1 to 18 digits and no scale is an `Int`; anything wider, or
 with a scale, is a `Decimal` carrying the server's own digits. An unqualified
@@ -95,7 +98,9 @@ of its own:
 | `Bytes` | `0x…` | `0x…` | `"0x…"` |
 | a repeated column name | both columns, twice the header | both columns, twice the header | `a`, then `a_2`: a JSON object cannot hold one name twice without losing a column |
 
-Without `--full` a cell is cut at 60 characters and the last of them is `…`.
+Without `--full` a cell is cut at 60 terminal columns and the last of them
+is `…`. Columns and not characters, because a CJK glyph is drawn two cells
+wide: `李雷` is four columns in a table and in the grid alike *(T5.4)*.
 
 ## Ceilings
 
