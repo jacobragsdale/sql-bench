@@ -181,6 +181,28 @@ subcommand for every seeded procedure, function and package. The longest is
 Oracle's `ORDER_PKG` at 20 lines, and the results pane shows 33 at 200x60, so
 nothing in the seed needs scrolling to be read whole.
 
+## Object index and finder (T8.1)
+
+`cargo test --release --test perf -- --ignored a_finder`, 2026-09-17, on a
+different machine from the one above: a 4-thread Intel Xeon at 2.10 GHz in a
+container, rust 1.94.1 — slower than the development machine on every other
+budget, so these are conservative.
+
+The test indexes 100,000 objects across the two configured tabs — twelve
+schemas, three kinds, the long prefixed names a real database has — opens
+the finder with Ctrl-P and types `sync_orders` letter by letter, then takes
+it back with Backspace, ten times over. Every key is a search over the
+whole index, a ranking of the hits and a frame:
+
+| | p50 | p95 | budget |
+|---|---|---|---|
+| finder key to frame, 100,000 objects indexed | 4.99 ms | 6.61 ms | 16 ms |
+
+The pass over the names is the cost: `s` alone matches a large fraction of
+a hundred thousand names as a subsequence, and those hits are ranked before
+the best two hundred are kept. Lower-casing is paid once, when the index
+lands, not per key.
+
 ## Budgets (T7.1)
 
 Every budget `docs/DESIGN.md` sets, measured by `scripts/perf.sh` in a

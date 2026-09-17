@@ -303,7 +303,9 @@ fn a_finder_keystroke_reaches_the_frame_inside_the_budget_over_a_hundred_thousan
         }
     }
     assert!(turns.len() > 100, "only {} turns were taken", turns.len());
+    let p50 = median(turns.clone());
     let p95 = percentile(turns, 95);
+    eprintln!("finder key to frame: p50 {p50:?}  p95 {p95:?}  (budget {KEY_TO_FRAME:?})");
     assert!(
         p95 < KEY_TO_FRAME * MARGIN,
         "finder key to frame p95 was {p95:?}, and the budget is {KEY_TO_FRAME:?}"
