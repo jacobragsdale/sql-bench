@@ -1356,7 +1356,11 @@ fn ctrl_p_opens_the_finder_which_takes_every_key_and_enter_goes_to_the_object() 
     );
     assert!(app.shell.finder.is_none());
     assert_eq!(app.shell.active_tab, 1);
-    assert_eq!(app.shell.focus, Focus::Objects);
+    assert_eq!(
+        app.shell.focus,
+        Focus::Results,
+        "the source is what was asked for, so its pane has the keys"
+    );
     let tree = &app.tabs[1].objects;
     assert_eq!(tree.nodes()[tree.cursor()].item.name(), "ORDER_PKG");
 

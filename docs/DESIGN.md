@@ -261,7 +261,10 @@ the hits are ranked and cut to the best two hundred, which the title says
 (`Find · 2311 of 48210, first 200`). Enter switches to the object's tab,
 opens the tree down to it and puts what it is made of in the results pane:
 the source of a procedure, a function, a package or a view, the columns of
-a table. Esc closes it; Ctrl-Q still quits.
+a table. The source is fetched then, not kept — it is one catalog query on
+the tab's own connection, the same one `s` runs — and the focus lands on the
+results pane so the source scrolls at once. Esc closes it; Ctrl-Q still
+quits.
 
 `/` narrows the pane to the rows whose name contains what is typed, plus the
 branches above them, and says so in the title: `Objects /cust`. Esc clears it.

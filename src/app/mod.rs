@@ -738,7 +738,8 @@ impl App {
 
     /// The finder chose an object: its tab on screen, the tree open on it,
     /// and what it is made of in the results pane — the source of anything
-    /// that has some, the columns of a table or a view.
+    /// that has some, the columns of a table or a view — with the focus
+    /// there, because reading it is what the finder was opened for.
     fn go_to(&mut self, found: &finder::Match) -> Vec<Action> {
         let Some(open) = self.tabs.get_mut(found.tab) else {
             return Vec::new();
@@ -764,6 +765,7 @@ impl App {
                 kind: object.kind,
             },
         };
+        self.shell.focus = Focus::Results;
         vec![Action::LoadObjects {
             tab: found.tab,
             request,
