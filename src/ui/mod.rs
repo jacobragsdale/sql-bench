@@ -14,6 +14,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph};
 
+use crate::app::finder::Finder;
 use crate::app::prompt::Prompt;
 use crate::app::results::{INSPECT_WIDTH, Inspector, inspect_title};
 use crate::app::scratch::Scratch;
@@ -87,6 +88,10 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
     // order too.
     if app.shell.help {
         render_help(frame, area, app, theme);
+    }
+    // And the finder over everything: it takes every key while it is open.
+    if let Some(finder) = &app.shell.finder {
+        render_finder(frame, area, finder, app, theme);
     }
 }
 
@@ -244,7 +249,7 @@ fn footer_line(app: &App, theme: &Theme, width: u16) -> Line<'static> {
         &app.shell.error,
         app.shell.status.as_str(),
     ) {
-        (Some(prompt), ..) => prompt_spans(prompt, theme),
+        (Some(prompt), ..) => prompt_spans(prompt, " Export to: ", theme),
         (None, Some(error), _) => vec![Span::styled(cut(error, budget), theme.error)],
         (None, None, "") => vec![Span::styled(hints(app.shell.focus, budget), theme.dim)],
         (None, None, status) => vec![Span::raw(cut(status, budget))],
@@ -269,13 +274,13 @@ fn cut(text: &str, budget: usize) -> String {
     format!(" {kept}…")
 }
 
-/// ` Export to: ` and the path being typed, the cursor painted the way the
-/// scratch pad's is — a `TestBackend` has no terminal cursor, so a prompt
-/// whose cursor were the real one could not be tested at all.
-fn prompt_spans(prompt: &Prompt, theme: &Theme) -> Vec<Span<'static>> {
+/// `label` and the line being typed, the cursor painted the way the scratch
+/// pad's is — a `TestBackend` has no terminal cursor, so a prompt whose
+/// cursor were the real one could not be tested at all.
+fn prompt_spans(prompt: &Prompt, label: &str, theme: &Theme) -> Vec<Span<'static>> {
     let characters: Vec<char> = prompt.text.chars().collect();
     vec![
-        Span::styled(" Export to: ".to_owned(), theme.accent),
+        Span::styled(label.to_owned(), theme.accent),
         Span::raw(characters.iter().take(prompt.cursor).collect::<String>()),
         Span::styled(
             characters
@@ -391,6 +396,70 @@ fn render_inspector(
             theme.accent,
             theme.accent,
         )),
+        overlay,
+    );
+}
+
+/// How many match rows the finder shows at most: enough to scan, few enough
+/// that the query line stays near the middle of any supported screen.
+const FINDER_ROWS: u16 = 20;
+
+/// The finder over the layout: the query on the first line, the matches
+/// under it best first, the chosen one in the cursor colour. Each row is the
+/// qualified name, what kind of thing it is and which tab holds it.
+fn render_finder(frame: &mut Frame, area: Rect, finder: &Finder, app: &App, theme: &Theme) {
+    let width = area.width.saturating_sub(4).min(96);
+    let height = (FINDER_ROWS + 3).min(area.height.saturating_sub(2));
+    let overlay = centered(area, width, height);
+    let showing = usize::from(height.saturating_sub(3));
+    let matches = finder.matches();
+    let top = if finder.cursor >= showing {
+        finder.cursor + 1 - showing
+    } else {
+        0
+    };
+    let inner = usize::from(width.saturating_sub(4));
+    let mut lines = vec![Line::from(prompt_spans(&finder.query, "> ", theme))];
+    if matches.is_empty() {
+        let message = if finder.indexed() == 0 {
+            "nothing indexed yet: c connects a tab"
+        } else if finder.query.text.trim().is_empty() {
+            "type a name, or schema.name"
+        } else {
+            "no objects match"
+        };
+        lines.push(placeholder(message, theme));
+    }
+    // The name column is as wide as the widest name showing, so the kinds
+    // and the tabs line up down the list.
+    let name_width = matches
+        .iter()
+        .skip(top)
+        .take(showing)
+        .map(|found| found.object.schema.chars().count() + 1 + found.object.name.chars().count())
+        .max()
+        .unwrap_or(0)
+        .min(inner.saturating_sub(22));
+    for (at, found) in matches.iter().enumerate().skip(top).take(showing) {
+        let qualified = format!("{}.{}", found.object.schema, found.object.name);
+        let name = crate::app::results::cut(&qualified, name_width);
+        let tab = app.tabs.get(found.tab).map_or("", |tab| tab.name.as_str());
+        let text = format!(
+            "{name:<name_width$}  {:<9}  {tab}",
+            found.object.kind.as_str()
+        );
+        lines.push(Line::from(Span::styled(
+            crate::app::results::cut(&text, inner).into_owned(),
+            if at == finder.cursor {
+                theme.cursor
+            } else {
+                Style::default()
+            },
+        )));
+    }
+    frame.render_widget(Clear, overlay);
+    frame.render_widget(
+        Paragraph::new(lines).block(titled(&finder.title(), theme.accent, theme.accent)),
         overlay,
     );
 }

@@ -12,6 +12,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent};
 
+use super::finder::Index;
 use crate::config::Kind;
 use crate::db::catalog::{CatalogAnswer, CatalogRequest, ColumnInfo, DbObject, ObjectKind};
 use crate::db::model::DbError;
@@ -152,9 +153,15 @@ pub struct Objects {
     filter: String,
     /// Whether `/` is still being typed into.
     filtering: bool,
-    /// Whether the schema list itself is on its way, which is the one load
-    /// with no row of its own to say so.
+    /// Whether the schema list itself is on its way, which — with the index
+    /// — is a load with no row of its own to say so.
     loading_schemas: bool,
+    /// Every object the connection holds, once the index has come back:
+    /// what `Ctrl-P` searches, and what a kind's branch fills from without
+    /// asking the server again.
+    index: Option<Index>,
+    /// The index is on its way; the pane's title says so.
+    indexing: bool,
     /// Where the window starts; the pane's height is known only to the
     /// renderer, so this is a hint [`Objects::window`] clamps.
     scroll: usize,
@@ -177,6 +184,8 @@ impl Objects {
             filter: String::new(),
             filtering: false,
             loading_schemas: false,
+            index: None,
+            indexing: false,
             scroll: 0,
         }
     }
@@ -219,25 +228,45 @@ impl Objects {
     /// is what a replay's `wait busy` waits out.
     #[must_use]
     pub fn busy(&self) -> bool {
-        self.loading_schemas || self.nodes.iter().any(|node| node.loading)
+        self.loading_schemas || self.indexing || self.nodes.iter().any(|node| node.loading)
+    }
+
+    /// Every object of the connection, once the index has come back.
+    #[must_use]
+    pub const fn index(&self) -> Option<&Index> {
+        self.index.as_ref()
+    }
+
+    /// Whether the index is still on its way.
+    #[must_use]
+    pub const fn indexing(&self) -> bool {
+        self.indexing
     }
 
     /// A load is on its way: the row says so until the answer arrives, and
-    /// the schema list — which has no row — says so through the tree.
+    /// the schema list and the index — which have no row — say so through
+    /// the tree.
     pub fn started(&mut self, request: &CatalogRequest) {
-        match self.find(request) {
-            Some(index) => {
-                self.nodes[index].loading = true;
-                self.nodes[index].error = None;
+        match request {
+            CatalogRequest::Schemas => self.loading_schemas = true,
+            CatalogRequest::Index => self.indexing = true,
+            _ => {
+                if let Some(index) = self.find(request) {
+                    self.nodes[index].loading = true;
+                    self.nodes[index].error = None;
+                }
             }
-            None => self.loading_schemas = matches!(request, CatalogRequest::Schemas),
         }
     }
 
     /// What the load came back with. The results pane is the app's to fill;
     /// this is only the tree's half.
     pub fn answer(&mut self, request: &CatalogRequest, result: &Result<CatalogAnswer, DbError>) {
-        self.loading_schemas = false;
+        match request {
+            CatalogRequest::Schemas => self.loading_schemas = false,
+            CatalogRequest::Index => self.indexing = false,
+            _ => {}
+        }
         let index = self.find(request);
         if let Some(index) = index {
             self.nodes[index].loading = false;
@@ -254,6 +283,7 @@ impl Objects {
         };
         match (answer, index) {
             (CatalogAnswer::Schemas(schemas), _) => self.fill_schemas(schemas),
+            (CatalogAnswer::Index(objects), _) => self.fill_index(objects),
             (CatalogAnswer::Objects(objects), Some(index)) => {
                 let depth = self.nodes[index].depth + 1;
                 let children = objects
@@ -292,6 +322,75 @@ impl Objects {
         if !self.nodes.is_empty() {
             self.open(0);
         }
+    }
+
+    /// The index landed: keep it, and refill every kind branch that was
+    /// opened before it came, so a branch loaded from the server and one
+    /// loaded from the index never disagree.
+    fn fill_index(&mut self, objects: &[DbObject]) {
+        self.index = Some(Index::new(objects));
+        for at in 0..self.nodes.len() {
+            if matches!(self.nodes[at].item, Item::Kind { .. }) && self.nodes[at].loaded {
+                self.fill_kind(at);
+            }
+        }
+    }
+
+    /// A kind's objects from the index, under its row.
+    fn fill_kind(&mut self, at: usize) {
+        let (Item::Kind { schema, kind }, Some(index)) = (&self.nodes[at].item, &self.index) else {
+            return;
+        };
+        let depth = self.nodes[at].depth + 1;
+        let children = index
+            .objects()
+            .iter()
+            .filter(|object| object.kind == *kind && object.schema == *schema)
+            .map(|object| Node::new(Item::Object(object.clone()), depth))
+            .collect();
+        self.fill(at, children);
+    }
+
+    /// Put the cursor on `object`, opening the branches down to it and
+    /// dropping the filter that would hide it. `false` when there is no row
+    /// for it: no schema of that name, or a kind branch that would have to
+    /// ask the server, which is what an object that is not in the index
+    /// looks like.
+    pub fn reveal(&mut self, object: &DbObject) -> bool {
+        let Some(schema) = self
+            .nodes
+            .iter()
+            .position(|node| matches!(&node.item, Item::Schema(name) if *name == object.schema))
+        else {
+            return false;
+        };
+        if !self.nodes[schema].expanded {
+            self.open(schema);
+        }
+        let Some(kind) = (schema + 1..self.subtree_end(schema)).find(
+            |at| matches!(&self.nodes[*at].item, Item::Kind { kind, .. } if *kind == object.kind),
+        ) else {
+            return false;
+        };
+        if !self.nodes[kind].expanded && self.open(kind) != Hit::Moved {
+            self.nodes[kind].expanded = false;
+            return false;
+        }
+        let Some(row) = (kind + 1..self.subtree_end(kind)).find(|at| {
+            self.nodes[*at]
+                .item
+                .object()
+                .is_some_and(|found| found.name == object.name)
+        }) else {
+            return false;
+        };
+        self.filter.clear();
+        self.filtering = false;
+        self.cursor = row;
+        if let Some(at) = self.visible().iter().position(|index| *index == row) {
+            self.scroll_to(at);
+        }
+        true
     }
 
     /// One key of the objects pane.
@@ -433,6 +532,12 @@ impl Objects {
             self.fill(index, children);
             return Hit::Moved;
         }
+        // A kind's objects are in the index once it is here, so the server
+        // is only asked before that.
+        if self.index.is_some() && matches!(self.nodes[index].item, Item::Kind { .. }) {
+            self.fill_kind(index);
+            return Hit::Moved;
+        }
         match self.request(index) {
             Some(request) => Hit::Load(request),
             None => Hit::Moved,
@@ -510,6 +615,13 @@ impl Objects {
             self.fill(cursor, Vec::new());
             self.nodes[cursor].loaded = false;
             return self.open(cursor);
+        }
+        // A kind branch came from the index, so it is the index that is
+        // asked for again; the branch refills when it lands.
+        if self.index.is_some() && matches!(node.item, Item::Kind { .. }) {
+            self.fill(cursor, Vec::new());
+            self.nodes[cursor].expanded = true;
+            return Hit::Load(CatalogRequest::Index);
         }
         match self.request(cursor) {
             Some(request) => {
@@ -617,30 +729,20 @@ impl Objects {
         }
         let wanted = self.filter.to_lowercase();
         let mut keep = vec![false; open.len()];
+        // The open rows above the current one, one per depth: a match keeps
+        // its branches by marking the stack, so a schema of ten thousand
+        // objects filters in one pass.
+        let mut ancestors: Vec<usize> = Vec::new();
         for position in 0..open.len() {
-            if !self.nodes[open[position]]
-                .item
-                .name()
-                .to_lowercase()
-                .contains(&wanted)
-            {
-                continue;
-            }
-            keep[position] = true;
-            // ponytail: the ancestors are walked back one row at a time,
-            // which is O(rows × depth). The tree is a screenful of rows and
-            // four levels deep; an index of parents is the fix if it ever
-            // holds ten thousand.
-            let mut depth = self.nodes[open[position]].depth;
-            for above in (0..position).rev() {
-                if self.nodes[open[above]].depth < depth {
-                    keep[above] = true;
-                    depth = self.nodes[open[above]].depth;
-                    if depth == 0 {
-                        break;
-                    }
+            let node = &self.nodes[open[position]];
+            ancestors.truncate(node.depth);
+            if node.item.name().to_lowercase().contains(&wanted) {
+                keep[position] = true;
+                for above in &ancestors {
+                    keep[*above] = true;
                 }
             }
+            ancestors.push(position);
         }
         open.into_iter()
             .zip(keep)

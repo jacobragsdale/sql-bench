@@ -20,6 +20,7 @@ use ratatui::backend::TestBackend;
 
 use sql_bench::app::{App, Focus};
 use sql_bench::config::{self, Config};
+use sql_bench::db::catalog::{CatalogAnswer, CatalogRequest, DbObject, ObjectKind};
 use sql_bench::db::model::{Cell, Column, QueryEvent};
 use sql_bench::run::state::Store;
 use sql_bench::run::{Driver, InputSource};
@@ -237,5 +238,74 @@ fn a_key_reaches_the_frame_inside_the_budget_with_a_full_grid() {
     assert!(
         p95 < KEY_TO_FRAME * MARGIN,
         "key to frame p95 was {p95:?}, and the budget is {KEY_TO_FRAME:?}"
+    );
+}
+
+/// An app whose tabs hold `objects` indexed objects between them, the way
+/// ten busy databases would: tables, views and procedures with the long
+/// prefixed names a real schema has.
+fn app_with_index(objects: usize) -> App {
+    let mut app = App::new(&config());
+    let tabs = app.tabs.len();
+    for (tab, open) in app.tabs.iter_mut().enumerate() {
+        let index: Vec<DbObject> = (0..objects / tabs)
+            .map(|n| DbObject {
+                schema: format!("schema_{}", n % 12),
+                name: format!(
+                    "usp_customer_{}_orders_{n:06}",
+                    ["load", "sync", "report"][n % 3]
+                ),
+                kind: [ObjectKind::Table, ObjectKind::View, ObjectKind::Procedure][n % 3],
+                modified: None,
+            })
+            .collect();
+        let _ = tab;
+        open.objects
+            .answer(&CatalogRequest::Index, &Ok(CatalogAnswer::Index(index)));
+    }
+    app
+}
+
+#[test]
+#[ignore = "a timing: cargo test --release -- --ignored"]
+fn a_finder_keystroke_reaches_the_frame_inside_the_budget_over_a_hundred_thousand_objects() {
+    let config = config();
+    let mut app = app_with_index(100_000);
+    let mut driver = driver(&config);
+    let mut terminal = terminal();
+    let trace = Trace::new(None);
+    // Ctrl-P, then a name typed and taken back, letter by letter: every one
+    // of them is a search over the whole index and a frame.
+    let typed = "sync_orders";
+    let mut events = vec![Event::Key(KeyEvent::new(
+        KeyCode::Char('p'),
+        KeyModifiers::CONTROL,
+    ))];
+    for _ in 0..10 {
+        events.extend(typed.chars().map(|character| {
+            Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+        }));
+        events.extend(std::iter::repeat_n(
+            Event::Key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)),
+            typed.len(),
+        ));
+    }
+    let mut keys = Keys(events.into_iter());
+    let mut turns = Vec::new();
+    loop {
+        let at = Instant::now();
+        let going = driver
+            .turn(&mut terminal, &mut app, &mut keys, &trace)
+            .expect("a turn");
+        turns.push(at.elapsed());
+        if !going {
+            break;
+        }
+    }
+    assert!(turns.len() > 100, "only {} turns were taken", turns.len());
+    let p95 = percentile(turns, 95);
+    assert!(
+        p95 < KEY_TO_FRAME * MARGIN,
+        "finder key to frame p95 was {p95:?}, and the budget is {KEY_TO_FRAME:?}"
     );
 }

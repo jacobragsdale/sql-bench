@@ -3,6 +3,7 @@
 //! event goes in, a state change and a list of [`Action`]s come out, which is
 //! what makes the whole app testable without either.
 
+pub mod finder;
 pub mod objects;
 pub mod prompt;
 pub mod results;
@@ -18,8 +19,9 @@ use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::Size;
 
 use crate::config::{Config, Kind};
-use crate::db::catalog::{CatalogAnswer, CatalogRequest};
+use crate::db::catalog::{CatalogAnswer, CatalogRequest, ObjectKind};
 use crate::db::model::{DbError, QueryEvent};
+use finder::Finder;
 use objects::Objects;
 use prompt::Prompt;
 use results::{Hit, Inspector, Results};
@@ -55,6 +57,7 @@ pub const KEYS: &[(&str, &str, &str)] = &[
     ("Ctrl-Left", SCRATCH, "word left"),
     ("Ctrl-Right", SCRATCH, "word right"),
     ("?", ANYWHERE, "help"),
+    ("Ctrl-P", ANYWHERE, "find an object"),
     ("Esc", ANYWHERE, "cancel or close help"),
     ("q", NOT_SCRATCH, "quit"),
     ("Ctrl-Q", ANYWHERE, "quit"),
@@ -335,6 +338,9 @@ pub struct Shell {
     /// The open footer prompt, if `e` opened one. While it is there every
     /// key is a key it is being typed with.
     pub prompt: Option<Prompt>,
+    /// The open finder, if Ctrl-P opened one. It takes every key but Ctrl-Q
+    /// for the same reason.
+    pub finder: Option<Finder>,
     /// The first row of [`keys_for`] the open overlay shows. `?` and Esc put
     /// it back to the top.
     pub help_scroll: usize,
@@ -499,6 +505,10 @@ impl App {
                 .map(|ms| format!(" in {ms} ms"))
                 .unwrap_or_default(),
         );
+        // An open finder loses that tab's objects with the connection.
+        if let Some(finder) = self.shell.finder.as_mut() {
+            finder.search(&self.tabs);
+        }
     }
 
     /// One event of a running query. When it is the last one, the pad is
@@ -571,13 +581,17 @@ impl App {
         if self.shell.prompt.is_some() {
             return self.prompt_key(key);
         }
+        let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        if self.shell.finder.is_some() && !(control && matches!(key.code, KeyCode::Char('q' | 'Q')))
+        {
+            return self.finder_key(key);
+        }
         if self.shell.help && self.help_key(key) {
             return Vec::new();
         }
         if self.shell.inspector.is_some() && self.inspector_key(key) {
             return Vec::new();
         }
-        let control = key.modifiers.contains(KeyModifiers::CONTROL);
         // The scratch pad types every key the shell does not keep for
         // itself, which is why the shell's keys are matched first.
         let typing = self.shell.focus == Focus::Scratch;
@@ -596,6 +610,9 @@ impl App {
                 if !self.tabs.is_empty() {
                     self.shell.active_tab = (self.shell.active_tab + 1) % self.tabs.len();
                 }
+            }
+            KeyCode::Char('p' | 'P') if control => {
+                self.shell.finder = Some(Finder::open(&self.tabs));
             }
             KeyCode::Tab if !typing => self.shell.focus = self.shell.focus.next(),
             KeyCode::BackTab => self.shell.focus = self.shell.focus.previous(),
@@ -703,6 +720,56 @@ impl App {
             .unwrap_or_default()
     }
 
+    /// A key the open finder took. Esc closes it, Enter goes where it
+    /// points, and the rest is the finder's own.
+    fn finder_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        let Some(mut finder) = self.shell.finder.take() else {
+            return Vec::new();
+        };
+        match finder.key(key, &self.tabs) {
+            finder::Hit::Close => Vec::new(),
+            finder::Hit::Moved => {
+                self.shell.finder = Some(finder);
+                Vec::new()
+            }
+            finder::Hit::Open(found) => self.go_to(&found),
+        }
+    }
+
+    /// The finder chose an object: its tab on screen, the tree open on it,
+    /// and what it is made of in the results pane — the source of anything
+    /// that has some, the columns of a table or a view.
+    fn go_to(&mut self, found: &finder::Match) -> Vec<Action> {
+        let Some(open) = self.tabs.get_mut(found.tab) else {
+            return Vec::new();
+        };
+        let object = &found.object;
+        self.shell.active_tab = found.tab;
+        self.shell.focus = Focus::Objects;
+        if !open.objects.reveal(object) {
+            self.shell.status = format!("{}.{} is not in the tree", object.schema, object.name);
+            return Vec::new();
+        }
+        self.shell.status.clear();
+        let request = match object.kind {
+            ObjectKind::Table | ObjectKind::View => CatalogRequest::Columns {
+                schema: object.schema.clone(),
+                table: object.name.clone(),
+                show: true,
+            },
+            ObjectKind::Sequence => return Vec::new(),
+            _ => CatalogRequest::Source {
+                schema: object.schema.clone(),
+                name: object.name.clone(),
+                kind: object.kind,
+            },
+        };
+        vec![Action::LoadObjects {
+            tab: found.tab,
+            request,
+        }]
+    }
+
     /// A key the open prompt is being typed with. Enter is what it was
     /// opened for and Esc is the way out of it; everything else is editing.
     fn prompt_key(&mut self, key: KeyEvent) -> Vec<Action> {
@@ -802,6 +869,13 @@ impl App {
         }
         if let Err(error) = result {
             self.shell.error = Some(error.to_string());
+        }
+        // An index landing while the finder is open is one more tab to
+        // search; the query stays.
+        if matches!(request, CatalogRequest::Index)
+            && let Some(finder) = self.shell.finder.as_mut()
+        {
+            finder.search(&self.tabs);
         }
     }
 

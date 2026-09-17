@@ -22,8 +22,9 @@ pub(super) fn render(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         (theme.dim, theme.border)
     };
     let objects = app.tab().map(|tab| &tab.objects);
-    let title = match objects.map(Objects::filter) {
-        Some(filter) if !filter.is_empty() => format!(" Objects /{filter} "),
+    let title = match objects.map(|objects| (objects.filter(), objects.indexing())) {
+        Some((filter, _)) if !filter.is_empty() => format!(" Objects /{filter} "),
+        Some((_, true)) => " Objects · indexing… ".to_owned(),
         _ => " Objects ".to_owned(),
     };
     let block = titled(&title, title_style, border_style);

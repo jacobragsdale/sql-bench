@@ -65,4 +65,19 @@ wait busy
 expect Source · BENCH.CUSTOMER_ORDERS
 expect PROCEDURE customer_orders
 frame objects-oracle
+
+# Ctrl-P: every object of the connection, found as its name is typed, the
+# lower-case query against Oracle's upper-case names, and Enter opens the
+# tree on it with its source in the results pane.
+key Ctrl-P
+expect ╭ Find · 
+type order_pk
+expect BENCH.ORDER_PKG
+expect package
+key Enter
+expect-not ╭ Find
+wait busy
+expect Source · BENCH.ORDER_PKG
+expect PACKAGE order_pkg
+frame objects-oracle-found
 key Ctrl-Q
