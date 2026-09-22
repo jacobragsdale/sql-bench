@@ -97,7 +97,14 @@ impl Default for Options {
             busy_timeout: BUSY_TIMEOUT,
             text_timeout: TEXT_TIMEOUT,
             connect: Vec::new(),
-            store: Store::from_env(),
+            // Only where `$SQL_BENCH_STATE_DIR` says, and otherwise nowhere:
+            // a script typing into the pads of whoever runs it would type
+            // over their work, and a frame that depends on it would differ.
+            store: Store::new(
+                std::env::var_os("SQL_BENCH_STATE_DIR")
+                    .filter(|value| !value.is_empty())
+                    .map(PathBuf::from),
+            ),
             max_rows: crate::db::model::QueryOptions::default()
                 .max_rows
                 .unwrap_or(10_000),
