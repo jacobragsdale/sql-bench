@@ -31,7 +31,7 @@ use ratatui::Terminal;
 use ratatui::backend::Backend;
 
 use crate::app::pointer::Hits;
-use crate::app::results::grouped;
+use crate::app::results::counted;
 use crate::app::{Action, App, SPIN_EVERY};
 use crate::cli::Cli;
 use crate::config::Config;
@@ -837,10 +837,13 @@ impl Driver {
         } else {
             export::csv(results.columns(), results.rows())
         };
-        let rows = grouped(results.rows().len());
+        let rows = counted(
+            u64::try_from(results.rows().len()).unwrap_or(u64::MAX),
+            "row",
+        );
         match std::fs::write(&path, text) {
             Ok(()) => {
-                app.shell.status = format!("exported {rows} rows to {}", path.display());
+                app.shell.status = format!("exported {rows} to {}", path.display());
             }
             Err(error) => {
                 app.shell.error = Some(format!("export failed: {error}"));
