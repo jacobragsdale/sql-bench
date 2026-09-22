@@ -60,6 +60,10 @@ pub struct Scratch {
     cursor: (usize, usize),
     /// Where a Shift-arrow selection started; the cursor is its other end.
     selection: Option<(usize, usize)>,
+    /// The first line and column the pane last showed, which it goes on
+    /// showing from for as long as the cursor is on it. A hint, because only
+    /// the renderer knows how tall the pane is: [`Scratch::window`] clamps it.
+    scroll: (usize, usize),
     /// The pad as it was when the burst that is being typed started.
     // ponytail: one snapshot, so Ctrl-Z takes back the last burst and no
     // more; an undo stack is the upgrade if anyone asks for a second Ctrl-Z.
@@ -85,6 +89,7 @@ impl Default for Scratch {
             lines: vec![String::new()],
             cursor: (0, 0),
             selection: None,
+            scroll: (0, 0),
             undo: None,
             goal: None,
             burst: false,
@@ -215,18 +220,84 @@ impl Scratch {
         Some(text)
     }
 
-    /// Where a pane `height` rows by `width` columns starts showing the pad
-    /// so that the cursor is on it: the first line and the first column.
-    // ponytail: derived from the cursor rather than remembered, so the view
-    // pins the cursor to the last row and column instead of scrolling by
-    // pages; keep an offset in the pad if that ever reads badly.
+    /// Where a pane `height` rows by `width` columns starts showing the pad:
+    /// where it last did, moved only as far as it takes to put the cursor on
+    /// it, and never so far down that rows are left empty under the last
+    /// line.
     #[must_use]
     pub fn window(&self, height: usize, width: usize) -> (usize, usize) {
+        let (height, width) = (height.max(1), width.max(1));
         let (line, column) = self.cursor;
         (
-            line.saturating_sub(height.max(1) - 1),
-            (column + 1).saturating_sub(width.max(1)),
+            self.scroll
+                .0
+                .min(line)
+                .max(line.saturating_sub(height - 1))
+                .min(self.lines.len().saturating_sub(height)),
+            self.scroll
+                .1
+                .min(column)
+                .max((column + 1).saturating_sub(width)),
         )
+    }
+
+    /// Show the pad from this line and column, the way a frame just did or a
+    /// click found it, so what the cursor does next moves the view from there.
+    pub const fn show_from(&mut self, top: usize, left: usize) {
+        self.scroll = (top, left);
+    }
+
+    /// A click: the cursor on this line and character, each clamped to the
+    /// text, keeping the selection's anchor when `extend`. A move, never an
+    /// edit, so it ends no undo burst and owes the disk nothing.
+    pub fn place(&mut self, (line, column): (usize, usize), extend: bool) {
+        let line = line.min(self.lines.len() - 1);
+        self.move_to((line, column.min(self.line_length(line))), extend);
+    }
+
+    /// A double-click: the run of letters, digits and underscores the cursor
+    /// is on, selected. Anywhere else there is no word, and nothing is.
+    pub fn select_word(&mut self) {
+        let (line, column) = self.cursor;
+        let characters: Vec<char> = self.lines[line].chars().collect();
+        let word = |at: usize| {
+            characters
+                .get(at)
+                .is_some_and(|character| character.is_alphanumeric() || *character == '_')
+        };
+        if !word(column) {
+            return;
+        }
+        let start = (0..column)
+            .rev()
+            .take_while(|at| word(*at))
+            .last()
+            .unwrap_or(column);
+        let end = (column..characters.len())
+            .find(|at| !word(*at))
+            .unwrap_or(characters.len());
+        self.move_to((line, start), false);
+        self.move_to((line, end), true);
+    }
+
+    /// The wheel over a pane `rows` high that showed the pad from `top` and
+    /// `left`: `by` lines further, and the cursor pulled along just far
+    /// enough to stay on it, the way vim's Ctrl-E does, with the selection
+    /// growing if there is one.
+    // ponytail: the cursor is pulled along because `window` clamps the view
+    // to it; truly free scrolling needs viewport heights in the app.
+    pub fn wheel(&mut self, (top, left): (usize, usize), rows: usize, by: isize) {
+        let rows = rows.max(1);
+        let top = top
+            .saturating_add_signed(by)
+            .min(self.lines.len().saturating_sub(rows));
+        self.scroll = (top, left);
+        let line = self.cursor.0.clamp(top, top + rows - 1);
+        if line != self.cursor.0 {
+            let rows = isize::try_from(line).unwrap_or(isize::MAX)
+                - isize::try_from(self.cursor.0).unwrap_or(isize::MAX);
+            self.move_rows(rows, self.selection.is_some());
+        }
     }
 
     /// One key. Everything that is not the pad's own is [`Outcome::Unchanged`],
@@ -1137,6 +1208,73 @@ select v from dual";
             (1, 180),
             "and a long line scrolls sideways"
         );
+    }
+
+    #[test]
+    fn the_window_stays_where_it_was_shown_from_while_the_cursor_is_on_it() {
+        let mut scratch = Scratch::new(
+            &(0..40)
+                .map(|n| format!("line {n}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        scratch.show_from(20, 0);
+        scratch.cursor = (25, 0);
+        assert_eq!(scratch.window(6, 20), (20, 0), "on it, so it stays");
+        scratch.cursor = (26, 0);
+        assert_eq!(scratch.window(6, 20), (21, 0), "one past, one down");
+        scratch.cursor = (19, 0);
+        assert_eq!(scratch.window(6, 20), (19, 0), "one above, one up");
+        scratch.show_from(38, 0);
+        scratch.cursor = (39, 0);
+        assert_eq!(scratch.window(6, 20), (34, 0), "no rows under the last");
+    }
+
+    #[test]
+    fn a_word_is_letters_digits_and_underscores_and_a_click_is_clamped_to_the_text() {
+        let mut scratch = Scratch::new("select order_id, x2 from t\nend");
+        scratch.place((0, 9), false);
+        scratch.select_word();
+        assert_eq!(scratch.selected_text().as_deref(), Some("order_id"));
+        scratch.place((0, 18), false);
+        scratch.select_word();
+        assert_eq!(scratch.selected_text().as_deref(), Some("x2"));
+        for (at, why) in [(15, "a comma"), (6, "a space"), (99, "past the end")] {
+            scratch.place((0, at), false);
+            scratch.select_word();
+            assert_eq!(scratch.selected_text(), None, "{why}");
+        }
+        assert_eq!(scratch.cursor(), (0, 26));
+        scratch.place((9, 9), false);
+        assert_eq!(scratch.cursor(), (1, 3));
+    }
+
+    #[test]
+    fn the_wheel_moves_the_view_and_the_cursor_only_as_far_as_it_has_to() {
+        let mut scratch = Scratch::new(
+            &(0..20)
+                .map(|n| format!("line {n}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        scratch.cursor = (2, 4);
+        scratch.wheel((0, 0), 6, 3);
+        assert_eq!((scratch.window(6, 20), scratch.cursor), ((3, 0), (3, 4)));
+        scratch.wheel((3, 0), 6, -3);
+        assert_eq!((scratch.window(6, 20), scratch.cursor), ((0, 0), (3, 4)));
+        scratch.wheel((12, 0), 6, 3);
+        assert_eq!(
+            scratch.window(6, 20),
+            (14, 0),
+            "the last line at the bottom"
+        );
+
+        // With a selection the cursor drags its end along.
+        scratch.place((14, 0), false);
+        scratch.place((14, 2), true);
+        scratch.wheel((14, 0), 6, -12);
+        assert_eq!(scratch.selection(), Some(((7, 2), (14, 0))));
+        assert!(!scratch.modified(), "scrolling is not an edit");
     }
 
     #[test]

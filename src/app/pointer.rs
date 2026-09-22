@@ -32,6 +32,13 @@ pub enum Target {
     /// focuses `pane` and presses `key`, so a button can do nothing a key
     /// cannot.
     Button { pane: Focus, key: KeyEvent },
+    /// The scratch pad's text, gutter included, drawn from line `top` and
+    /// character `left`; the text starts `gutter` cells in.
+    Pad {
+        top: usize,
+        left: usize,
+        gutter: usize,
+    },
     /// The text of the export prompt, starting at the region's left edge.
     PromptText,
     /// The body of the open help or inspector, whichever is on top.
@@ -160,11 +167,27 @@ impl App {
                     button,
                     left: false,
                 });
+                // The cursor goes down with the button, so a drag has an
+                // anchor to select from.
+                if let Some(region @ (_, Target::Pad { .. })) = hits.at(position) {
+                    self.pad_point(
+                        region,
+                        position,
+                        mouse.modifiers.contains(KeyModifiers::SHIFT),
+                    );
+                }
                 Vec::new()
             }
-            // Nothing is dragged anywhere yet: what a drag does is decided
-            // here, by what was pressed, once pad text, seams and scrollbar
-            // thumbs are targets of their own.
+            MouseEventKind::Drag(MouseButton::Left)
+                if self.shell.mouse.press.is_some_and(|press| {
+                    press.button == MouseButton::Left
+                        && matches!(press.spot.target, Target::Pad { .. })
+                }) =>
+            {
+                self.pad_drag(position, hits)
+            }
+            // A drag off anything but the pad's text does nothing; seams and
+            // scrollbar thumbs will get arms of their own above this one.
             MouseEventKind::Drag(_) | MouseEventKind::Moved => {
                 if let Some(press) = self.shell.mouse.press.as_mut() {
                     press.left |= spot != Some(press.spot);
@@ -183,6 +206,16 @@ impl App {
                 }
                 _ => Vec::new(),
             },
+            MouseEventKind::ScrollDown | MouseEventKind::ScrollUp
+                if spot.is_some_and(|spot| matches!(spot.target, Target::Pad { .. })) =>
+            {
+                let by = if mouse.kind == MouseEventKind::ScrollDown {
+                    WHEEL
+                } else {
+                    -WHEEL
+                };
+                self.pad_wheel(hits.at(position), by)
+            }
             MouseEventKind::ScrollDown => self.wheel(spot, WHEEL),
             MouseEventKind::ScrollUp => self.wheel(spot, -WHEEL),
             _ => Vec::new(),
@@ -191,9 +224,9 @@ impl App {
 
     /// A click, acted on the target that was pressed.
     ///
-    /// Nothing drawn yet means anything different on a second click, so
-    /// `_double` is only passed on; tree rows and grid cells will read it.
-    fn click(&mut self, target: Target, column: u16, _double: bool) -> Vec<Action> {
+    /// A second click selects a word in the pad; tree rows and grid cells
+    /// will read `double` too.
+    fn click(&mut self, target: Target, column: u16, double: bool) -> Vec<Action> {
         if let Target::Pane(Focus::Objects)
         | Target::Button {
             pane: Focus::Objects,
@@ -215,6 +248,14 @@ impl App {
                 }
                 self.shell.focus = pane;
                 return self.key(key);
+            }
+            // The cursor went where the button went down, so all a click
+            // adds is the focus, and a double-click the word.
+            Target::Pad { .. } => {
+                self.shell.focus = Focus::Scratch;
+                if double && let Some(tab) = self.tabs.get_mut(self.shell.active_tab) {
+                    tab.scratch.select_word();
+                }
             }
             Target::PromptText => {
                 if let Some(prompt) = self.shell.prompt.as_mut() {
@@ -246,6 +287,71 @@ impl App {
         {
             tab.objects
                 .key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        }
+    }
+
+    /// The pad drawn in `region`: the cursor to the line and character at
+    /// `position`, from the window the frame drew so the view stays put.
+    /// Above or below the pad is the line just past its edge, so a drag out
+    /// of it scrolls a line each time it moves; left of the text is column 0.
+    fn pad_point(&mut self, (rect, target): (Rect, Target), position: Position, extend: bool) {
+        let (Target::Pad { top, left, gutter }, Some(tab)) =
+            (target, self.tabs.get_mut(self.shell.active_tab))
+        else {
+            return;
+        };
+        let line = if position.y < rect.y {
+            top.saturating_sub(1)
+        } else if position.y >= rect.bottom() {
+            top + usize::from(rect.height)
+        } else {
+            top + usize::from(position.y - rect.y)
+        };
+        let x = usize::from(position.x.saturating_sub(rect.x));
+        let column = if x < gutter { 0 } else { left + x - gutter };
+        tab.scratch.show_from(top, left);
+        tab.scratch.place((line, column), extend);
+    }
+
+    /// A press on the pad dragged: the selection from where it went down to
+    /// wherever the pointer is now, measured against the pad as the last
+    /// frame drew it, which may have scrolled since the press.
+    fn pad_drag(&mut self, position: Position, hits: &Hits) -> Vec<Action> {
+        if let Some(press) = self.shell.mouse.press.as_mut() {
+            // A drag is never a click, even one that ends where it began.
+            press.left = true;
+        }
+        self.shell.focus = Focus::Scratch;
+        if let Some(region) = hits
+            .regions()
+            .find(|(_, target)| matches!(target, Target::Pad { .. }))
+        {
+            self.pad_point(region, position, true);
+        }
+        Vec::new()
+    }
+
+    /// The wheel over the pad, from the window the frame drew.
+    fn pad_wheel(&mut self, region: Option<(Rect, Target)>, by: isize) -> Vec<Action> {
+        if let (Some((rect, Target::Pad { top, left, .. })), Some(tab)) =
+            (region, self.tabs.get_mut(self.shell.active_tab))
+        {
+            tab.scratch.wheel((top, left), usize::from(rect.height), by);
+        }
+        Vec::new()
+    }
+
+    /// What the last frame showed of the pad is where it goes on showing
+    /// from, so a key that moves the cursor around inside the view leaves
+    /// the view where it is. The run loop calls this after every draw,
+    /// because only the renderer knows how tall the pad is.
+    pub fn drawn(&mut self, hits: &Hits) {
+        if let Some((_, Target::Pad { top, left, .. })) = hits
+            .regions()
+            .find(|(_, target)| matches!(target, Target::Pad { .. }))
+            && let Some(tab) = self.tabs.get_mut(self.shell.active_tab)
+        {
+            tab.scratch.show_from(top, left);
         }
     }
 

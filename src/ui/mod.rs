@@ -281,17 +281,19 @@ fn scratch_pane(frame: &mut Frame, app: &App, theme: &Theme, area: Rect, hits: &
         return;
     }
     frame.render_widget(
-        Paragraph::new(scratch_lines(scratch, theme, inner, focused)),
+        Paragraph::new(scratch_lines(scratch, theme, inner, focused, hits)),
         inner,
     );
 }
 
-/// The rows of the pad that are on screen, gutter and all.
+/// The rows of the pad that are on screen, gutter and all, and the window
+/// they were drawn from for a click to land in.
 fn scratch_lines(
     scratch: &Scratch,
     theme: &Theme,
     area: Rect,
     focused: bool,
+    hits: &mut Hits,
 ) -> Vec<Line<'static>> {
     let height = usize::from(area.height);
     let lines = scratch.lines();
@@ -299,6 +301,14 @@ fn scratch_lines(
     // The gutter is the widest number and the space after it.
     let width = usize::from(area.width).saturating_sub(digits + 1).max(1);
     let (top, left) = scratch.window(height, width);
+    hits.push(
+        area,
+        Target::Pad {
+            top,
+            left,
+            gutter: digits + 1,
+        },
+    );
     let (cursor_line, cursor_column) = scratch.cursor();
     let selection = scratch.selection();
     let flagged = scratch.flagged();
