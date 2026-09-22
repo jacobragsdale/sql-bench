@@ -336,8 +336,22 @@ how the app still sees no terminal and reads no clock.
   notch. The tree's and the grid's cursors come along only as far as they
   must to stay in view, because the app's window is a hint clamped round
   the cursor.
-- A drag selects on pad text, scrolls on a scrollbar's thumb, and does
-  nothing anywhere else.
+- A drag selects on pad text, scrolls on a scrollbar's thumb, moves a seam,
+  and does nothing anywhere else.
+- Two seams move: the left border of Scratch and Results (Objects' right
+  border is its scrollbar), and Scratch's bottom border. `shell.split` keeps
+  Objects' share of the width and Scratch's of the right-hand column in
+  percent, 30 and 40 to start with, so a resize keeps the proportions.
+  `Split::areas` lays the panes out and leaves Objects and the right column
+  at least 20 columns, Scratch and Results at least 3 rows, at every size, so
+  a split made on a big screen survives a small one; a 60-column screen gets
+  a 20-column Objects rather than 30 % of it. A `Target::Seam` carries the
+  area it divides, which turns the pointer back into a percent. It is pushed
+  after the panes and before what they draw on their borders, so title
+  buttons stay on top. A held seam is lit in the accent colour on the hover
+  ground wherever the pointer goes, and a drag draws a frame only when the
+  split changes. A click on a seam does nothing and focuses neither side; a
+  double-click puts 30/40 back. The split is not saved between runs.
 - The tree, the grid's rows, the pad and an object's source get a scrollbar
   over their pane's right border, between its corners, while there is more
   than fits. The track keeps the border's glyph and the thumb is `┃`, so it
@@ -371,7 +385,8 @@ how the app still sees no terminal and reads no clock.
   the way Esc does, and reaches nothing under it.
 - What the pointer rests on is painted in the theme's hover style, restyled
   over the finished frame from the same hits a click reads. Only things that
-  are there to be clicked light up: a tab, a button or a thumb, not a pane.
+  are there to be clicked light up: a tab, a button, a thumb or a seam, not
+  a pane.
 
 A press paints nothing, and the pointer moving costs a frame only when the
 target or row under it changes, so resting the mouse on the app costs one

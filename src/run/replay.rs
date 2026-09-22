@@ -965,6 +965,28 @@ mod tests {
     }
 
     #[test]
+    fn a_drag_moves_a_seam() {
+        let directory = tempfile::tempdir().expect("a directory");
+        let code = run(
+            "drag 36 10 50 10\n\
+             frame dragged\n\
+             key q\n",
+            two_tabs(),
+            &options(directory.path()),
+        );
+        assert_eq!(code, OK);
+        let written =
+            std::fs::read_to_string(directory.path().join("dragged.txt")).expect("a frame");
+        let top = written.lines().nth(2).expect("the panes' top row");
+        assert_eq!(top.chars().position(|c| c == '╭'), Some(0), "{written}");
+        assert_eq!(
+            top.chars().skip(1).position(|c| c == '╭'),
+            Some(49),
+            "Scratch starts at column 50: {written}"
+        );
+    }
+
+    #[test]
     fn a_config_with_no_connections_replays_too() {
         let directory = tempfile::tempdir().expect("a directory");
         let code = run(

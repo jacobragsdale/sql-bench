@@ -10,7 +10,7 @@ use std::ops::Range;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-use ratatui::layout::{Position, Rect};
+use ratatui::layout::{Constraint, Layout, Position, Rect};
 
 use super::{Action, App, Focus};
 
@@ -65,6 +65,9 @@ pub enum Target {
         viewport: usize,
         track: Rect,
     },
+    /// A border between panes, dividing `area`: dragging it moves the
+    /// split, and a double-click puts it back.
+    Seam { seam: Seam, area: Rect },
     /// The text of the export prompt, starting at the region's left edge.
     PromptText,
     /// The body of the open help or inspector, whichever is on top.
@@ -81,9 +84,82 @@ impl Target {
     pub const fn hovers(self) -> bool {
         matches!(
             self,
-            Self::Tab(_) | Self::Button { .. } | Self::Thumb { .. }
+            Self::Tab(_) | Self::Button { .. } | Self::Thumb { .. } | Self::Seam { .. }
         )
     }
+}
+
+/// The two borders a drag can move, named for the share of [`Split`] each
+/// one sets.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Seam {
+    /// The left border of Scratch and Results, over the height of the body.
+    /// Objects' own right border is its scrollbar's.
+    Objects,
+    /// Scratch's bottom border, across the right-hand column.
+    Scratch,
+}
+
+// ponytail: for the session only; save it in the state dir if anyone asks.
+/// How much of the screen Objects has, and of the right-hand column Scratch
+/// has, in percent, so a resize keeps the proportions.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Split {
+    pub objects: u16,
+    pub scratch: u16,
+}
+
+impl Default for Split {
+    fn default() -> Self {
+        Self {
+            objects: 30,
+            scratch: 40,
+        }
+    }
+}
+
+/// The narrowest Objects and the right-hand column get, and the shortest
+/// Scratch and Results: a title and a row.
+const NARROWEST: u16 = 20;
+const SHORTEST: u16 = 3;
+
+impl Split {
+    /// Objects, Scratch and Results in `body`. The least each gets holds at
+    /// every size rather than only when the seam was dragged, so a split
+    /// made on a big screen still leaves every pane a pane after it shrinks.
+    #[must_use]
+    pub fn areas(self, body: Rect) -> [Rect; 3] {
+        let [objects, right] = Layout::horizontal([
+            Constraint::Length(share(self.objects, body.width, NARROWEST)),
+            Constraint::Fill(1),
+        ])
+        .areas(body);
+        let [scratch, results] = Layout::vertical([
+            Constraint::Length(share(self.scratch, right.height, SHORTEST)),
+            Constraint::Fill(1),
+        ])
+        .areas(right);
+        [objects, scratch, results]
+    }
+}
+
+/// `percent` of `total` cells, rounded, leaving `least` either side.
+fn share(percent: u16, total: u16, least: u16) -> u16 {
+    let cells = (u32::from(total) * u32::from(percent) + 50) / 100;
+    u16::try_from(cells)
+        .unwrap_or(total)
+        .min(total.saturating_sub(least))
+        .max(least)
+}
+
+/// [`share`] turned round: the percent that draws `cells` of `total`, once
+/// they leave `least` either side. Clamped first, so dragging on past the
+/// limit is the same percent and draws nothing new.
+// ponytail: whole percents, so past 100 cells a seam moves two at a time;
+// per-mille if anyone minds.
+fn percent(cells: u16, total: u16, least: u16) -> u16 {
+    let cells = u32::from(cells.min(total.saturating_sub(least)).max(least));
+    u16::try_from((cells * 100 + u32::from(total) / 2) / u32::from(total.max(1))).unwrap_or(100)
 }
 
 /// The cells of a `track` long scrollbar the thumb covers, `offset` rows
@@ -199,6 +275,24 @@ struct Click {
 }
 
 impl Mouse {
+    /// The seam the left button is holding, which stays lit however far the
+    /// pointer outruns it.
+    #[must_use]
+    pub fn seam(&self) -> Option<Seam> {
+        match self.press? {
+            Press {
+                spot:
+                    Spot {
+                        target: Target::Seam { seam, .. },
+                        ..
+                    },
+                button: MouseButton::Left,
+                ..
+            } => Some(seam),
+            _ => None,
+        }
+    }
+
     /// Note a click on `spot` at `now`, and say whether it was the second of
     /// a double-click. A double uses up both clicks, so three in a row are a
     /// double and a single, never two doubles.
@@ -257,8 +351,11 @@ impl App {
             {
                 self.thumb_drag(position, hits)
             }
-            // A drag off anything but the pad's text or a thumb does
-            // nothing; seams will get an arm of their own above this one.
+            MouseEventKind::Drag(MouseButton::Left) if self.shell.mouse.seam().is_some() => {
+                self.seam_drag(position)
+            }
+            // A drag off anything but the pad's text, a thumb or a seam does
+            // nothing.
             MouseEventKind::Drag(_) | MouseEventKind::Moved => {
                 if let Some(press) = self.shell.mouse.press.as_mut() {
                     press.left |= spot != Some(press.spot);
@@ -355,8 +452,12 @@ impl App {
                     self.shell.inspector = None;
                 }
             }
-            // A thumb is for dragging, and pressed and let go is nothing.
-            Target::Tab(_) | Target::Overlay | Target::Thumb { .. } => {}
+            // A seam belongs to neither pane either side of it, so a click
+            // focuses neither; a double-click is the way back to the start.
+            Target::Seam { .. } if double => self.shell.split = Split::default(),
+            // A thumb or a seam is for dragging, and pressed and let go is
+            // nothing.
+            Target::Tab(_) | Target::Overlay | Target::Thumb { .. } | Target::Seam { .. } => {}
         }
         Vec::new()
     }
@@ -474,6 +575,34 @@ impl App {
                 tab.results.wheel_source(top, 0, viewport);
             }
             Focus::Results => tab.results.wheel(top, 0, viewport),
+        }
+        Vec::new()
+    }
+
+    /// A seam dragged: the border to the pointer, measured in the area the
+    /// press found it dividing, as near as a whole percent draws it.
+    fn seam_drag(&mut self, position: Position) -> Vec<Action> {
+        let Some(press) = self.shell.mouse.press.as_mut() else {
+            return Vec::new();
+        };
+        press.left = true;
+        let Target::Seam { seam, area } = press.spot.target else {
+            return Vec::new();
+        };
+        let split = &mut self.shell.split;
+        match seam {
+            // The seam is the first column right of Objects.
+            Seam::Objects => {
+                split.objects = percent(position.x.saturating_sub(area.x), area.width, NARROWEST);
+            }
+            // The seam is Scratch's last row.
+            Seam::Scratch => {
+                split.scratch = percent(
+                    (position.y + 1).saturating_sub(area.y),
+                    area.height,
+                    SHORTEST,
+                );
+            }
         }
         Vec::new()
     }
@@ -601,6 +730,21 @@ mod tests {
         assert_eq!(thumb(27, 40, 13, 13), 9..13);
         assert_eq!(thumb(0, 5, 10, 10), 0..10, "all of it fits");
         assert_eq!(thumb(0, 100, 10, 0), 0..0, "no track");
+    }
+
+    #[test]
+    fn a_seam_dragged_to_a_cell_is_drawn_there_up_to_a_hundred_cells() {
+        for (total, least) in [(40, 20), (60, 20), (100, 20), (13, 3), (58, 3)] {
+            for cells in least..=total - least {
+                assert_eq!(
+                    share(percent(cells, total, least), total, least),
+                    cells,
+                    "{cells} of {total}"
+                );
+            }
+            assert_eq!(share(percent(0, total, least), total, least), least);
+            assert_eq!(share(100, total, least), total - least);
+        }
     }
 
     #[test]

@@ -320,6 +320,17 @@ fn the_pointer_resting_on_one_cell_costs_one_frame_and_a_press_costs_none() {
 }
 
 #[test]
+fn a_seam_dragged_past_where_it_stops_costs_no_more_frames() {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    let left = MouseButton::Left;
+    // Objects' seam at 120x40 is column 36, and it stops at column 20: the
+    // first drag moves it there and the other nineteen are past it.
+    let mut events = vec![mouse(MouseEventKind::Down(left), 36, 10)];
+    events.extend((0..20).map(|x| mouse(MouseEventKind::Drag(left), x, 10)));
+    assert_eq!(frames_for(events), 2, "the first frame and the one move");
+}
+
+#[test]
 fn a_click_behind_a_key_that_changed_the_layout_lands_on_the_new_layout() {
     use crossterm::event::{MouseButton, MouseEventKind};
     let left = MouseButton::Left;

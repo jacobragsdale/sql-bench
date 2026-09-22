@@ -15,7 +15,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::pointer::{Hits, Target, thumb};
+use crate::app::pointer::{Hits, Seam, Target, thumb};
 use crate::app::prompt::Prompt;
 use crate::app::results::{INSPECT_WIDTH, Inspector, inspect_title};
 use crate::app::scratch::Scratch;
@@ -74,16 +74,34 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) -> Hits {
         Constraint::Length(1),
     ])
     .areas(area);
-    let [objects, right] =
-        Layout::horizontal([Constraint::Percentage(30), Constraint::Min(20)]).areas(body);
-    let [scratch, results] =
-        Layout::vertical([Constraint::Percentage(40), Constraint::Min(3)]).areas(right);
+    let [objects, scratch, results] = app.shell.split.areas(body);
+    let right = scratch.union(results);
 
     tab_bar(frame, app, theme, bar, &mut hits);
     // Under the buttons each pane draws over itself.
     hits.push(objects, Target::Pane(Focus::Objects));
     hits.push(scratch, Target::Pane(Focus::Scratch));
     hits.push(results, Target::Pane(Focus::Results));
+    // The seams go over the panes' borders and under whatever the panes
+    // draw on them after.
+    hits.push(
+        Rect { width: 1, ..right },
+        Target::Seam {
+            seam: Seam::Objects,
+            area: body,
+        },
+    );
+    hits.push(
+        Rect {
+            y: scratch.bottom().saturating_sub(1),
+            height: 1,
+            ..scratch
+        },
+        Target::Seam {
+            seam: Seam::Scratch,
+            area: right,
+        },
+    );
     objects::render(frame, app, theme, objects, &mut hits);
     scratch_pane(frame, app, theme, scratch, &mut hits);
     results::render(frame, app, theme, results, &mut hits);
@@ -112,11 +130,25 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) -> Hits {
 /// What is under the pointer, restyled last so it sits over everything —
 /// and read from the same hits a click is, so what lights up is exactly what
 /// a click there would act on.
+///
+/// A seam is lit in the accent colour on the hover's ground, which shows
+/// even over a focused pane's border, and it stays lit while it is held
+/// however far the pointer has outrun it.
 fn hover(frame: &mut Frame, app: &App, theme: &Theme, hits: &Hits) {
-    if let Some((rect, target)) = app.shell.mouse.pointer.and_then(|at| hits.at(at))
-        && target.hovers()
-    {
-        frame.buffer_mut().set_style(rect, theme.hover);
+    let held = app.shell.mouse.seam().and_then(|held| {
+        hits.regions()
+            .find(|(_, target)| matches!(target, Target::Seam { seam, .. } if *seam == held))
+    });
+    let Some((rect, target)) = held.or_else(|| app.shell.mouse.pointer.and_then(|at| hits.at(at)))
+    else {
+        return;
+    };
+    match target {
+        Target::Seam { .. } => frame
+            .buffer_mut()
+            .set_style(rect, theme.hover.patch(theme.accent)),
+        _ if target.hovers() => frame.buffer_mut().set_style(rect, theme.hover),
+        _ => {}
     }
 }
 

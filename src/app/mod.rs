@@ -412,6 +412,8 @@ pub struct Shell {
     pub clipboard: String,
     /// Where the pointer is and what a button held down is pressing.
     pub mouse: pointer::Mouse,
+    /// Where the seams between the panes are.
+    pub split: pointer::Split,
     /// When that frame went up. The clock comes from the caller, so this
     /// module still reads none of its own.
     spun_at: Option<Instant>,
