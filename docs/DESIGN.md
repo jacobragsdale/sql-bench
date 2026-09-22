@@ -208,16 +208,26 @@ budget, not just a constant.
 `Ctrl-R` runs the statement the cursor is in; `F5` runs every statement in the
 pad. Both go through `Scratch::statements`, which walks the lines once:
 
-- A line ending in `;` ends the statement, and the `;` goes with it.
+- A line ending in `;` ends the statement, and the `;` goes with it; a
+  trailing `--` comment after the `;` does not hide it.
 - A line that is exactly `GO` ends it on SQL Server, a line that is exactly
   `/` ends it on Oracle. Case is ignored; the terminator line is not part of
   the statement.
 - A blank line ends it.
 - The end of the pad ends it.
-- `declare` or `begin` at the start of a line opens a block, and only the
-  `end` that closes it ends the statement — so the semicolons inside a PL/SQL
-  body do not split it, and neither does a blank line inside it. Words are
-  matched whatever their case.
+- `begin` at the start of a line opens a block (`begin tran` does not), and
+  only the `end` that closes it ends the statement — so the semicolons inside
+  a PL/SQL body do not split it, and neither does a blank line inside it. On
+  Oracle `declare`, and a `create` of a procedure, function, trigger, package
+  or type body, open one too; a package or type body counts as its own
+  `begin`, since its `end` has none. Words are matched whatever their case.
+- On SQL Server a `declare`, or a `create` of a procedure, function or
+  trigger, ignores its semicolons and runs on to the next blank line or `GO`:
+  a variable lives as long as its batch, and so does a procedure's body.
+- Oracle runs one statement per call, so outside a block a statement is also
+  cut at every `;` that is not in a quote or a comment — `select 1 from dual;
+  select 2 from dual` on one line is two. Both keep that line's range, so
+  `Ctrl-R` there runs the first.
 - A statement is trimmed, and an empty one is never emitted.
 
 Each statement carries the range of lines it came from, which is what lets a

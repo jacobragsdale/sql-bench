@@ -441,22 +441,32 @@ impl Scratch {
     ///
     /// A statement ends at a line ending in `;`, at a `GO` of its own for SQL
     /// Server, at a `/` of its own for Oracle, at a blank line, or at the end
-    /// of the pad. `begin`/`declare` open a block whose `end` closes it, so
-    /// the semicolons inside a PL/SQL block do not split it; the words are
-    /// matched whatever their case.
+    /// of the pad. `begin` (and on Oracle `declare`, or a `create` of a
+    /// procedure, function, package, trigger or type body) opens a block
+    /// whose `end` closes it, so the semicolons inside a PL/SQL block do not
+    /// split it. On SQL Server a `declare` or a `create` of a procedure,
+    /// function or trigger runs on to the next blank line or `GO` instead,
+    /// because its variables and its body live as long as the batch. Oracle
+    /// runs one statement per call, so outside a block its lines are also cut
+    /// at every `;` that is not in a quote or a comment. The words are matched
+    /// whatever their case.
+    // ponytail: line-based, so a `;` or blank line inside a multi-line string
+    // literal still splits, and in PL/SQL a `case` expression's `end;` on a
+    // line of its own counts as the block's; a real tokenizer if either bites.
+    // Two Oracle statements on one line share its range, so `Ctrl-R` runs
+    // the first; a column in the range if that matters.
     #[must_use]
     pub fn statements(&self, kind: Kind) -> Vec<(String, Range<usize>)> {
-        let mut statements: Vec<(String, Range<usize>)> = Vec::new();
+        // Each statement's lines, and whether it opened a block or a batch.
+        let mut spans: Vec<(Range<usize>, bool)> = Vec::new();
         let mut start: Option<usize> = None;
         let mut depth = 0usize;
         let mut block = false;
-        let mut flush = |start: &mut Option<usize>, end: usize, lines: &[String]| {
-            let Some(from) = start.take() else {
-                return;
-            };
-            let text = lines[from..end].join("\n").trim().to_owned();
-            if !text.is_empty() {
-                statements.push((text, from..end));
+        let mut batch = false;
+        let mut opened = false;
+        let mut flush = |start: &mut Option<usize>, end: usize, opened: bool| {
+            if let Some(from) = start.take() {
+                spans.push((from..end, opened));
             }
         };
         for (number, line) in self.lines.iter().enumerate() {
@@ -467,39 +477,73 @@ impl Scratch {
                 Kind::Oracle => trimmed == "/",
             };
             if terminator {
-                flush(&mut start, number, &self.lines);
-                (depth, block) = (0, false);
+                flush(&mut start, number, opened);
+                (depth, block, batch) = (0, false, false);
                 continue;
             }
             if trimmed.is_empty() {
                 if depth == 0 && !block {
-                    flush(&mut start, number, &self.lines);
+                    flush(&mut start, number, opened);
+                    batch = false;
                 }
                 continue;
             }
             if start.is_none() {
                 start = Some(number);
+                opened = false;
+            }
+            match (kind, program(&lower)) {
+                (Kind::Oracle, Some("package" | "type body")) => {
+                    // A package or a type body has an `end` and no `begin`.
+                    block = true;
+                    depth += 1;
+                }
+                (Kind::Oracle, Some("procedure" | "function" | "trigger")) => block = true,
+                (Kind::Mssql, Some("procedure" | "function" | "trigger")) => batch = true,
+                _ => {}
             }
             if starts_word(&lower, "declare") {
-                block = true;
+                match kind {
+                    Kind::Oracle => block = true,
+                    Kind::Mssql => batch = true,
+                }
             }
-            if starts_word(&lower, "begin") {
+            if starts_word(&lower, "begin") && !begins_transaction(&lower) {
                 block = true;
                 depth += 1;
             }
+            opened |= block || batch;
+            let code = code_of(&lower);
             let closing = closes_block(&lower);
             if closing {
                 depth = depth.saturating_sub(1);
+                // T-SQL's `end` needs no `;`, so the block is over either way
+                // and the next blank line may end the statement.
+                block &= depth > 0 || code.ends_with(';');
             }
             // Inside a block only the `end` that closes it ends the
             // statement, however many semicolons the body has.
-            if lower.ends_with(';') && depth == 0 && (!block || closing) {
-                flush(&mut start, number + 1, &self.lines);
+            if code.ends_with(';') && depth == 0 && !batch && (!block || closing) {
+                flush(&mut start, number + 1, opened);
                 block = false;
             }
         }
-        flush(&mut start, self.lines.len(), &self.lines);
-        statements
+        flush(&mut start, self.lines.len(), opened);
+        spans
+            .into_iter()
+            .flat_map(|(range, opened)| {
+                let text = self.lines[range.clone()].join("\n").trim().to_owned();
+                let pieces = if kind == Kind::Oracle && !opened {
+                    split_semicolons(&text)
+                } else {
+                    vec![text]
+                };
+                pieces
+                    .into_iter()
+                    .filter(|piece| !piece.is_empty())
+                    .map(move |piece| (piece, range.clone()))
+            })
+            .collect()
     }
 
     fn undo(&mut self) -> Outcome {
@@ -775,6 +819,103 @@ fn starts_word(lower: &str, word: &str) -> bool {
             .next()
             .is_none_or(|character| !character.is_alphanumeric() && character != '_')
     })
+}
+
+/// What a `create [or replace] [editionable]` line creates, if it is a
+/// program: `procedure`, `function`, `trigger`, `package` (spec or body) or
+/// `type body`.
+fn program(lower: &str) -> Option<&'static str> {
+    let mut words = lower
+        .split(|character: char| !character.is_alphanumeric() && character != '_')
+        .filter(|word| !word.is_empty())
+        .skip_while(|word| {
+            ["create", "or", "replace", "editionable", "noneditionable"].contains(word)
+        });
+    if !starts_word(lower, "create") {
+        return None;
+    }
+    match (words.next()?, words.next()) {
+        ("procedure", _) => Some("procedure"),
+        ("function", _) => Some("function"),
+        ("trigger", _) => Some("trigger"),
+        ("package", _) => Some("package"),
+        ("type", Some("body")) => Some("type body"),
+        _ => None,
+    }
+}
+
+/// `begin tran` and its spellings start a transaction, not a block, and
+/// have no `end` to wait for.
+fn begins_transaction(lower: &str) -> bool {
+    let next = lower["begin".len()..].trim_start();
+    ["tran", "transaction", "distributed"]
+        .iter()
+        .any(|word| starts_word(next, word))
+}
+
+/// The line without a trailing `--` comment, so `select 1; -- why` still
+/// ends at its semicolon.
+fn code_of(line: &str) -> &str {
+    let mut quoted = false;
+    let mut previous = ' ';
+    for (at, character) in line.char_indices() {
+        match character {
+            '\'' => quoted = !quoted,
+            '-' if !quoted && previous == '-' => return line[..at - 1].trim_end(),
+            _ => {}
+        }
+        previous = character;
+    }
+    line
+}
+
+/// One statement's text cut at every `;` outside a quote or a comment, the
+/// `;` going with what it ends. A trailing comment stays with the statement
+/// before it rather than being sent on its own.
+fn split_semicolons(text: &str) -> Vec<String> {
+    /// Copies characters until what was copied ends with `end`.
+    fn until(chars: &mut std::str::Chars<'_>, piece: &mut String, end: &str) {
+        let from = piece.len();
+        for character in chars.by_ref() {
+            piece.push(character);
+            if piece[from..].ends_with(end) {
+                return;
+            }
+        }
+    }
+    let mut pieces: Vec<String> = Vec::new();
+    let mut piece = String::new();
+    let mut code = false;
+    let mut chars = text.chars();
+    while let Some(character) = chars.next() {
+        piece.push(character);
+        let next = chars.clone().next();
+        match character {
+            '\'' | '"' => {
+                code = true;
+                until(&mut chars, &mut piece, &character.to_string());
+            }
+            '-' if next == Some('-') => until(&mut chars, &mut piece, "\n"),
+            '/' if next == Some('*') => {
+                piece.push('*');
+                chars.next();
+                until(&mut chars, &mut piece, "*/");
+            }
+            ';' if code => {
+                pieces.push(piece.trim().to_owned());
+                piece.clear();
+                code = false;
+            }
+            ';' => {}
+            character if !character.is_whitespace() => code = true,
+            _ => {}
+        }
+    }
+    match pieces.last_mut() {
+        Some(last) if !code => last.push_str(piece.trim_end()),
+        _ => pieces.push(piece.trim().to_owned()),
+    }
+    pieces
 }
 
 /// Whether this line closes a `begin`. `end if`, `end loop` and `end case`
@@ -1272,6 +1413,85 @@ select v from dual";
             split("select beginning, ending from t;", Kind::Oracle),
             ["select beginning, ending from t;"],
             "a word that starts with begin is not a begin"
+        );
+    }
+
+    #[test]
+    fn a_tsql_transaction_or_declare_does_not_swallow_the_rest_of_the_pad() {
+        assert_eq!(
+            split(
+                "begin tran;\nupdate t set a = 1;\ncommit;\n\nselect 1;\n\nselect 2;",
+                Kind::Mssql
+            ),
+            [
+                "begin tran;",
+                "update t set a = 1;",
+                "commit;",
+                "select 1;",
+                "select 2;"
+            ],
+            "begin tran opens a transaction, not a block"
+        );
+        assert_eq!(
+            split(
+                "declare @x int = 1;\nselect @x;\n\nselect 2;\n\nselect 3;",
+                Kind::Mssql
+            ),
+            ["declare @x int = 1;\nselect @x;", "select 2;", "select 3;"],
+            "a declare keeps its batch together up to the blank line"
+        );
+        assert_eq!(
+            split(
+                "if 1 = 1\nbegin\n  print 'a';\nend\n\nselect 2;",
+                Kind::Mssql
+            ),
+            ["if 1 = 1\nbegin\n  print 'a';\nend", "select 2;"],
+            "an end without a semicolon still closes the block"
+        );
+    }
+
+    #[test]
+    fn an_oracle_program_is_one_statement_through_its_declarations() {
+        let procedure = "create or replace procedure p is\n  v number;\nbegin\n  null;\nend;";
+        assert_eq!(
+            split(&format!("{procedure}\n/\nselect 1 from dual"), Kind::Oracle),
+            [procedure, "select 1 from dual"]
+        );
+        let package = "create package body k as\n  procedure a is\n  begin\n    null;\n  end;\n  procedure b is begin null; end;\nend k;";
+        assert_eq!(
+            split(&format!("{package}\nselect 1 from dual;"), Kind::Oracle),
+            [package, "select 1 from dual;"],
+            "a package body ends at its own end, not its first procedure's"
+        );
+    }
+
+    #[test]
+    fn oracle_statements_on_one_line_are_cut_at_their_semicolons() {
+        assert_eq!(
+            split(
+                "select 1 a from dual; select ';' b from dual; -- two",
+                Kind::Oracle
+            ),
+            ["select 1 a from dual;", "select ';' b from dual; -- two"],
+            "a quoted semicolon is text and a trailing comment stays put"
+        );
+        assert_eq!(
+            split("select 1; select 2", Kind::Mssql),
+            ["select 1; select 2"],
+            "SQL Server takes the line as one batch"
+        );
+        assert_eq!(
+            split("begin null; null; end;", Kind::Oracle),
+            ["begin null; null; end;"],
+            "a block is never cut"
+        );
+    }
+
+    #[test]
+    fn a_trailing_comment_does_not_hide_the_semicolon() {
+        assert_eq!(
+            split("select 1; -- first\nselect '--' from t;", Kind::Mssql),
+            ["select 1; -- first", "select '--' from t;"]
         );
     }
 
