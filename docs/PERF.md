@@ -318,3 +318,35 @@ the scan.
 | customers, top 100 | 50 | 39 | 0 | 0 | 0 | 0 | 90909 |
 | events, 10k cap | 10000 | 38 | 0 | 0 | 7 | 8 | 1315789 |
 | events, 100k cap | 100000 | 39 | 0 | 2 | 80 | 101 | 1182033 |
+
+### 2026-09-22 (caa1468)
+
+| budget | measured | pass |
+|---|---|---|
+| startup to the first frame, no connections < 50 ms | 0 ms | yes |
+| key to frame p95, 10,000 rows on screen < 16 ms | 0.183 ms | yes |
+| draw cost at 100,000 rows over 10,000 (0.112 ms / 0.113 ms) < 1.20 | 0.99 | yes |
+| `select 1` round trip on local-mssql < 5 ms | 0 ms | yes |
+| 1,000,000 row scan at `--max-rows 100000` on local-mssql < 8 s | 92 ms | yes |
+| `select 1` round trip on local-oracle < 5 ms | 0 ms | yes |
+| 1,000,000 row scan at `--max-rows 100000` on local-oracle < 8 s | 81 ms | yes |
+
+20 runs, 5 for the 100k scans.
+
+**local-mssql**
+
+| query | rows | connect | first_row p50 | first_row p95 | total p50 | total p95 | rows/s |
+|---|---|---|---|---|---|---|---|
+| select 1 | 1 | 6 | 0 | 0 | 0 | 0 | 20000 |
+| customers, top 100 | 50 | 4 | 0 | 0 | 0 | 0 | 1000000 |
+| events, 10k cap | 10000 | 4 | 4 | 4 | 13 | 13 | 787401 |
+| events, 100k cap | 100000 | 5 | 5 | 5 | 95 | 105 | 1052631 |
+
+**local-oracle**
+
+| query | rows | connect | first_row p50 | first_row p95 | total p50 | total p95 | rows/s |
+|---|---|---|---|---|---|---|---|
+| select 1 | 1 | 40 | 0 | 0 | 0 | 0 | 20000 |
+| customers, top 100 | 50 | 40 | 0 | 0 | 0 | 0 | 200000 |
+| events, 10k cap | 10000 | 40 | 0 | 0 | 8 | 8 | 1273885 |
+| events, 100k cap | 100000 | 39 | 0 | 2 | 80 | 98 | 1213592 |

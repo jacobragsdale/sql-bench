@@ -10,7 +10,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use super::theme::Theme;
-use super::{buttons, placeholder, placeholder_button, titled};
+use super::{buttons, placeholder, placeholder_button, scrollbar, titled};
 use crate::app::objects::{INDENT, Objects};
 use crate::app::pointer::{Hits, Target};
 use crate::app::{App, Focus};
@@ -83,6 +83,13 @@ pub(super) fn render(frame: &mut Frame, app: &App, theme: &Theme, area: Rect, hi
     let height = usize::from(inner.height);
     let top = objects.window(height);
     let width = usize::from(inner.width);
+    scrollbar(
+        frame,
+        (area, inner),
+        (Focus::Objects, top, visible.len()),
+        border_style,
+        hits,
+    );
     let lines: Vec<Line> = visible
         .into_iter()
         .skip(top)

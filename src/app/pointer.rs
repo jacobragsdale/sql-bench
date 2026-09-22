@@ -6,6 +6,7 @@
 //! with every mouse event, so the app still never sees a terminal — and a
 //! click resolves against exactly what was painted, overlays included.
 
+use std::ops::Range;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -55,6 +56,15 @@ pub enum Target {
         left: usize,
         gutter: usize,
     },
+    /// The thumb of `pane`'s scrollbar, over `content` rows of which
+    /// `viewport` show, on a `track` of the pane's right border. Dragging it
+    /// scrolls; the track either side of it is a PageUp or PageDown button.
+    Thumb {
+        pane: Focus,
+        content: usize,
+        viewport: usize,
+        track: Rect,
+    },
     /// The text of the export prompt, starting at the region's left edge.
     PromptText,
     /// The body of the open help or inspector, whichever is on top.
@@ -69,8 +79,45 @@ impl Target {
     /// body is too big to be a thing the eye should be drawn to.
     #[must_use]
     pub const fn hovers(self) -> bool {
-        matches!(self, Self::Tab(_) | Self::Button { .. })
+        matches!(
+            self,
+            Self::Tab(_) | Self::Button { .. } | Self::Thumb { .. }
+        )
     }
+}
+
+/// The cells of a `track` long scrollbar the thumb covers, `offset` rows
+/// into `content` rows of which `viewport` show. The painter and the drag
+/// both use it, so what is drawn is what is hit.
+///
+/// The thumb is as long as the share of the content that shows, at least a
+/// cell. It leaves the top only past offset 0 and reaches the bottom at the
+/// last offset, so a track showing above or below it always has a page to go.
+#[must_use]
+pub fn thumb(offset: usize, content: usize, viewport: usize, track: u16) -> Range<u16> {
+    let length = (usize::from(track) * viewport)
+        .checked_div(content)
+        .unwrap_or(0)
+        .max(1)
+        .min(usize::from(track));
+    let travel = usize::from(track).saturating_sub(length);
+    let last = content.saturating_sub(viewport);
+    let start = (offset.min(last) * travel + last / 2)
+        .checked_div(last)
+        .unwrap_or(0);
+    let start = u16::try_from(start).unwrap_or(0);
+    start..start.saturating_add(u16::try_from(length).unwrap_or(track))
+}
+
+/// The offset whose thumb starts `start` cells down the track: [`thumb`]
+/// turned round, clamped to the ends.
+#[must_use]
+pub fn offset(start: u16, content: usize, viewport: usize, track: u16) -> usize {
+    let travel = usize::from(track).saturating_sub(thumb(0, content, viewport, track).len());
+    let last = content.saturating_sub(viewport);
+    (usize::from(start).min(travel) * last + travel / 2)
+        .checked_div(travel)
+        .unwrap_or(0)
 }
 
 /// Where each clickable thing on one frame was drawn, in paint order.
@@ -202,8 +249,16 @@ impl App {
             {
                 self.pad_drag(position, hits)
             }
-            // A drag off anything but the pad's text does nothing; seams and
-            // scrollbar thumbs will get arms of their own above this one.
+            MouseEventKind::Drag(MouseButton::Left)
+                if self.shell.mouse.press.is_some_and(|press| {
+                    press.button == MouseButton::Left
+                        && matches!(press.spot.target, Target::Thumb { .. })
+                }) =>
+            {
+                self.thumb_drag(position, hits)
+            }
+            // A drag off anything but the pad's text or a thumb does
+            // nothing; seams will get an arm of their own above this one.
             MouseEventKind::Drag(_) | MouseEventKind::Moved => {
                 if let Some(press) = self.shell.mouse.press.as_mut() {
                     press.left |= spot != Some(press.spot);
@@ -300,7 +355,8 @@ impl App {
                     self.shell.inspector = None;
                 }
             }
-            Target::Tab(_) | Target::Overlay => {}
+            // A thumb is for dragging, and pressed and let go is nothing.
+            Target::Tab(_) | Target::Overlay | Target::Thumb { .. } => {}
         }
         Vec::new()
     }
@@ -376,6 +432,48 @@ impl App {
             .find(|(_, target)| matches!(target, Target::Pad { .. }))
         {
             self.pad_point(region, position, true);
+        }
+        Vec::new()
+    }
+
+    /// A thumb dragged: the pane scrolled so the thumb is under the pointer
+    /// where it was grabbed, measured on the track as the press found it,
+    /// and the cursor pulled along to stay in view the way the wheel pulls
+    /// it. The focus stays where it was, as it does for the wheel.
+    fn thumb_drag(&mut self, position: Position, hits: &Hits) -> Vec<Action> {
+        let Some(press) = self.shell.mouse.press.as_mut() else {
+            return Vec::new();
+        };
+        press.left = true;
+        let Target::Thumb {
+            pane,
+            content,
+            viewport,
+            track,
+        } = press.spot.target
+        else {
+            return Vec::new();
+        };
+        let start = position
+            .y
+            .saturating_sub(press.spot.row)
+            .saturating_sub(track.y);
+        let top = offset(start, content, viewport, track.height);
+        // The pad scrolls sideways too, and that stays as it was drawn.
+        let left = hits.regions().find_map(|(_, target)| match target {
+            Target::Pad { left, .. } => Some(left),
+            _ => None,
+        });
+        let Some(tab) = self.tabs.get_mut(self.shell.active_tab) else {
+            return Vec::new();
+        };
+        match pane {
+            Focus::Objects => tab.objects.wheel(top, 0, viewport),
+            Focus::Scratch => tab.scratch.wheel((top, left.unwrap_or(0)), viewport, 0),
+            Focus::Results if tab.results.source().is_some() => {
+                tab.results.wheel_source(top, 0, viewport);
+            }
+            Focus::Results => tab.results.wheel(top, 0, viewport),
         }
         Vec::new()
     }
@@ -487,5 +585,46 @@ mod tests {
             !mouse.clicked(spot(Target::Tab(0), 1), at + DOUBLE_CLICK),
             "another target"
         );
+    }
+
+    #[test]
+    fn the_thumb_is_at_the_top_the_middle_and_the_bottom_of_its_track() {
+        // A hundred rows, ten showing, on a ten-cell track: a one-cell thumb
+        // with nine cells to travel over ninety offsets.
+        assert_eq!(thumb(0, 100, 10, 10), 0..1);
+        assert_eq!(thumb(45, 100, 10, 10), 5..6);
+        assert_eq!(thumb(90, 100, 10, 10), 9..10);
+        assert_eq!(thumb(500, 100, 10, 10), 9..10, "past the end is the end");
+        // The pad at 120x40: forty lines, thirteen showing.
+        assert_eq!(thumb(0, 40, 13, 13), 0..4);
+        assert_eq!(thumb(13, 40, 13, 13), 4..8);
+        assert_eq!(thumb(27, 40, 13, 13), 9..13);
+        assert_eq!(thumb(0, 5, 10, 10), 0..10, "all of it fits");
+        assert_eq!(thumb(0, 100, 10, 0), 0..0, "no track");
+    }
+
+    #[test]
+    fn a_thumb_dragged_to_a_cell_scrolls_to_the_offset_drawn_there() {
+        assert_eq!(offset(0, 100, 10, 10), 0);
+        assert_eq!(offset(9, 100, 10, 10), 90);
+        assert_eq!(offset(30, 100, 10, 10), 90, "dragged past the end");
+        assert_eq!(offset(0, 5, 10, 10), 0, "nowhere to go");
+        for (content, viewport, track) in [(100, 10, 10), (40, 13, 13), (11, 10, 10), (500, 19, 19)]
+        {
+            let travel = track - thumb(0, content, viewport, track).len() as u16;
+            for start in 0..=travel {
+                assert_eq!(
+                    thumb(
+                        offset(start, content, viewport, track),
+                        content,
+                        viewport,
+                        track
+                    )
+                    .start,
+                    start,
+                    "{content} rows, {viewport} showing, {track} cells"
+                );
+            }
+        }
     }
 }

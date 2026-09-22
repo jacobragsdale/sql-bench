@@ -27,15 +27,15 @@ stack, same layout, same keys.
 │     ▸ big_text             │╭ Results · 15 rows · 1 ms ───────────────────────────────── Export ─╮
 │     ▸ binary_blobs         ││ id   name          country  credit_limit                           │
 │     ▸ customers            ││ int  nvarchar      char     decimal                                │
-│     ▸ events               ││   1  Zoë Bauer     DE             100.50                           │
-│     ▸ order_items          ││   2  Ægir Nilsen   NO             201.00                           │
-│     ▸ orders               ││   8  Mary O'Neill  IE             804.00                           │
-│   ▸ Views                  ││  11  Zoë Bauer     DE            1105.50                           │
-│   ▸ Procedures             ││  12  Ægir Nilsen   NO            1206.00                           │
-│   ▸ Functions              ││  18  Mary O'Neill  IE            1809.00                           │
-│   ▸ Sequences              ││  21  Zoë Bauer     DE               NULL                           │
-│                            ││  22  Ægir Nilsen   NO            2211.00                           │
-│                            ││  28  Mary O'Neill  IE               NULL                           │
+│     ▸ events               ││   1  Zoë Bauer     DE             100.50                           ┃
+│     ▸ order_items          ││   2  Ægir Nilsen   NO             201.00                           ┃
+│     ▸ orders               ││   8  Mary O'Neill  IE             804.00                           ┃
+│   ▸ Views                  ││  11  Zoë Bauer     DE            1105.50                           ┃
+│   ▸ Procedures             ││  12  Ægir Nilsen   NO            1206.00                           ┃
+│   ▸ Functions              ││  18  Mary O'Neill  IE            1809.00                           ┃
+│   ▸ Sequences              ││  21  Zoë Bauer     DE               NULL                           ┃
+│                            ││  22  Ægir Nilsen   NO            2211.00                           ┃
+│                            ││  28  Mary O'Neill  IE               NULL                           ┃
 │                            ││  31  Zoë Bauer     DE            3115.50                           │
 │                            ││  32  Ægir Nilsen   NO            3216.00                           │
 │                            ││  38  Mary O'Neill  IE            3819.00                           │

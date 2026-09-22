@@ -144,7 +144,7 @@ fn a_pad_taller_than_the_pane_scrolls_to_the_line_the_cursor_is_on() {
     // Thirteen rows inside the pane, so the fortieth line is the last of
     // them and the twenty-eighth is the first.
     assert_eq!(pad_line(&terminal, 2), row("28 select 28"));
-    assert_eq!(pad_line(&terminal, 14), row("40 select 40"));
+    assert_eq!(pad_line(&terminal, 14), thumbed(&row("40 select 40")));
 }
 
 /// The pad's text starts here at 120x40: the border, the padding, and the
@@ -219,7 +219,7 @@ fn a_click_on_the_first_line_of_a_scrolled_pad_puts_the_cursor_there_and_the_vie
     assert_eq!(app.tabs[0].scratch.cursor(), (27, 7));
     let after = frame(120, 40, &app);
     assert_eq!(pad_line(&after, 2), row("28 select 28"));
-    assert_eq!(pad_line(&after, 14), row("40 select 40"));
+    assert_eq!(pad_line(&after, 14), thumbed(&row("40 select 40")));
 }
 
 #[test]
@@ -233,7 +233,7 @@ fn a_key_that_moves_the_cursor_up_inside_the_view_leaves_the_view_where_it_is() 
     }
     let terminal = frame(120, 40, &app);
     assert_eq!(pad_line(&terminal, 2), row("28 select 28"));
-    assert_eq!(pad_line(&terminal, 14), row("40 select 40"));
+    assert_eq!(pad_line(&terminal, 14), thumbed(&row("40 select 40")));
 }
 
 #[test]
@@ -273,7 +273,10 @@ fn a_drag_below_the_pad_scrolls_it_a_line_each_time_the_pointer_moves() {
         KeyModifiers::NONE,
     );
     drag(&mut app, (TEXT_X + 5, 20));
-    assert_eq!(pad_line(&frame(120, 40, &app), 2), row(" 2 select 2"));
+    assert_eq!(
+        pad_line(&frame(120, 40, &app), 2),
+        thumbed(&row(" 2 select 2"))
+    );
     drag(&mut app, (TEXT_X + 5, 20));
     assert_eq!(pad_line(&frame(120, 40, &app), 2), row(" 3 select 3"));
     let copied = app.tabs[0].scratch.selected_text().expect("a selection");
@@ -369,7 +372,10 @@ fn the_wheel_scrolls_three_lines_and_pulls_the_cursor_along() {
     assert_eq!(app.tabs[0].scratch.cursor(), (3, 0), "pulled onto the view");
 
     pointer(&mut app, MouseEventKind::ScrollUp, over, KeyModifiers::NONE);
-    assert_eq!(pad_line(&frame(120, 40, &app), 2), row(" 1 select 1"));
+    assert_eq!(
+        pad_line(&frame(120, 40, &app), 2),
+        thumbed(&row(" 1 select 1"))
+    );
     assert_eq!(
         app.tabs[0].scratch.cursor(),
         (3, 0),
@@ -387,7 +393,7 @@ fn the_wheel_scrolls_three_lines_and_pulls_the_cursor_along() {
     let terminal = frame(120, 40, &app);
     assert_eq!(
         pad_line(&terminal, 14),
-        row("40 select 40"),
+        thumbed(&row("40 select 40")),
         "no further than the last line"
     );
     assert_eq!(pad_line(&terminal, 2), row("28 select 28"));
