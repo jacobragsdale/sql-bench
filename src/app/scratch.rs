@@ -145,10 +145,11 @@ impl Scratch {
 
     /// Whatever came back from `$EDITOR`, or any other whole-pad replacement.
     pub fn set_text(&mut self, text: &str) {
-        if text == self.text() {
+        let lines = split_lines(text);
+        if lines == self.lines {
             return;
         }
-        self.lines = split_lines(text);
+        self.lines = lines;
         self.selection = None;
         self.undo = None;
         self.burst = false;
@@ -381,15 +382,7 @@ impl Scratch {
     /// Bracketed paste: the whole block at the cursor, or over the
     /// selection, line breaks kept.
     pub fn paste(&mut self, text: &str) -> Outcome {
-        let mut cleaned = String::with_capacity(text.len());
-        for character in text.replace("\r\n", "\n").chars() {
-            match character {
-                '\n' => cleaned.push('\n'),
-                '\t' => cleaned.push_str(INDENT),
-                character if character.is_control() => {}
-                character => cleaned.push(character),
-            }
-        }
+        let cleaned = cleaned(text);
         if cleaned.is_empty() {
             return Outcome::Unchanged;
         }
@@ -747,9 +740,26 @@ impl Scratch {
     }
 }
 
+/// Text from outside — a paste, the editor, the file a pad was kept in — as
+/// the pad holds it: a tab is [`INDENT`] and the other control characters
+/// go, because the terminal would draw none of them and the cursor would be
+/// a column off for each.
+fn cleaned(text: &str) -> String {
+    let mut cleaned = String::with_capacity(text.len());
+    for character in text.replace("\r\n", "\n").chars() {
+        match character {
+            '\n' => cleaned.push('\n'),
+            '\t' => cleaned.push_str(INDENT),
+            character if character.is_control() => {}
+            character => cleaned.push(character),
+        }
+    }
+    cleaned
+}
+
 /// A file's text as lines, always at least one.
 fn split_lines(text: &str) -> Vec<String> {
-    let text = text.replace("\r\n", "\n");
+    let text = cleaned(text);
     let text = text.strip_suffix('\n').unwrap_or(&text);
     let lines: Vec<String> = text.split('\n').map(str::to_owned).collect();
     if lines.is_empty() {
@@ -1189,6 +1199,14 @@ mod tests {
         assert!(
             !same.modified(),
             "an editor that saved nothing changed nothing"
+        );
+
+        let mut tabbed = pad();
+        tabbed.set_text("begin\r\n\tnull;\u{7}\r\nend;\n");
+        assert_eq!(
+            tabbed.lines(),
+            ["begin", "  null;", "end;"],
+            "a tab is the pad's indent and a bell is nothing, as in a paste"
         );
     }
 

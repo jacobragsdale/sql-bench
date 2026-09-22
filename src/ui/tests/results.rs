@@ -77,12 +77,6 @@ fn overlay(terminal: &Terminal<TestBackend>) -> Vec<String> {
     (corner("╭")..=corner("╰")).map(row).collect()
 }
 
-/// A theme token as [`painted`] reports it: a cell always has a foreground,
-/// even when the style that painted it named none.
-fn as_painted(style: Style) -> Style {
-    style.fg(ratatui::style::Color::Reset)
-}
-
 #[test]
 fn the_grid_is_a_header_a_type_row_and_the_columns_that_fit() {
     let app = showing(filled(50, 20));
@@ -129,11 +123,7 @@ fn the_cell_cursor_is_reversed_and_a_null_is_dim() {
     let theme = Theme::new(false);
     let terminal = frame(120, 40, &app);
     let (x, y) = pane(&terminal);
-    assert_eq!(
-        painted(&terminal, x, y + 2),
-        as_painted(theme.cursor),
-        "the first cell"
-    );
+    assert_eq!(painted(&terminal, x, y + 2), theme.cursor, "the first cell");
     // Column 2 is the NULL one: eight and forty characters of column, and
     // the two spaces between each.
     assert_eq!(painted(&terminal, x + 52, y + 2), theme.dim);
@@ -142,8 +132,8 @@ fn the_cell_cursor_is_reversed_and_a_null_is_dim() {
     app.handle(Event::Key(key("j")));
     app.handle(Event::Key(key("l")));
     let terminal = frame(120, 40, &app);
-    assert_eq!(painted(&terminal, x, y + 2), as_painted(Style::default()));
-    assert_eq!(painted(&terminal, x + 10, y + 3), as_painted(theme.cursor));
+    assert_eq!(painted(&terminal, x, y + 2), Style::default());
+    assert_eq!(painted(&terminal, x + 10, y + 3), theme.cursor);
 }
 
 #[test]
@@ -167,16 +157,16 @@ fn a_range_is_painted_as_one_block_with_the_cursor_still_on_it() {
         (x + 8, y + 2, selection),
         (x + 10, y + 2, selection),
         (x + 49, y + 2, selection),
-        (x + 10, y + 3, as_painted(theme.cursor)),
-        (x + 50, y + 2, as_painted(Style::default())),
-        (x, y + 4, as_painted(Style::default())),
+        (x + 10, y + 3, theme.cursor),
+        (x + 50, y + 2, Style::default()),
+        (x, y + 4, Style::default()),
     ] {
         assert_eq!(painted(&terminal, column, row), style, "({column}, {row})");
     }
 
     app.handle(Event::Key(key("Esc")));
     let terminal = frame(120, 40, &app);
-    assert_eq!(painted(&terminal, x, y + 2), as_painted(Style::default()));
+    assert_eq!(painted(&terminal, x, y + 2), Style::default());
 }
 
 #[test]
@@ -459,10 +449,7 @@ fn the_export_prompt_is_the_footer_with_a_cursor_on_it() {
     // The cursor is the cell past the end of the path, where the next
     // character goes.
     let at = u16::try_from(" Export to: ".len() + path.chars().count()).expect("a column");
-    assert_eq!(
-        painted(&terminal, at, 39),
-        as_painted(Theme::new(false).cursor)
-    );
+    assert_eq!(painted(&terminal, at, 39), Theme::new(false).cursor);
 }
 
 /// T5.4: a name drawn two terminal columns per character used to be padded
@@ -511,4 +498,118 @@ fn a_wide_glyph_takes_two_columns_and_the_column_after_it_still_lines_up() {
             "the second column starts at the same terminal column on every row: {row:?}"
         );
     }
+}
+
+/// Also a grid with no types, as a table's column list is: no blank row for them.
+#[test]
+fn a_control_character_is_one_glyph_and_the_columns_after_it_stay_put() {
+    let mut results = Results::default();
+    results.start(Instant::now(), 0, 1, false);
+    results.apply(QueryEvent::Columns(
+        ["note", "n"]
+            .map(|name| Column {
+                name: name.to_owned(),
+                type_name: String::new(),
+            })
+            .to_vec(),
+    ));
+    results.apply(QueryEvent::Rows(
+        ["a\tb", "two\r\nlines", "bell\u{7}"]
+            .map(|note| vec![Cell::Text(note.to_owned()), Cell::Int(1)])
+            .to_vec(),
+    ));
+    let terminal = frame(120, 40, &showing(results));
+    let rows: Vec<String> = (0..4).map(|row| body(&terminal, row)).collect();
+    assert_eq!(
+        rows,
+        [
+            "note        n",
+            "a b         1",
+            "two⏎⏎lines  1",
+            "bell␇       1",
+        ]
+    );
+}
+
+#[test]
+fn a_source_indented_with_tabs_keeps_its_indentation() {
+    let mut app = showing(Results::default());
+    app.tabs[0].results.show_source(
+        "p".to_owned(),
+        "begin\n\tif x then\n\t\tnull;\n\tend if;\nend;",
+    );
+    let terminal = frame(120, 40, &app);
+    let rows: Vec<String> = (0..5).map(|row| body(&terminal, row)).collect();
+    assert_eq!(
+        rows,
+        [
+            "1 begin",
+            "2     if x then",
+            "3         null;",
+            "4     end if;",
+            "5 end;",
+        ]
+    );
+}
+
+#[test]
+fn a_failure_of_several_lines_is_drawn_on_several_lines() {
+    let mut app = showing(Results::default());
+    app.tabs[0].results.start(Instant::now(), 0, 1, false);
+    app.tabs[0].results.apply(QueryEvent::Error(DbError::Query {
+        message: "ORA-06550: line 1, column 7:\nPLS-00201: identifier 'NOPE' must be declared"
+            .to_owned(),
+        line: None,
+    }));
+    let terminal = frame(120, 40, &app);
+    assert_eq!(
+        [body(&terminal, 0), body(&terminal, 1)],
+        [
+            "ORA-06550: line 1, column 7:",
+            "PLS-00201: identifier 'NOPE' must be declared"
+        ]
+    );
+}
+
+/// Thirty cells of a megabyte each on screen, the second draw timed.
+fn one_draw_of_big_cells() -> Duration {
+    let mut results = Results::default();
+    results.start(Instant::now(), 0, 1, false);
+    results.apply(QueryEvent::Columns(
+        (0..3)
+            .map(|index| Column {
+                name: format!("doc_{index}"),
+                type_name: "nvarchar(max)".to_owned(),
+            })
+            .collect(),
+    ));
+    let big = "line of text\n".repeat(80_000);
+    results.apply(QueryEvent::Rows(
+        (0..10)
+            .map(|_| (0..3).map(|_| Cell::Text(big.clone())).collect())
+            .collect(),
+    ));
+    let app = showing(results);
+    let theme = Theme::new(false);
+    let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("a test terminal");
+    let mut drew = Duration::ZERO;
+    for _ in 0..2 {
+        let at = Instant::now();
+        terminal
+            .draw(|frame| {
+                render(frame, &app, &theme);
+            })
+            .expect("a frame");
+        drew = at.elapsed();
+    }
+    drew
+}
+
+#[test]
+fn a_megabyte_in_a_cell_costs_a_frame_what_a_word_does() {
+    let drew = one_draw_of_big_cells();
+    assert!(
+        drew < Duration::from_millis(20),
+        "a debug draw of thirty 1 MB cells took {drew:?}"
+    );
 }

@@ -558,13 +558,13 @@ fn error_closes(app: &App) -> bool {
 /// ` text`, cut to `budget` columns with an ellipsis. The footer's right end
 /// says where the connection is, and a message long enough to push it off
 /// the screen has taken the footer over rather than used it.
+/// A driver's message of several lines is one line here, each break a space.
 fn cut(text: &str, budget: usize) -> String {
-    let room = budget.saturating_sub(1);
-    if text.chars().count() <= room {
-        return format!(" {text}");
-    }
-    let kept: String = text.chars().take(room.saturating_sub(1)).collect();
-    format!(" {kept}…")
+    let line = text.replace("\r\n", " ").replace(['\n', '\r'], " ");
+    format!(
+        " {}",
+        crate::export::cut_to(&line, budget.saturating_sub(1).max(1))
+    )
 }
 
 const PROMPT: &str = " Export to: ";

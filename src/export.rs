@@ -9,7 +9,7 @@
 use std::borrow::Cow;
 use std::fmt::Write as _;
 
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthChar;
 
 use crate::db::model::{Cell, Column};
 
@@ -19,33 +19,61 @@ pub const CELL_LIMIT: usize = 60;
 
 /// How many terminal columns a string is drawn in — the one width the grid
 /// and this module both measure with, so a table and the pane it came from
-/// line up on the same glyphs. A CJK name is two columns per character.
+/// line up on the same glyphs. A CJK name is two columns per character, and
+/// a control character the one column of the glyph [`printable`] draws it as.
 #[must_use]
 pub fn width(text: &str) -> usize {
-    UnicodeWidthStr::width(text)
+    text.chars().map(cells).sum()
+}
+
+/// What a character is drawn as. A terminal skips a control character, so
+/// one left in a value would move every column after it along by one: a line
+/// break is `⏎`, a tab a space, and the rest their control pictures.
+#[must_use]
+pub fn printable(character: char) -> char {
+    match character {
+        '\n' | '\r' => '⏎',
+        '\t' => ' ',
+        '\0'..='\u{1f}' => char::from_u32(0x2400 + u32::from(character)).unwrap_or('�'),
+        '\u{7f}' => '␡',
+        character if character.is_control() => '�',
+        character => character,
+    }
+}
+
+fn cells(character: char) -> usize {
+    UnicodeWidthChar::width(printable(character)).unwrap_or(0)
 }
 
 /// The start of `text` that is at most `columns` wide, with `…` for the rest
-/// when there is one. The `…` is a column of its own, so a cut never spills
-/// over the width it was given — and a wide glyph that would straddle the
-/// end is dropped rather than halved.
+/// when there is one, and every character [`printable`]. The `…` is a column
+/// of its own, so a cut never spills over the width it was given — and a
+/// wide glyph that would straddle the end is dropped rather than halved.
+/// `0` is no limit.
+///
+/// Only as much of `text` is read as it takes to fill `columns`, so a
+/// megabyte in a cell costs a frame what a word does.
 #[must_use]
 pub fn cut_to(text: &str, columns: usize) -> Cow<'_, str> {
-    if columns == 0 || width(text) <= columns {
-        return Cow::Borrowed(text);
-    }
-    let mut kept = String::new();
-    let mut used = 0;
-    for character in text.chars() {
-        let cost = UnicodeWidthChar::width(character).unwrap_or(0);
-        if used + cost > columns - 1 {
-            break;
+    let room = if columns == 0 { usize::MAX } else { columns };
+    let (mut used, mut kept, mut plain) = (0, 0, true);
+    for (at, character) in text.char_indices() {
+        used += cells(character);
+        if used > room {
+            let mut cut: String = text[..kept].chars().map(printable).collect();
+            cut.push('…');
+            return Cow::Owned(cut);
         }
-        kept.push(character);
-        used += cost;
+        if used < room {
+            kept = at + character.len_utf8();
+        }
+        plain &= !character.is_control();
     }
-    kept.push('…');
-    Cow::Owned(kept)
+    if plain {
+        Cow::Borrowed(text)
+    } else {
+        Cow::Owned(text.chars().map(printable).collect())
+    }
 }
 
 /// `text` padded to `columns` terminal columns, on the side that leaves the
@@ -63,7 +91,7 @@ pub fn pad(text: &str, columns: usize, right: bool) -> String {
 
 /// At most `limit` columns, the last of which says there were more.
 fn cut(text: &str, limit: Option<usize>) -> Cow<'_, str> {
-    limit.map_or(Cow::Borrowed(text), |limit| cut_to(text, limit))
+    cut_to(text, limit.unwrap_or(0))
 }
 
 /// What a cell reads as in a table: the one difference from
