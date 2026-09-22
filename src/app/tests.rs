@@ -68,6 +68,7 @@ pub(crate) fn filled(rows: usize, columns: usize) -> Results {
     results.apply(QueryEvent::Done {
         rows,
         truncated: false,
+        reset: false,
         connect_ms: 1,
         first_row_ms: 2,
         total_ms: 42,
@@ -159,6 +160,7 @@ fn ready(focus: Focus) -> App {
     results.apply(QueryEvent::Done {
         rows: 1,
         truncated: true,
+        reset: false,
         connect_ms: 1,
         first_row_ms: 2,
         total_ms: 3,
@@ -595,6 +597,33 @@ fn f5_runs_every_statement_and_a_failure_says_which_one_it_was() {
 }
 
 #[test]
+fn a_query_that_cost_the_session_says_so_in_the_footer() {
+    let mut app = two_tabs();
+    app.apply(RuntimeEvent::QueryStarted {
+        tab: 0,
+        at: Instant::now(),
+        statement: 0,
+        of: 1,
+        keep_view: false,
+    });
+    app.apply(RuntimeEvent::Query {
+        tab: 0,
+        event: QueryEvent::Done {
+            rows: 10_000,
+            truncated: true,
+            reset: true,
+            connect_ms: 0,
+            first_row_ms: 0,
+            total_ms: 0,
+        },
+    });
+    assert_eq!(
+        app.shell.status,
+        "row cap: session reset (open transaction rolled back, #temp tables gone)"
+    );
+}
+
+#[test]
 fn y_copies_the_cell_and_shift_y_the_row_with_a_null_as_nothing() {
     let mut app = ready(Focus::Results);
     // The cursor is on row 20, column 1: the long text one.
@@ -748,6 +777,7 @@ fn mixed(running: bool) -> App {
         results.apply(QueryEvent::Done {
             rows: 8,
             truncated: false,
+            reset: false,
             connect_ms: 1,
             first_row_ms: 2,
             total_ms: 3,

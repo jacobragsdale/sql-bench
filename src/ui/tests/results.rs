@@ -199,6 +199,7 @@ fn the_sorted_column_trades_its_last_character_for_an_arrow() {
     results.apply(QueryEvent::Done {
         rows: 2,
         truncated: false,
+        reset: false,
         connect_ms: 0,
         first_row_ms: 0,
         total_ms: 0,
@@ -261,6 +262,7 @@ fn a_run_of_several_statements_ends_with_the_summary_line() {
         results.apply(QueryEvent::Done {
             rows: 1,
             truncated: false,
+            reset: false,
             connect_ms: 0,
             first_row_ms: 1,
             total_ms: 4,

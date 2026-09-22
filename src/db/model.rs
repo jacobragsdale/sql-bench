@@ -73,6 +73,10 @@ pub enum QueryEvent {
     Done {
         rows: usize,
         truncated: bool,
+        /// The server session was thrown away to stop reading: on SQL Server
+        /// that rolls back an open transaction and drops `#temp` tables,
+        /// which nobody should find out about by losing them.
+        reset: bool,
         connect_ms: u32,
         first_row_ms: u32,
         total_ms: u32,
@@ -86,6 +90,12 @@ pub enum QueryEvent {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DbError {
     Connect(String),
+    /// A session that was working and stopped: the socket went, or the
+    /// server ended it. Not "cannot connect" to someone who was connected.
+    Lost(String),
+    /// The connection's own settings are wrong (an unset password
+    /// variable, a failing `password_cmd`) and no server was asked anything.
+    Config(String),
     Query {
         message: String,
         /// The line of the submitted batch, when the server says.
@@ -100,6 +110,8 @@ impl std::fmt::Display for DbError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Connect(why) => write!(f, "cannot connect: {why}"),
+            Self::Lost(why) => write!(f, "connection lost: {why}"),
+            Self::Config(why) => f.write_str(why),
             Self::Query {
                 message,
                 line: Some(line),
@@ -182,6 +194,14 @@ mod tests {
             }
             .to_string(),
             "Invalid column name 'nope'."
+        );
+        assert_eq!(
+            DbError::Lost("Connection reset by peer".to_owned()).to_string(),
+            "connection lost: Connection reset by peer"
+        );
+        assert_eq!(
+            DbError::Config("reading $NOPE".to_owned()).to_string(),
+            "reading $NOPE"
         );
         assert_eq!(DbError::Cancelled.to_string(), "cancelled");
         assert_eq!(DbError::Timeout.to_string(), "timed out");

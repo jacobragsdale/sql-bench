@@ -322,7 +322,7 @@ fn objects_sql(backend: Kind, schema: Option<&str>, kind: Option<ObjectKind>) ->
                 types = list(&types),
                 owner = schema.map_or_else(
                     || format!("o.owner in (select username from all_users where {OWNERS})"),
-                    |schema| format!("o.owner = {}", quoted(&fold(backend, schema)))
+                    |schema| format!("o.owner = {}", owner(schema))
                 ),
             )
         }
@@ -374,7 +374,12 @@ fn columns_sql(backend: Kind, schema: &str, table: &str) -> String {
                          and kc.unique_index_id = ic.index_id \
                         where kc.type = 'PK') pk \
                     on pk.object_id = c.object_id and pk.column_id = c.column_id \
-             where lower(s.name) = lower({schema}) and lower(o.name) = lower({table}) \
+             where o.object_id = (select top 1 o2.object_id from sys.objects o2 \
+                                  join sys.schemas s2 on s2.schema_id = o2.schema_id \
+                                  where lower(s2.name) = lower({schema}) \
+                                    and lower(o2.name) = lower({table}) \
+                                  order by case when s2.name = {schema} \
+                                                 and o2.name = {table} then 0 else 1 end) \
              order by c.column_id",
             schema = quoted(schema),
             table = quoted(table),
@@ -393,8 +398,8 @@ fn columns_sql(backend: Kind, schema: &str, table: &str) -> String {
                    and pk.column_name = c.column_name \
              where c.owner = {schema} and c.table_name = {table} \
              order by c.column_id",
-            schema = quoted(&fold(backend, schema)),
-            table = quoted(&fold(backend, table)),
+            schema = owner(schema),
+            table = object(schema, table),
         ),
     }
 }
@@ -464,16 +469,16 @@ fn source_sql(backend: Kind, schema: &str, name: &str, kind: ObjectKind) -> Stri
         ),
         Kind::Oracle if kind == ObjectKind::View => format!(
             "select 'VIEW', text from all_views where owner = {} and view_name = {}",
-            quoted(&fold(backend, schema)),
-            quoted(&fold(backend, name)),
+            owner(schema),
+            object(schema, name),
         ),
         // A package is two objects wearing one name; `PACKAGE` sorts before
         // `PACKAGE BODY`, so the spec comes back first.
         Kind::Oracle => format!(
             "select type, text from all_source \
              where owner = {} and name = {} and type in ({}) order by type, line",
-            quoted(&fold(backend, schema)),
-            quoted(&fold(backend, name)),
+            owner(schema),
+            object(schema, name),
             list(kind_source_types(kind)),
         ),
     }
@@ -639,6 +644,28 @@ fn fold(backend: Kind, name: &str) -> String {
         Kind::Oracle => name.to_uppercase(),
         Kind::Mssql => name.to_owned(),
     }
+}
+
+/// An Oracle schema as the catalog spells it: exactly as given when a user of
+/// that name exists — the tree hands back names as stored, and a quoted
+/// `"MixedCase"` is stored mixed — else folded the way an unquoted name is.
+fn owner(schema: &str) -> String {
+    format!(
+        "coalesce((select max(username) from all_users where username = {}), {})",
+        quoted(schema),
+        quoted(&schema.to_uppercase()),
+    )
+}
+
+/// An Oracle object name, spelled the way [`owner`] spells a schema.
+fn object(schema: &str, name: &str) -> String {
+    format!(
+        "coalesce((select max(object_name) from all_objects \
+                   where owner = {} and object_name = {}), {})",
+        owner(schema),
+        quoted(name),
+        quoted(&name.to_uppercase()),
+    )
 }
 
 /// Every row of a catalog query. No cap: a schema with more than ten

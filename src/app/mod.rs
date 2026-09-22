@@ -605,6 +605,7 @@ impl App {
     /// next edit — and the footer says which of a run of several it was.
     fn query_event(&mut self, tab: usize, event: QueryEvent) {
         let last = matches!(event, QueryEvent::Done { .. } | QueryEvent::Error(_));
+        let reset = matches!(event, QueryEvent::Done { reset: true, .. });
         let Some(open) = self.tabs.get_mut(tab) else {
             return;
         };
@@ -621,6 +622,10 @@ impl App {
             } else {
                 String::new()
             };
+        } else if reset {
+            self.shell.status =
+                "row cap: session reset (open transaction rolled back, #temp tables gone)"
+                    .to_owned();
         } else {
             // What the statements before the last did is not on screen, and
             // an update's count is nowhere else once a later select has run.

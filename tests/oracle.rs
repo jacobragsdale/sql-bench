@@ -10,8 +10,8 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use sql_bench::config;
-use sql_bench::db::Connection;
 use sql_bench::db::model::{Cell, Column, DbError, QueryEvent, QueryOptions};
+use sql_bench::db::{Connection, catalog};
 
 /// The committed `local-oracle`, or nothing when the databases are not wanted.
 fn local() -> Option<(config::Config, config::Connection)> {
@@ -236,31 +236,28 @@ fn a_big_scan_stops_at_the_cap() {
 }
 
 #[test]
-fn an_update_reports_what_it_changed_and_rolls_back() {
-    let connection = connection!();
-    // No `begin transaction`: in Oracle the first DML opens one.
-    let events = run(&connection, "update bench.customers set country = 'ZZ'");
-    assert_eq!(events[0], QueryEvent::RowsAffected(50));
+fn an_insert_commits_without_being_asked() {
+    let Some((config, spec)) = local() else {
+        return;
+    };
+    let connection = Connection::open(&spec, &config).expect("the container is up");
+    run(&connection, "drop table zz_polish_commit");
+    run(&connection, "create table zz_polish_commit (id number)");
+    let events = run(
+        &connection,
+        "insert into zz_polish_commit select level from dual connect by level <= 3",
+    );
+    assert_eq!(events[0], QueryEvent::RowsAffected(3));
     assert_eq!(done(&events), (0, false));
 
+    // Another session sees the rows: nothing is waiting on a commit that a
+    // reconnect or a cancel would quietly roll back.
+    let other = Connection::open(&spec, &config).expect("the container is up");
     assert_eq!(
-        rows(&run(
-            &connection,
-            "select count(*) as changed from bench.customers where country = 'ZZ'"
-        )),
-        [[Cell::Decimal("50".to_owned())]],
-        "the transaction sees its own update"
+        rows(&run(&other, "select count(*) as n from zz_polish_commit")),
+        [[Cell::Decimal("3".to_owned())]]
     );
-
-    run(&connection, "rollback");
-    assert_eq!(
-        rows(&run(
-            &connection,
-            "select count(*) as changed from bench.customers where country = 'ZZ'"
-        )),
-        [[Cell::Decimal("0".to_owned())]],
-        "and the rollback puts the seed data back"
-    );
+    run(&connection, "drop table zz_polish_commit");
 }
 
 #[test]
@@ -320,6 +317,164 @@ fn a_trailing_semicolon_comes_off_a_statement_and_stays_on_a_block() {
         complaint(&without).contains("PLS-00103"),
         "a block that lost its terminator is not a block: {}",
         complaint(&without)
+    );
+}
+
+#[test]
+fn a_procedure_from_the_pad_compiles_or_says_why_not() {
+    let connection = connection!();
+    let good = run(
+        &connection,
+        "create or replace procedure zz_polish_p is\nbegin\n  null;\nend;",
+    );
+    assert_eq!(good[0], QueryEvent::RowsAffected(0), "{good:?}");
+    assert_eq!(
+        rows(&run(
+            &connection,
+            "select status from user_objects where object_name = 'ZZ_POLISH_P'"
+        )),
+        [[Cell::Text("VALID".to_owned())]],
+        "the end; that closes it went to the server"
+    );
+
+    let bad = run(
+        &connection,
+        "create or replace procedure zz_polish_p is\nbegin\n  nope;\nend;",
+    );
+    let QueryEvent::Error(DbError::Query { message, line }) = &bad[0] else {
+        panic!("an INVALID procedure is not a success: {bad:?}");
+    };
+    assert!(message.starts_with("PLS-00201"), "{message}");
+    assert_eq!(*line, Some(3), "the line nope is on");
+
+    // A qualified package body is looked up under its own owner and type.
+    run(
+        &connection,
+        "create or replace package bench.zz_polish_pk as procedure x; end;",
+    );
+    let body = run(
+        &connection,
+        "create or replace package body bench.zz_polish_pk as\n\
+         procedure x is begin undefined_thing; end;\nend;",
+    );
+    let QueryEvent::Error(DbError::Query { message, line }) = &body[0] else {
+        panic!("{body:?}");
+    };
+    assert!(message.starts_with("PLS-00201"), "{message}");
+    assert_eq!(*line, Some(2));
+
+    run(&connection, "drop package bench.zz_polish_pk");
+    run(&connection, "drop procedure zz_polish_p");
+}
+
+#[test]
+fn a_message_ends_where_the_server_stopped_talking_about_it() {
+    let connection = connection!();
+    let message = complaint(&run(&connection, "select 1/0 from dual"));
+    assert_eq!(message, "ORA-01476: divisor is equal to zero");
+}
+
+#[test]
+fn a_binary_float_reads_as_the_number_it_was_written_as() {
+    let connection = connection!();
+    assert_eq!(
+        rows(&run(
+            &connection,
+            "select cast(0.1 as binary_float) as f from dual"
+        )),
+        [[Cell::Float(0.1)]]
+    );
+}
+
+#[test]
+fn a_multibyte_clob_comes_back_whole_across_many_reads() {
+    let connection = connection!();
+    run(&connection, "drop table zz_polish_clob");
+    run(
+        &connection,
+        "create table zz_polish_clob (id number, c clob)",
+    );
+    // Two, three and four byte characters, and a mix that leaves a read's
+    // buffer a few bytes short of full: a read that stops short is not the
+    // end of the LOB unless it is short by more than a character.
+    let pieces = ["é", "日", "😀", "a日é😀"];
+    for (id, piece) in pieces.iter().enumerate() {
+        let events = run(
+            &connection,
+            &format!(
+                "declare l clob; p varchar2(32767); begin \
+                   for i in 1..1000 loop p := p || '{piece}'; end loop; \
+                   insert into zz_polish_clob values ({id}, empty_clob()) returning c into l; \
+                   for i in 1..100 loop dbms_lob.writeappend(l, length(p), p); end loop; \
+                 end;"
+            ),
+        );
+        assert_eq!(done(&events), (0, false), "{events:?}");
+    }
+    let events = run(
+        &connection,
+        "select c, dbms_lob.getlength(c) as units from zz_polish_clob order by id",
+    );
+    run(&connection, "drop table zz_polish_clob");
+    for (row, piece) in rows(&events).iter().zip(pieces) {
+        let Cell::Text(text) = &row[0] else {
+            panic!("a CLOB is text: {row:?}");
+        };
+        assert!(!text.ends_with('…'), "under the ceiling");
+        assert_eq!(
+            row[1].display(),
+            text.encode_utf16().count().to_string(),
+            "every UTF-16 unit the server holds of {piece}"
+        );
+        // `writeappend` counts a four byte character as two, so how many
+        // arrived is the server's business; that each is whole is ours.
+        assert_eq!(*text, piece.repeat(text.len() / piece.len()));
+    }
+}
+
+#[test]
+fn a_blob_past_the_ceiling_keeps_its_first_mebibyte() {
+    let connection = connection!();
+    run(&connection, "drop table zz_polish_blob");
+    run(&connection, "create table zz_polish_blob (b blob)");
+    // 0xff is never UTF-8, which is how a BLOB used to lose every byte.
+    run(
+        &connection,
+        "declare l blob; begin \
+           insert into zz_polish_blob values (empty_blob()) returning b into l; \
+           for i in 1..40 loop \
+             dbms_lob.writeappend(l, 32767, utl_raw.copies(hextoraw('FF'), 32767)); \
+           end loop; \
+         end;",
+    );
+    let events = run(&connection, "select b from zz_polish_blob");
+    run(&connection, "drop table zz_polish_blob");
+    let Cell::Bytes(data) = &rows(&events)[0][0] else {
+        panic!("a BLOB is bytes: {events:?}");
+    };
+    assert_eq!(data.len(), 1024 * 1024);
+    assert!(data.iter().all(|byte| *byte == 0xff));
+}
+
+#[test]
+fn a_quoted_mixed_case_table_has_columns_too() {
+    let connection = connection!();
+    run(&connection, "drop table \"zz_Polish_Mixed\"");
+    run(&connection, "create table \"zz_Polish_Mixed\" (id number)");
+    let exact = catalog::list_columns(&connection, "BENCH", "zz_Polish_Mixed");
+    let folded = catalog::list_columns(&connection, "bench", "customers");
+    run(&connection, "drop table \"zz_Polish_Mixed\"");
+    let names = |columns: Vec<catalog::ColumnInfo>| {
+        columns
+            .into_iter()
+            .map(|column| column.name)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(names(exact.unwrap()), ["ID"], "the name as it was quoted");
+    assert_eq!(
+        names(folded.unwrap()).len(),
+        6,
+        "and an unquoted name still folds"
     );
 }
 

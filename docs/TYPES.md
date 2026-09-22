@@ -93,8 +93,8 @@ of its own:
 |---|---|---|---|
 | `Null` | `NULL` | *(empty field)* | `null` |
 | `Int`, `Float` | the digits | the digits | a JSON number |
-| `Decimal` | the digits | the digits | a **string**, so no digit is rounded away |
-| `Bool` | `true` | `true` | `"true"` — a string, not a JSON boolean |
+| `Decimal` | the digits | the digits | a **string**, so no digit is rounded away — unless it is a whole number a double holds exactly (up to 2^53), like Oracle's `count(*)`, which is a JSON number |
+| `Bool` | `true` | `true` | `true`, a JSON boolean |
 | `Bytes` | `0x…` | `0x…` | `"0x…"` |
 | a repeated column name | both columns, twice the header | both columns, twice the header | `a`, then `a_2`: a JSON object cannot hold one name twice without losing a column |
 

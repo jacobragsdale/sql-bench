@@ -165,7 +165,7 @@ fn two_columns_of_the_same_name_are_two_json_keys() {
         (
             "local-oracle",
             "select 1 as a, 2 as a from dual",
-            "\"A\": \"1\", \"A_2\": \"2\"",
+            "\"A\": 1, \"A_2\": 2",
         ),
     ] {
         let output = sql_bench(&["query", "--conn", conn, "--format", "json", sql]);
