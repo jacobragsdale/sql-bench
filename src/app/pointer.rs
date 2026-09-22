@@ -8,7 +8,7 @@
 
 use std::time::{Duration, Instant};
 
-use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Position, Rect};
 
 use super::{Action, App, Focus};
@@ -28,6 +28,12 @@ pub enum Target {
     Tab(usize),
     /// Anywhere in a pane nothing more particular was drawn over.
     Pane(Focus),
+    /// A chip, a placeholder, a footer hint or a help row: clicking it
+    /// focuses `pane` and presses `key`, so a button can do nothing a key
+    /// cannot.
+    Button { pane: Focus, key: KeyEvent },
+    /// The text of the export prompt, starting at the region's left edge.
+    PromptText,
     /// The body of the open help or inspector, whichever is on top.
     Overlay,
     /// The whole frame, pushed under an overlay so that a click beside it
@@ -40,7 +46,7 @@ impl Target {
     /// body is too big to be a thing the eye should be drawn to.
     #[must_use]
     pub const fn hovers(self) -> bool {
-        matches!(self, Self::Tab(_))
+        matches!(self, Self::Tab(_) | Self::Button { .. })
     }
 }
 
@@ -56,6 +62,11 @@ impl Hits {
         if !rect.is_empty() {
             self.0.push((rect, target));
         }
+    }
+
+    /// Every region, in the order it was painted.
+    pub fn regions(&self) -> impl Iterator<Item = (Rect, Target)> + '_ {
+        self.0.iter().copied()
     }
 
     /// The topmost region under `position`, and the target painted there.
@@ -165,7 +176,10 @@ impl App {
                     if press.button == button && !press.left && spot == Some(press.spot) =>
                 {
                     let double = self.shell.mouse.clicked(press.spot, now);
-                    self.click(press.spot.target, double)
+                    // The column into the region, which only the prompt's
+                    // text reads: a spot is a target and a row, no more.
+                    let column = hits.at(position).map_or(0, |(rect, _)| position.x - rect.x);
+                    self.click(press.spot.target, column, double)
                 }
                 _ => Vec::new(),
             },
@@ -179,10 +193,34 @@ impl App {
     ///
     /// Nothing drawn yet means anything different on a second click, so
     /// `_double` is only passed on; tree rows and grid cells will read it.
-    fn click(&mut self, target: Target, _double: bool) -> Vec<Action> {
+    fn click(&mut self, target: Target, column: u16, _double: bool) -> Vec<Action> {
+        if let Target::Pane(Focus::Objects)
+        | Target::Button {
+            pane: Focus::Objects,
+            ..
+        } = target
+        {
+            self.end_filter_typing();
+        }
         match target {
             Target::Tab(index) if index < self.tabs.len() => self.shell.active_tab = index,
             Target::Pane(focus) => self.shell.focus = focus,
+            Target::Button { pane, key } => {
+                // The help keeps j, k, the arrows and the Page keys for
+                // itself, so a row of it is pressed with the help gone. Esc
+                // and `?` are the help's own way out, and closing it first
+                // would make them act on what is under it instead.
+                if self.shell.help && !matches!(key.code, KeyCode::Esc | KeyCode::Char('?')) {
+                    self.close_help();
+                }
+                self.shell.focus = pane;
+                return self.key(key);
+            }
+            Target::PromptText => {
+                if let Some(prompt) = self.shell.prompt.as_mut() {
+                    prompt.place(usize::from(column));
+                }
+            }
             // The way Esc goes: the prompt, then the help, then the
             // inspector, so a click beside one closes only the one on top.
             Target::Outside => {
@@ -199,14 +237,28 @@ impl App {
         Vec::new()
     }
 
+    /// A click in Objects is done typing the filter, the way Enter is:
+    /// otherwise Reload, or whatever the click would press, is one more
+    /// letter of it.
+    fn end_filter_typing(&mut self) {
+        if let Some(tab) = self.tabs.get_mut(self.shell.active_tab)
+            && tab.objects.filtering()
+        {
+            tab.objects
+                .key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        }
+    }
+
     /// The wheel scrolls what is under the pointer and never moves the focus.
     fn wheel(&mut self, spot: Option<Spot>, by: isize) -> Vec<Action> {
-        if spot.is_some_and(|spot| spot.target == Target::Overlay) {
-            // The help goes over the inspector, so an overlay under the
-            // pointer while the help is open is the help.
+        // An open overlay's Outside is under everything of its own and over
+        // everything else, so any other target is the overlay: its body, a
+        // row of it or its close button. The help goes over the inspector,
+        // so while it is open it is the one under the pointer.
+        if spot.is_some_and(|spot| spot.target != Target::Outside) {
             if self.shell.help {
                 self.scroll_help(by);
-            } else {
+            } else if self.shell.inspector.is_some() {
                 self.scroll_inspector(by);
             }
         }

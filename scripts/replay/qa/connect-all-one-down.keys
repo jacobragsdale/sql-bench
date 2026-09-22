@@ -11,9 +11,9 @@ expect 1 local-mssql ✗  2 local-oracle ●
 frame connect-all
 key 1
 expect cannot connect
-expect c to retry
+expect [ Retry ]
 frame connect-all-failed-tab
 key 2
-expect-not c to retry
+expect-not [ Retry ]
 frame connect-all-live-tab
 key q

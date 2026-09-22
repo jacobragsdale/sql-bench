@@ -10,41 +10,74 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use super::theme::Theme;
-use super::{placeholder, titled};
+use super::{buttons, placeholder, placeholder_button, titled};
 use crate::app::objects::{INDENT, Objects};
+use crate::app::pointer::Hits;
 use crate::app::{App, Focus};
 
-pub(super) fn render(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
+pub(super) fn render(frame: &mut Frame, app: &App, theme: &Theme, area: Rect, hits: &mut Hits) {
     let focused = app.shell.focus == Focus::Objects;
     let (title_style, border_style) = if focused {
         (theme.accent, theme.accent)
     } else {
         (theme.dim, theme.border)
     };
-    let objects = app.tab().map(|tab| &tab.objects);
-    let title = match objects.map(Objects::filter) {
-        Some(filter) if !filter.is_empty() => format!(" Objects /{filter} "),
-        _ => " Objects ".to_owned(),
+    let Some(tab) = app.tab() else {
+        frame.render_widget(titled(" Objects ", title_style, border_style), area);
+        return;
+    };
+    let objects = &tab.objects;
+    // Esc cancels a running query before it reaches the filter.
+    let clears = !objects.filter().is_empty() && !tab.results.running();
+    let title = match objects.filter() {
+        "" => " Objects ".to_owned(),
+        filter => format!(" Objects /{filter} "),
     };
     let block = titled(&title, title_style, border_style);
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let Some(objects) = objects else {
-        return;
-    };
     if objects.is_empty() {
-        frame.render_widget(
-            Paragraph::new(placeholder("press c to connect", theme)),
-            inner,
-        );
+        placeholder_button(frame, inner, "Connect", (Focus::Objects, "c"), theme, hits);
         return;
     }
+    let mut chips = vec![("⟳ Reload", "r")];
+    // While the filter is being typed there is nothing for `/` to open.
+    if !objects.filtering() {
+        chips.push(("/ Filter", "/"));
+    }
+    if clears {
+        chips.push(("×", "Esc"));
+    }
+    buttons(
+        frame,
+        area,
+        &title,
+        &chips,
+        Focus::Objects,
+        title_style,
+        hits,
+    );
     let visible = objects.visible();
     if visible.is_empty() {
         frame.render_widget(
             Paragraph::new(placeholder("no objects match", theme)),
             inner,
         );
+        if clears {
+            let below = Rect {
+                y: inner.y.saturating_add(1),
+                height: inner.height.saturating_sub(1),
+                ..inner
+            };
+            placeholder_button(
+                frame,
+                below,
+                "Clear filter",
+                (Focus::Objects, "Esc"),
+                theme,
+                hits,
+            );
+        }
         return;
     }
     let height = usize::from(inner.height);

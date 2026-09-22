@@ -1,7 +1,7 @@
 # scratch 120x40
- 1 local-mssql ○  2 local-oracle ○
-╭ Objects ─────────────────────────╮╭ Scratch [modified] ──────────────────────────────────────────────────────────────╮
-│ press c to connect               ││ 1 select id, name                                                                │
+ 1 local-mssql ○  2 local-oracle ○                                                                               ? Help
+╭ Objects ─────────────────────────╮╭ Scratch [modified] ────────────────────────────────── ✎ Editor ─ ▶▶ All ─ ▶ Run ─╮
+│ [ Connect ]                      ││ 1 select id, name                                                                │
 │                                  ││ 2 from bench.customers                                                           │
 │                                  ││ 3 where country = 'US'                                                           │
 │                                  ││                                                                                  │

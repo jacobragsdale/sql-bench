@@ -116,13 +116,13 @@ fn the_filter_is_in_the_title_and_what_it_hides_is_off_the_pane() {
     for spec in ["x", "y", "z"] {
         app.handle(Event::Key(key(spec)));
     }
-    assert_eq!(tree(&app), ["no objects match"]);
+    assert_eq!(tree(&app), ["no objects match", "[ Clear filter ]"]);
 }
 
 #[test]
 fn the_pane_says_where_to_start_until_a_connection_fills_it() {
     let app = two_tabs();
-    assert_eq!(tree(&app), ["press c to connect"]);
+    assert_eq!(tree(&app), ["[ Connect ]"]);
 }
 
 #[test]

@@ -13,7 +13,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
 use super::theme::Theme;
-use super::{placeholder, titled};
+use super::{buttons, placeholder, placeholder_button, titled};
+use crate::app::pointer::Hits;
 use crate::app::results::{Results, Source, Status, cut, grouped_u64, shown};
 use crate::app::{App, Focus, TabState};
 use crate::db::model::{Cell, Column};
@@ -26,7 +27,7 @@ const TYPES_ABOVE: u16 = 8;
 /// The gap between two columns, in characters.
 const GAP: usize = 2;
 
-pub(super) fn render(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
+pub(super) fn render(frame: &mut Frame, app: &App, theme: &Theme, area: Rect, hits: &mut Hits) {
     let focused = app.shell.focus == Focus::Results;
     let (title_style, border_style) = if focused {
         (theme.accent, theme.accent)
@@ -36,23 +37,39 @@ pub(super) fn render(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     let title = app
         .tab()
         .map_or_else(|| "Results".to_owned(), |tab| tab.results.title());
-    let block = titled(&format!(" {title} "), title_style, border_style);
+    let title = format!(" {title} ");
+    let block = titled(&title, title_style, border_style);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let Some(tab) = app.tab() else {
         return;
     };
+    let results = &tab.results;
+    buttons(
+        frame,
+        area,
+        &title,
+        &chips(results),
+        Focus::Results,
+        title_style,
+        hits,
+    );
     // A connection that never opened is what the pane has to say about,
-    // whatever the last query on it did.
+    // whatever the last query on it did. The button goes first because how
+    // far down the message wraps to is the paragraph's to know.
     if let TabState::Failed(message) = &tab.state {
-        let lines = vec![
-            Line::from(Span::styled(message.clone(), theme.error)),
-            Line::from(Span::styled("c to retry", theme.dim)),
-        ];
-        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+        placeholder_button(frame, inner, "Retry", (Focus::Results, "c"), theme, hits);
+        let below = Rect {
+            y: inner.y.saturating_add(1),
+            height: inner.height.saturating_sub(1),
+            ..inner
+        };
+        frame.render_widget(
+            Paragraph::new(Span::styled(message.clone(), theme.error)).wrap(Wrap { trim: false }),
+            below,
+        );
         return;
     }
-    let results = &tab.results;
     // `s` on a procedure: the text that made it, read only.
     if let Some(source) = results.source() {
         text_view(frame, source, theme, inner);
@@ -82,6 +99,27 @@ pub(super) fn render(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         return;
     }
     grid(frame, results, theme, inner, area.height > TYPES_ABOVE);
+}
+
+/// The title's buttons, each only where its key does what it says: `[`, `]`,
+/// `m` and `e` do nothing over an object's source.
+fn chips(results: &Results) -> Vec<(&'static str, &'static str)> {
+    let mut chips = Vec::new();
+    if results.source().is_none() {
+        if !results.columns().is_empty() {
+            chips.push(("Export", "e"));
+        }
+        if results.truncated() {
+            chips.push(("+10k", "m"));
+        }
+        if results.sets() > 1 {
+            chips.extend([("◀", "["), ("▶", "]")]);
+        }
+    }
+    if results.running() {
+        chips.push(("■ Cancel", "Esc"));
+    }
+    chips
 }
 
 /// An object's source: a line number gutter and the lines that fit, which is

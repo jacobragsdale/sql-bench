@@ -16,6 +16,6 @@ key c
 wait busy
 expect ✗
 expect localhost:
-expect c to retry
+expect [ Retry ]
 frame reconnect-failed
 key q

@@ -15,13 +15,17 @@ fn footer_of(terminal: &Terminal<TestBackend>, hints: &str, state: &str) -> Stri
 fn the_tab_bar_names_every_connection_and_marks_where_it_is() {
     let mut app = two_tabs();
     let terminal = frame(120, 40, &app);
-    assert_eq!(line(&terminal, 0), " 1 local-mssql ○  2 local-oracle ○");
+    assert_eq!(
+        line(&terminal, 0),
+        bar(&terminal, " 1 local-mssql ○  2 local-oracle ○")
+    );
 
     app.tabs[1].state = TabState::Connected;
     app.tabs[0].state = TabState::Failed("login failed".to_owned());
+    let terminal = frame(120, 40, &app);
     assert_eq!(
-        line(&frame(120, 40, &app), 0),
-        " 1 local-mssql ✗  2 local-oracle ●"
+        line(&terminal, 0),
+        bar(&terminal, " 1 local-mssql ✗  2 local-oracle ●")
     );
 }
 
@@ -45,7 +49,7 @@ fn the_three_panes_are_titled_placeholders() {
     let terminal = frame(120, 40, &two_tabs());
     let screen = text(&terminal);
     for (title, placeholder) in [
-        ("╭ Objects ", "press c to connect"),
+        ("╭ Objects ", "[ Connect ]"),
         ("╭ Scratch ", "your SQL goes here"),
         ("╭ Results ", "nothing has run yet"),
     ] {
@@ -105,9 +109,13 @@ fn a_connecting_tab_is_marked_with_the_spinner_frame_the_shell_is_on() {
     app.tabs[0].state = TabState::Connecting;
     let started = Instant::now();
     for (step, expected) in ["⠋", "⠙", "⠹", "⠸", "⠋"].into_iter().enumerate() {
+        let terminal = frame(120, 40, &app);
         assert_eq!(
-            line(&frame(120, 40, &app), 0),
-            format!(" 1 local-mssql {expected}  2 local-oracle ○")
+            line(&terminal, 0),
+            bar(
+                &terminal,
+                &format!(" 1 local-mssql {expected}  2 local-oracle ○")
+            )
         );
         #[allow(clippy::cast_possible_truncation)]
         let now = started + crate::app::SPIN_EVERY * step as u32;
@@ -125,15 +133,19 @@ fn a_failed_connection_is_the_message_and_how_to_retry_in_the_results_pane() {
         screen.contains("localhost:1433: cannot connect: refused"),
         "{screen}"
     );
-    assert!(screen.contains("c to retry"), "{screen}");
     assert!(!screen.contains("nothing has run yet"), "{screen}");
 
-    // The message is in the error colour, at the top left of the pane.
+    // The retry button at the top left of the pane, and the message under
+    // it in the error colour.
     let (x, y) = corners(&terminal)
         .into_iter()
         .max_by_key(|(_, y)| *y)
         .expect("the results pane");
-    assert_eq!(painted(&terminal, x + 2, y + 1), Theme::new(false).error);
+    assert_eq!(
+        line(&terminal, y + 1),
+        format!("│{:34}││ {:80} │", "", "[ Retry ]")
+    );
+    assert_eq!(painted(&terminal, x + 2, y + 2), Theme::new(false).error);
 }
 
 #[test]
