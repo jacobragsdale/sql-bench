@@ -330,9 +330,27 @@ how the app still sees no terminal and reads no clock.
   It uses both clicks up, so a third is a single again.
 - A right-click does what a left click does.
 - The wheel scrolls what is under the pointer, by 3, and never moves the
-  focus. Today that is the help and the inspector.
+  focus: the help, the inspector, the tree, the grid and an object's source.
+  A sideways wheel, or Shift with the wheel, scrolls the grid a column a
+  notch. The tree's and the grid's cursors come along only as far as they
+  must to stay in view, because the app's window is a hint clamped round
+  the cursor.
 - A drag does nothing yet.
-- Clicking a tab shows it. Clicking anywhere in a pane focuses it. A click
+- Clicking a tab shows it. Clicking anywhere in a pane focuses it.
+- In the tree a click moves the cursor to the row, a click on its `▸` or
+  `▾` is Space, and a double-click is Enter: a table's select goes into the
+  pad, a procedure's source into the results pane. In the grid a click
+  selects the cell, a double-click is Enter (the inspector), and a click on
+  a header selects its column. Those are the keys themselves, pressed after
+  the click has moved the cursor, so a load or a select is decided in one
+  place.
+- A click never moves the view. `Tree`, `Cells`, `Header` and `Source`
+  carry the window they were drawn from (`top`, and the grid's `left`), and
+  `Objects::click` and `Results::click` set the scroll hint from that and
+  the cursor directly. The keys' `at_row` and `scroll_to` would move a
+  window whose bottom row was clicked, by their page of 10, and a column
+  hint `h` and `l` leave behind would pull the columns back left. The first
+  `j` after a click ten rows below the top still moves the view once. A click
   beside the help, the inspector or the export prompt closes the one on top,
   the way Esc does, and reaches nothing under it.
 - What the pointer rests on is painted in the theme's hover style, restyled
