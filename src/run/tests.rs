@@ -379,3 +379,26 @@ fn the_pad_scrolls_from_the_window_the_last_frame_drew() {
     assert_eq!(row(2).trim_end_matches([' ', '│', '┃']), "28 select 28");
     assert_eq!(row(14).trim_end_matches([' ', '│', '┃']), "40 select 40");
 }
+
+#[test]
+fn a_right_click_draws_its_menu_and_resting_on_an_entry_lights_it_once() {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    let right = MouseButton::Right;
+    // Results' top border at 120x40, and the second entry of the menu that
+    // opens down and right from it.
+    let mut events = vec![
+        mouse(MouseEventKind::Down(right), 60, 16),
+        mouse(MouseEventKind::Up(right), 60, 16),
+    ];
+    events.extend(vec![mouse(MouseEventKind::Moved, 70, 18); 100]);
+    assert_eq!(
+        frames_for(events.clone()),
+        3,
+        "the first frame, the menu and the hover"
+    );
+    let app = drive(&mut Burst(events.into()), &Trace::new(None));
+    assert_eq!(
+        app.shell.mouse.menu.map(|open| open.pane),
+        Some(crate::app::Focus::Results)
+    );
+}

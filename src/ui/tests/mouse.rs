@@ -5,7 +5,7 @@ use ratatui::layout::Position;
 use std::time::Instant;
 
 use super::*;
-use crate::app::pointer::{Mouse, Seam, Split};
+use crate::app::pointer::{Menu, Mouse, Seam, Split, menu};
 use crate::app::results::{Inspector, Results};
 use crate::app::tests::browsed;
 use crate::app::{Action, RuntimeEvent};
@@ -1525,4 +1525,284 @@ fn a_seam_is_lit_under_the_pointer_and_while_it_is_held() {
         (2, 25),
     );
     assert_ne!(painted(&frame(120, 40, &app), 20, 25), lit, "let go");
+}
+
+/// A right-click at `at` on a `width`x`height` frame of `app`.
+fn right_click(app: &mut App, size: (u16, u16), at: (u16, u16)) {
+    mouse_on(app, size, MouseEventKind::Down(MouseButton::Right), at);
+    mouse_on(app, size, MouseEventKind::Up(MouseButton::Right), at);
+}
+
+/// The first cell of `pane` on a 120x40 frame of `app` that nothing more
+/// particular was drawn over: a border, or a pane with nothing in it.
+fn in_pane(app: &App, pane: Focus) -> (u16, u16) {
+    let hits = hits(app);
+    (0..40)
+        .flat_map(|y| (0..120).map(move |x| (x, y)))
+        .find(|(x, y)| {
+            hits.at(Position::new(*x, *y))
+                .is_some_and(|(_, target)| target == Target::Pane(pane))
+        })
+        .unwrap_or_else(|| panic!("nowhere in {pane:?} is bare"))
+}
+
+/// `pane`'s menu, opened with a right-click where nothing in it moves.
+fn open_in(app: &mut App, pane: Focus) {
+    let at = in_pane(app, pane);
+    right_click(app, WIDE, at);
+}
+
+/// Where each entry of the open menu is on a 120x40 frame of `app`.
+fn entries(app: &App) -> Vec<(u16, u16)> {
+    hits(app)
+        .regions()
+        .filter(|(_, target)| matches!(target, Target::MenuItem(_)))
+        .map(|(rect, _)| (rect.x, rect.y))
+        .collect()
+}
+
+#[test]
+fn picking_each_entry_is_exactly_its_key() {
+    let states: [State; 6] = [
+        ("idle", idle),
+        ("running", running),
+        ("truncated", truncated),
+        ("filtered", filtered),
+        ("source view", source_view),
+        ("roomy", roomy),
+    ];
+    let mut checked = 0;
+    let mut wrong = Vec::new();
+    for (state, make) in states {
+        for pane in [Focus::Objects, Focus::Scratch, Focus::Results] {
+            let mut opened = make();
+            open_in(&mut opened, pane);
+            let mut closed = opened.clone();
+            closed.shell.mouse.menu = None;
+            let places = entries(&opened);
+            assert_eq!(places.len(), menu(pane).len(), "{pane:?} in {state}");
+            for (item, ((name, does), (x, y))) in menu(pane).into_iter().zip(places).enumerate() {
+                let mut clicked = opened.clone();
+                let by_mouse = click(&mut clicked, x, y);
+                let mut picked = opened.clone();
+                for _ in 0..item {
+                    picked.handle(Event::Key(key("j")));
+                }
+                let by_enter = picked.handle(Event::Key(key("Enter")));
+                let mut pressed = closed.clone();
+                let by_key = pressed.handle(Event::Key(key(name)));
+                let (clicked, picked, pressed) =
+                    (settled(clicked), settled(picked), settled(pressed));
+                let what = format!("{does} in {pane:?} in {state}");
+                if clicked != pressed
+                    || picked != pressed
+                    || by_mouse != by_key
+                    || by_enter != by_key
+                {
+                    wrong.push(format!("{what}: not its key"));
+                } else if state == "roomy"
+                    && by_key.is_empty()
+                    && pressed == settled(closed.clone())
+                {
+                    // Elsewhere an entry may have nothing to act on, the way
+                    // its key may: the footer says why, as it does for the key.
+                    wrong.push(format!("{what}: does nothing"));
+                }
+                checked += 1;
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+    assert_eq!(checked, 6 * (7 + 5 + 8));
+}
+
+#[test]
+fn a_right_click_selects_what_a_left_click_would_then_opens_the_menu_there() {
+    // A cell of the grid, and a row of the tree off its glyph.
+    for (x, y) in [(60, 25), (12, 5)] {
+        let mut left = deep();
+        click(&mut left, x, y);
+        let mut right = deep();
+        right_click(&mut right, WIDE, (x, y));
+        assert_ne!(right.tabs, deep().tabs, "it moved something");
+        assert_eq!(right.tabs, left.tabs);
+        assert_eq!(right.shell.focus, left.shell.focus);
+        assert_eq!(
+            right.shell.mouse.menu,
+            Some(Menu {
+                pane: left.shell.focus,
+                at: Position::new(x, y),
+                item: 0
+            })
+        );
+    }
+    // A pane's border opens its menu and moves nothing.
+    let mut app = deep();
+    open_in(&mut app, Focus::Objects);
+    assert_eq!(app.tabs, deep().tabs);
+    assert_eq!(app.shell.focus, Focus::Objects);
+    assert_eq!(
+        app.shell.mouse.menu.map(|open| open.pane),
+        Some(Focus::Objects)
+    );
+    // A tab is not a pane: it is a left click there, and no menu.
+    let mut app = two_tabs();
+    right_click(&mut app, WIDE, (20, 0));
+    assert_eq!(app.shell.active_tab, 1);
+    assert_eq!(app.shell.mouse.menu, None);
+}
+
+#[test]
+fn a_right_click_in_the_pads_selection_keeps_it_and_beside_it_moves_the_cursor() {
+    let mut app = roomy();
+    app.shell.focus = Focus::Scratch;
+    let (rect, gutter) = hits(&app)
+        .regions()
+        .find_map(|(rect, target)| match target {
+            Target::Pad { gutter, .. } => Some((rect, gutter)),
+            _ => None,
+        })
+        .expect("the pad");
+    let selection = app.tabs[0].scratch.selection().expect("a selection");
+    let ((line, column), _) = selection;
+    let at = |column: usize| {
+        (
+            rect.x + u16::try_from(gutter + column).expect("on screen"),
+            rect.y + u16::try_from(line).expect("on screen"),
+        )
+    };
+    right_click(&mut app, WIDE, at(column));
+    assert_eq!(app.tabs[0].scratch.selection(), Some(selection));
+    let text = app.tabs[0].scratch.selected_text().expect("selected");
+    let (x, y) = entries(&app)[2];
+    assert_eq!(click(&mut app, x, y), vec![Action::Copy(text)], "Ctrl-C");
+
+    right_click(&mut app, WIDE, at(column + 3));
+    assert_eq!(app.tabs[0].scratch.selection(), None);
+    assert_eq!(app.tabs[0].scratch.cursor(), (line, column + 3));
+    assert_eq!(
+        app.shell.mouse.menu.map(|open| open.pane),
+        Some(Focus::Scratch)
+    );
+}
+
+/// The menu for Results, as it is drawn at the right end of a frame.
+const RESULTS_MENU: [&str; 10] = [
+    "╭ Results ──────────────────────╮",
+    "│ inspect the cell        Enter │",
+    "│ copy the cell               y │",
+    "│ copy the row                Y │",
+    "│ sort by the column          o │",
+    "│ export the result set       e │",
+    "│ 10,000 more rows            m │",
+    "│ previous result set         [ │",
+    "│ next result set             ] │",
+    "╰───────────────────────────────╯",
+];
+
+#[test]
+fn a_menu_opened_near_the_bottom_right_corner_stays_on_the_screen() {
+    // Two rows up from the footer and one in from the edge, it turns left
+    // and up and ends at the pointer.
+    let mut app = idle();
+    right_click(&mut app, WIDE, (118, 37));
+    let terminal = frame(120, 40, &app);
+    let expected: Vec<String> = RESULTS_MENU
+        .iter()
+        .map(|row| format!("│{:34}││{:49}{row}│", "", ""))
+        .collect();
+    assert_eq!(lines(&terminal, 28..38), expected);
+    assert_eq!(line(&terminal, 27), right(""));
+
+    // At the smallest size there is not the room below it either, so it
+    // goes up from the pointer too, and over the panes' borders.
+    let mut app = idle();
+    right_click(&mut app, SMALL, (58, 12));
+    let terminal = frame(60, 15, &app);
+    assert_eq!(
+        lines(&terminal, 3..13),
+        [
+            "│   ▾ Tables       ││     ╭ Results ──────────────────────╮│",
+            "│     ▸ customers  ││     │ inspect the cell        Enter ││",
+            "│     ▸ orders     │╰─────│ copy the cell               y │╯",
+            "│   ▸ Views        │╭ Resu│ copy the row                Y │╮",
+            "│   ▸ Procedures   ││ noth│ sort by the column          o ││",
+            "│   ▸ Functions    ││     │ export the result set       e ││",
+            "│   ▸ Sequences    ││     │ 10,000 more rows            m ││",
+            "│ ▸ bench          ││     │ previous result set         [ ││",
+            "│                  ││     │ next result set             ] ││",
+            "│                  ││     ╰───────────────────────────────╯│",
+        ]
+    );
+}
+
+#[test]
+fn the_entry_enter_would_pick_is_painted_like_the_cursor_and_the_pointer_lights_its_own() {
+    let theme = Theme::new(false);
+    let mut app = idle();
+    right_click(&mut app, WIDE, (118, 37));
+    app.handle(Event::Key(key("j")));
+    app.shell.mouse.pointer = Some(Position::new(100, 32));
+    let terminal = frame(120, 40, &app);
+    let buffer = terminal.backend().buffer();
+    // The second entry is highlighted and the fourth is under the pointer.
+    for (y, reversed) in [(29, false), (30, true), (31, false)] {
+        assert_eq!(
+            (88..118).all(|x| buffer[(x, y)]
+                .modifier
+                .contains(ratatui::style::Modifier::REVERSED)),
+            reversed,
+            "row {y}"
+        );
+    }
+    assert!(
+        (88..118)
+            .all(|x| Style::new().fg(buffer[(x, 32)].fg).bg(buffer[(x, 32)].bg) == theme.hover)
+    );
+}
+
+#[test]
+fn the_menu_takes_every_key_while_it_is_open() {
+    let mut app = running();
+    open_in(&mut app, Focus::Results);
+    let item = |app: &App| app.shell.mouse.menu.map(|open| open.item);
+    for (spec, at) in [("k", 0), ("Down", 1), ("j", 2), ("Up", 1)] {
+        assert!(app.handle(Event::Key(key(spec))).is_empty());
+        assert_eq!(item(&app), Some(at), "after {spec}");
+    }
+    for _ in 0..20 {
+        app.handle(Event::Key(key("j")));
+    }
+    assert_eq!(item(&app), Some(7), "the last entry is as far as it goes");
+    assert!(
+        app.handle(Event::Key(key("Esc"))).is_empty(),
+        "Esc closed the menu before it cancelled the query"
+    );
+    assert_eq!(item(&app), None);
+
+    for spec in ["q", "?", "x"] {
+        let mut app = idle();
+        open_in(&mut app, Focus::Scratch);
+        let before = app.tabs.clone();
+        assert!(app.handle(Event::Key(key(spec))).is_empty(), "{spec}");
+        assert_eq!(item(&app), None, "{spec} closed it");
+        assert_eq!(app.tabs, before, "{spec} was not typed");
+        assert!(!app.shell.help);
+    }
+}
+
+#[test]
+fn a_click_beside_the_menu_closes_it_and_reaches_nothing() {
+    let mut app = two_tabs();
+    open_in(&mut app, Focus::Results);
+    assert_eq!(
+        hits(&app)
+            .at(Position::new(20, 0))
+            .map(|(_, target)| target),
+        Some(Target::Outside)
+    );
+    click(&mut app, 20, 0);
+    assert_eq!(app.shell.mouse.menu, None);
+    assert_eq!(app.shell.active_tab, 0, "the tab under it was not clicked");
+    assert_eq!(app.shell.focus, Focus::Results);
 }

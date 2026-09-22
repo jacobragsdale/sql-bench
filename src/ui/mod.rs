@@ -15,7 +15,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::pointer::{Hits, Seam, Target, thumb};
+use crate::app::pointer::{Hits, Menu, Seam, Target, menu, thumb};
 use crate::app::prompt::Prompt;
 use crate::app::results::{INSPECT_WIDTH, Inspector, inspect_title};
 use crate::app::scratch::Scratch;
@@ -122,6 +122,9 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) -> Hits {
     if app.shell.prompt.is_some() {
         hits.push(area, Target::Outside);
         footer_line(frame, app, theme, footer, &mut hits);
+    }
+    if let Some(open) = app.shell.mouse.menu {
+        render_menu(frame, area, open, theme, &mut hits);
     }
     hover(frame, app, theme, &hits);
     hits
@@ -752,6 +755,64 @@ fn render_inspector(
         theme.accent,
         hits,
     );
+}
+
+/// The context menu a right-click opened: each entry what it does and, on
+/// the right, the key it presses. It opens right and down from the pointer,
+/// or left and up where that would run off the frame, and the entry Enter
+/// would pick is painted like the pad's cursor.
+fn render_menu(frame: &mut Frame, area: Rect, open: Menu, theme: &Theme, hits: &mut Hits) {
+    let entries = menu(open.pane);
+    let does = entries
+        .iter()
+        .map(|(_, does)| cells(does))
+        .max()
+        .unwrap_or(0);
+    let keys = entries.iter().map(|(key, _)| cells(key)).max().unwrap_or(0);
+    // Two borders, a cell of padding inside each, and three between.
+    let width = (does + keys + 7).min(area.width);
+    let height = u16::try_from(entries.len() + 2)
+        .unwrap_or(u16::MAX)
+        .min(area.height);
+    let rect = Rect::new(
+        open_from(open.at.x, width, area.x, area.right()),
+        open_from(open.at.y, height, area.y, area.bottom()),
+        width,
+        height,
+    );
+    let (does, keys) = (usize::from(does), usize::from(keys));
+    let lines: Vec<Line> = entries
+        .iter()
+        .map(|(key, what)| Line::raw(format!("{what:<does$}   {key:>keys$}")))
+        .collect();
+    let title = format!(" {} ", open.pane.title());
+    frame.render_widget(Clear, rect);
+    frame.render_widget(
+        Paragraph::new(lines).block(titled(&title, theme.accent, theme.accent)),
+        rect,
+    );
+    hits.push(area, Target::Outside);
+    hits.push(rect, Target::Overlay);
+    for (item, y) in (rect.y + 1..rect.bottom().saturating_sub(1)).enumerate() {
+        let row = Rect::new(rect.x + 1, y, rect.width.saturating_sub(2), 1);
+        if item == open.item {
+            frame.buffer_mut().set_style(row, theme.cursor);
+        }
+        hits.push(row, Target::MenuItem(item));
+    }
+}
+
+/// Where something `size` long starts on one axis, opening from `at`
+/// towards `end`, or back from `at` when that would run past it, and never
+/// off either end — `size` is no more than `end - start`.
+fn open_from(at: u16, size: u16, start: u16, end: u16) -> u16 {
+    if at.saturating_add(size) <= end {
+        at.max(start)
+    } else {
+        at.saturating_add(1)
+            .saturating_sub(size)
+            .clamp(start, end - size)
+    }
 }
 
 fn titled(title: &str, title_style: Style, border_style: Style) -> Block<'static> {
