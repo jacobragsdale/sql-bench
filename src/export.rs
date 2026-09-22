@@ -219,9 +219,11 @@ fn delimited_row<'a>(
 }
 
 /// An array of objects, one row to a line so that a thousand of them are
-/// still greppable. NULL is `null` and a number is a number; everything else
-/// — including a decimal, whose digits a JSON number would round away — is a
-/// string, which is what [`Cell`] promises.
+/// still greppable. NULL is `null`, a boolean is a boolean and a number is a
+/// number; everything else — including a decimal with a scale, whose digits
+/// and trailing zeros a JSON reader would round away — is a string, which is
+/// what [`Cell`] promises. A whole decimal a double holds exactly (Oracle's
+/// `count(*)`, a `NUMBER` id) is a number, because it is one.
 #[must_use]
 pub fn json(columns: &[Column], rows: &[Vec<Cell>]) -> String {
     if rows.is_empty() {
@@ -282,6 +284,17 @@ fn value(out: &mut String, cell: Option<&Cell>) {
             let _ = write!(out, "{number}");
         }
         Some(Cell::Float(_)) => out.push_str("null"),
+        Some(Cell::Bool(value)) => out.push_str(if *value { "true" } else { "false" }),
+        // 2^53: past it a JavaScript reader rounds, which is the rounding a
+        // string is there to prevent. Printed back the same, so `+5` and
+        // `007`, which JSON has no spelling for, stay strings.
+        Some(Cell::Decimal(text))
+            if text
+                .parse::<i64>()
+                .is_ok_and(|n| n.unsigned_abs() <= 1 << 53 && n.to_string() == *text) =>
+        {
+            out.push_str(text);
+        }
         Some(cell) => string(out, &cell.display()),
     }
 }
@@ -491,11 +504,13 @@ mod tests {
     #[test]
     fn json_writes_numbers_as_numbers_and_everything_else_as_strings() {
         let json = json(
-            &columns(&["n", "f", "d", "b", "t", "null", "bytes"]),
+            &columns(&["n", "f", "d", "w", "huge", "b", "t", "null", "bytes"]),
             &[vec![
                 Cell::Int(-7),
                 Cell::Float(1.5),
                 Cell::Decimal("10.2500".to_owned()),
+                Cell::Decimal("-42".to_owned()),
+                Cell::Decimal("12345678901234567890".to_owned()),
                 Cell::Bool(true),
                 text("hi"),
                 Cell::Null,
@@ -504,7 +519,8 @@ mod tests {
         );
         assert_eq!(
             json,
-            "[\n  {\"n\": -7, \"f\": 1.5, \"d\": \"10.2500\", \"b\": \"true\", \
+            "[\n  {\"n\": -7, \"f\": 1.5, \"d\": \"10.2500\", \"w\": -42, \
+             \"huge\": \"12345678901234567890\", \"b\": true, \
              \"t\": \"hi\", \"null\": null, \"bytes\": \"0x00ff\"}\n]\n"
         );
     }
