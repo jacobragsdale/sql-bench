@@ -184,11 +184,20 @@ fn grid(
     );
 
     let mut lines = Vec::with_capacity(header + visible + 1);
-    lines.push(head(columns, widths, &showing, theme.accent, |column| {
-        &column.name
-    }));
+    let sorted = results
+        .set()
+        .and_then(|set| set.sort)
+        .map(|(column, descending)| (column, if descending { '▼' } else { '▲' }));
+    lines.push(head(
+        columns,
+        widths,
+        &showing,
+        theme.accent,
+        sorted,
+        |column| &column.name,
+    ));
     if types {
-        lines.push(head(columns, widths, &showing, theme.dim, |column| {
+        lines.push(head(columns, widths, &showing, theme.dim, None, |column| {
             &column.type_name
         }));
     }
@@ -255,12 +264,14 @@ fn targets(
     }
 }
 
-/// One header row: the same columns, padded the same way.
+/// One header row: the same columns, padded the same way, and the sorted
+/// one's arrow.
 fn head(
     columns: &[Column],
     widths: &[usize],
     showing: &[usize],
     style: Style,
+    sorted: Option<(usize, char)>,
     what: impl Fn(&Column) -> &str,
 ) -> Line<'static> {
     let mut spans = Vec::with_capacity(showing.len() * 2);
@@ -270,7 +281,18 @@ fn head(
         }
         let width = widths[column];
         let text = columns.get(column).map(&what).unwrap_or_default();
-        spans.push(Span::styled(pad(&cut(text, width), width, false), style));
+        let mut cell = pad(&cut(text, width), width, false);
+        // The arrow takes the column's last character rather than a new
+        // one, so a column no wider than its name still shows it. Padded
+        // again because the character it took may have been a wide one.
+        if let Some((by, arrow)) = sorted
+            && by == column
+            && cell.pop().is_some()
+        {
+            cell.push(arrow);
+            cell = pad(&cell, width, false);
+        }
+        spans.push(Span::styled(cell, style));
     }
     Line::from(spans)
 }

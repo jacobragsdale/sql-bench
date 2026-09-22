@@ -822,10 +822,34 @@ fn clicking_a_column_the_cursor_went_past_leaves_the_columns_where_they_were() {
     assert_eq!(app.tabs[0].results.selected(), (6, 6));
     assert_eq!(lines(&frame(120, 40, &app), GRID), lines(&before, GRID));
 
-    // Its header selects the column and leaves the rows be.
+    // Its header selects the column, and sorts by it, with the columns
+    // where they were.
     click(&mut app, 40, 17);
     assert_eq!(app.tabs[0].results.selected(), (6, 5));
-    assert_eq!(lines(&frame(120, 40, &app), GRID), lines(&before, GRID));
+    assert_eq!(
+        line(&frame(120, 40, &app), 17),
+        right("column_5  ▲  column_6  column_7     column_8     column_9  column_10")
+    );
+}
+
+#[test]
+fn a_click_on_a_header_is_o_on_its_column() {
+    let mut clicked = idle();
+    clicked.tabs[0].results = crate::app::tests::filled(50, 4);
+    let mut pressed = clicked.clone();
+    pressed.shell.focus = Focus::Results;
+    pressed.handle(Event::Key(key("l")));
+    // Up, down, and back: column_1 is text, so row 10 comes after row 1.
+    let firsts = ["row 0 of", "row 9 of", "row 0 of"];
+    for first in firsts {
+        let by_mouse = click(&mut clicked, 50, 17);
+        let by_key = pressed.handle(Event::Key(key("o")));
+        assert_eq!(by_mouse, vec![Action::Sorted { rows: 50 }]);
+        assert_eq!(by_mouse, by_key);
+        assert_eq!(settled(clicked.clone()), settled(pressed.clone()));
+        let cell = clicked.tabs[0].results.rows()[0][1].display().into_owned();
+        assert!(cell.starts_with(first), "{cell}");
+    }
 }
 
 #[test]

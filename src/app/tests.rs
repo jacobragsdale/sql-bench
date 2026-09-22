@@ -597,6 +597,112 @@ fn y_copies_the_cell_and_shift_y_the_row_with_a_null_as_nothing() {
     assert!(app.shell.inspector.is_none(), "nothing to inspect");
 }
 
+/// A grid of eight rows, `id` naming each, with every kind of value `o`
+/// orders differently: integers, floats and decimals in `n`, text in `t`,
+/// NULLs in both, and a tie in each. `running` leaves the query unfinished.
+fn mixed(running: bool) -> App {
+    let mut app = two_tabs();
+    app.shell.focus = Focus::Results;
+    let results = &mut app.tabs[0].results;
+    results.start(Instant::now(), 0, 1, false);
+    results.apply(QueryEvent::Columns(
+        ["id", "n", "t"]
+            .into_iter()
+            .map(|name| Column {
+                name: name.to_owned(),
+                type_name: String::new(),
+            })
+            .collect(),
+    ));
+    let decimal = |text: &str| Cell::Decimal(text.to_owned());
+    let text = |text: &str| Cell::Text(text.to_owned());
+    let n = [
+        Cell::Int(10),
+        decimal("9.5"),
+        Cell::Null,
+        Cell::Float(-1.25),
+        decimal("100.00"),
+        Cell::Int(2),
+        decimal("2.0"),
+        Cell::Null,
+    ];
+    let t = ["pear", "", "apple", "fig", "Zebra", "apple", "", "kiwi"];
+    results.apply(QueryEvent::Rows(
+        n.into_iter()
+            .zip(t)
+            .enumerate()
+            .map(|(row, (n, t))| {
+                let t = if t.is_empty() { Cell::Null } else { text(t) };
+                vec![text(&format!("r{row}")), n, t]
+            })
+            .collect(),
+    ));
+    if !running {
+        results.apply(QueryEvent::Done {
+            rows: 8,
+            truncated: false,
+            connect_ms: 1,
+            first_row_ms: 2,
+            total_ms: 3,
+        });
+    }
+    app
+}
+
+/// The `id` of each row, in the order the grid has them.
+fn ids(app: &App) -> Vec<String> {
+    app.tabs[0]
+        .results
+        .rows()
+        .iter()
+        .map(|row| row[0].display().into_owned())
+        .collect()
+}
+
+#[test]
+fn o_sorts_by_the_column_up_then_down_then_back_the_way_the_rows_came() {
+    let mut app = mixed(false);
+    let arrived = app.tabs[0].results.rows().to_vec();
+    press(&mut app, "l");
+
+    // Decimals are numbers, so 100.00 is after 9.5; 2 and 2.0 tie and keep
+    // the order they came in, both ways; NULL is last both ways.
+    assert_eq!(press(&mut app, "o"), vec![Action::Sorted { rows: 8 }]);
+    assert_eq!(ids(&app), ["r3", "r5", "r6", "r1", "r0", "r4", "r2", "r7"]);
+    assert_eq!(app.tabs[0].results.set().unwrap().sort, Some((1, false)));
+    press(&mut app, "o");
+    assert_eq!(ids(&app), ["r4", "r0", "r1", "r5", "r6", "r3", "r2", "r7"]);
+    assert_eq!(app.tabs[0].results.set().unwrap().sort, Some((1, true)));
+    press(&mut app, "o");
+    assert_eq!(app.tabs[0].results.rows(), arrived);
+    assert_eq!(app.tabs[0].results.set().unwrap().sort, None);
+
+    // Another column starts again from up, whatever the last one was at;
+    // text is compared as it reads, capitals first.
+    press(&mut app, "o");
+    press(&mut app, "l");
+    press(&mut app, "o");
+    assert_eq!(ids(&app), ["r4", "r2", "r5", "r3", "r7", "r0", "r1", "r6"]);
+    press(&mut app, "o");
+    assert_eq!(ids(&app), ["r0", "r7", "r3", "r2", "r5", "r4", "r1", "r6"]);
+    press(&mut app, "o");
+    assert_eq!(app.tabs[0].results.rows(), arrived);
+    assert_eq!(
+        app.tabs[0].results.selected(),
+        (0, 2),
+        "the cursor stays put"
+    );
+}
+
+#[test]
+fn o_waits_for_the_last_row_and_says_so() {
+    let mut app = mixed(true);
+    let before = app.tabs[0].results.clone();
+    assert_eq!(press(&mut app, "o"), vec![]);
+    assert_eq!(app.tabs[0].results, before);
+    assert_eq!(app.shell.status, "sort once every row is here");
+}
+
 #[test]
 fn the_open_inspector_takes_the_scroll_keys_and_esc_closes_it_before_an_error() {
     let mut app = ready(Focus::Results);

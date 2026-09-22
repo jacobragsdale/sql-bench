@@ -206,6 +206,7 @@ Results:
 | `y` | copy the cell |
 | `Y` | copy the row |
 | `e` | export the result set |
+| `o` | sort by the column |
 
 The scratch pad is one pad per connection, kept in
 `~/.local/state/sql-bench/scratch/<connection>.sql` and written half a second

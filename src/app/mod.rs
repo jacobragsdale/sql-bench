@@ -79,6 +79,7 @@ pub const KEYS: &[(&str, &str, &str)] = &[
     ("y", RESULTS, "copy the cell"),
     ("Y", RESULTS, "copy the row"),
     ("e", RESULTS, "export the result set"),
+    ("o", RESULTS, "sort by the column"),
     ("j", OBJECTS, "down"),
     ("k", OBJECTS, "up"),
     ("l", OBJECTS, "expand or open"),
@@ -240,6 +241,12 @@ pub enum Action {
     LoadObjects {
         tab: usize,
         request: CatalogRequest,
+    },
+    /// Nothing to do: `o` sorted this many rows while the event was being
+    /// handled, which the run loop times for the trace because the app
+    /// reads no clock.
+    Sorted {
+        rows: usize,
     },
 }
 
@@ -823,6 +830,15 @@ impl App {
                 self.shell.prompt = Some(Prompt::new(prompt::export_path(&open.name)));
                 Vec::new()
             }
+            // The rows are still coming, and a batch landing on sorted rows
+            // would be out of order.
+            Hit::Sort if open.results.running() => {
+                self.shell.status = "sort once every row is here".to_owned();
+                Vec::new()
+            }
+            Hit::Sort => vec![Action::Sorted {
+                rows: open.results.sort(),
+            }],
         }
     }
 

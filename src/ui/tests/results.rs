@@ -147,6 +147,44 @@ fn the_cell_cursor_is_reversed_and_a_null_is_dim() {
 }
 
 #[test]
+fn the_sorted_column_trades_its_last_character_for_an_arrow() {
+    let mut results = Results::default();
+    results.start(Instant::now(), 0, 1, false);
+    results.apply(QueryEvent::Columns(
+        ["qty", "fruit"]
+            .into_iter()
+            .map(|name| Column {
+                name: name.to_owned(),
+                type_name: "int".to_owned(),
+            })
+            .collect(),
+    ));
+    results.apply(QueryEvent::Rows(vec![
+        vec![Cell::Int(3), Cell::Text("pear".to_owned())],
+        vec![Cell::Int(1), Cell::Text("fig".to_owned())],
+    ]));
+    results.apply(QueryEvent::Done {
+        rows: 2,
+        truncated: false,
+        connect_ms: 0,
+        first_row_ms: 0,
+        total_ms: 0,
+    });
+    let mut app = showing(results);
+    app.handle(Event::Key(key("o")));
+    let terminal = frame(120, 40, &app);
+    assert_eq!(body(&terminal, 0), "qt▲  fruit");
+    assert_eq!(body(&terminal, 2), "  1  fig");
+    app.handle(Event::Key(key("o")));
+    assert_eq!(body(&frame(120, 40, &app), 0), "qt▼  fruit");
+    app.handle(Event::Key(key("l")));
+    app.handle(Event::Key(key("o")));
+    let terminal = frame(120, 40, &app);
+    assert_eq!(body(&terminal, 0), "qty  frui▲");
+    assert_eq!(body(&terminal, 1), "int  int", "the type row has none");
+}
+
+#[test]
 fn a_short_pane_gives_the_rows_the_row_the_types_would_have_had() {
     let app = showing(filled(50, 4));
     // At fifteen rows the results pane is eight high, which is the line the
