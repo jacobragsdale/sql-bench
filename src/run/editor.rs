@@ -36,7 +36,7 @@ pub fn command_from(visual: Option<String>, editor: Option<String>) -> Option<Ve
 /// taken away again either way.
 pub fn round_trip(directory: &Path, tab: usize, sql: &str, command: &[String]) -> Result<String> {
     let path = file(directory, tab);
-    std::fs::write(&path, sql).with_context(|| format!("writing {}", path.display()))?;
+    create(&path, sql).with_context(|| format!("writing {}", path.display()))?;
     let outcome = run(command, &path).and_then(|()| {
         std::fs::read_to_string(&path).with_context(|| format!("reading {} back", path.display()))
     });
@@ -45,9 +45,28 @@ pub fn round_trip(directory: &Path, tab: usize, sql: &str, command: &[String]) -
 }
 
 /// A name of this process's own, so two sql-benches editing at once do not
-/// hand each other their pads.
+/// hand each other their pads, with the clock in it so that nobody else on a
+/// shared `/tmp` can plant a file under the name before it is written.
 fn file(directory: &Path, tab: usize) -> PathBuf {
-    directory.join(format!("sql-bench-{}-{tab}.sql", std::process::id()))
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.subsec_nanos());
+    directory.join(format!(
+        "sql-bench-{}-{tab}-{nanos:09}.sql",
+        std::process::id()
+    ))
+}
+
+/// A file that did not exist, readable by nobody else: a pad can hold a
+/// password, and a name that is already there — a symlink someone left in
+/// `/tmp` — is refused rather than followed.
+fn create(path: &Path, sql: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options.open(path)?.write_all(sql.as_bytes())
 }
 
 /// Runs the editor and waits for it. It owns the terminal while it runs, so
@@ -98,7 +117,34 @@ mod tests {
         ];
         let edited = round_trip(directory.path(), 0, "select 1;", &editor).expect("an edit");
         assert_eq!(edited, "select 2;");
-        assert!(!file(directory.path(), 0).exists(), "the temp file is gone");
+        let left = std::fs::read_dir(directory.path())
+            .expect("a listing")
+            .count();
+        assert_eq!(left, 0, "the temp file is gone");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_file_is_new_and_private_and_a_planted_one_is_refused() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let directory = tempfile::tempdir().expect("a directory");
+        let editor = vec![
+            "sh".to_owned(),
+            "-c".to_owned(),
+            "stat -c %a \"$0\" > \"$0.mode\"".to_owned(),
+        ];
+        round_trip(directory.path(), 0, "select 1;", &editor).expect("an edit");
+        let mode = std::fs::read_dir(directory.path())
+            .expect("a listing")
+            .find_map(|entry| std::fs::read_to_string(entry.ok()?.path()).ok())
+            .expect("the mode the editor saw");
+        assert_eq!(mode.trim(), "600");
+
+        let planted = directory.path().join("planted");
+        std::fs::write(&planted, "").expect("a file");
+        std::fs::set_permissions(&planted, std::fs::Permissions::from_mode(0o644))
+            .expect("permissions");
+        assert!(create(&planted, "select 1;").is_err(), "an existing name");
     }
 
     #[test]
