@@ -315,6 +315,18 @@ fn no_connections_is_an_app_with_no_tabs_that_still_takes_keys() {
 }
 
 #[test]
+fn opening_a_disconnected_tab_connects_it_and_any_other_tab_is_left_alone() {
+    let mut app = two_tabs();
+    assert_eq!(press(&mut app, "Ctrl-T"), vec![Action::Connect(1)]);
+    assert_eq!(press(&mut app, "1"), vec![Action::Connect(0)]);
+    app.tabs[0].state = TabState::Connected;
+    app.tabs[1].state = TabState::Failed("listener refused".to_owned());
+    assert_eq!(press(&mut app, "2"), vec![]);
+    assert_eq!(press(&mut app, "Ctrl-T"), vec![]);
+    assert_eq!(app.shell.active_tab, 0);
+}
+
+#[test]
 fn c_asks_to_connect_the_tab_on_screen_and_shift_c_to_disconnect_it() {
     let mut app = two_tabs();
     assert_eq!(press(&mut app, "c"), vec![Action::Connect(0)]);
@@ -1098,12 +1110,14 @@ fn i_asks_for_the_columns_and_s_for_the_source_of_what_the_cursor_is_on() {
     );
     assert_eq!(
         press(&mut app, "s"),
-        vec![],
-        "a table is its columns, and it says so rather than asking"
-    );
-    assert_eq!(
-        app.shell.status,
-        "a table has no source text; i shows its columns"
+        vec![Action::LoadObjects {
+            tab: 1,
+            request: CatalogRequest::Source {
+                schema: "dbo".to_owned(),
+                name: "customers".to_owned(),
+                kind: ObjectKind::Table,
+            }
+        }]
     );
 
     // The columns come back into the tree and the grid at once.
@@ -1185,6 +1199,12 @@ fn s_on_a_procedure_shows_its_source_in_the_results_pane() {
     assert_eq!(app.tabs[1].results.source().expect("the source").scroll, 2);
     press(&mut app, "g");
     assert_eq!(app.tabs[1].results.source().expect("the source").scroll, 0);
+
+    // y takes all of it, not the line the view starts at.
+    let whole = "CREATE PROCEDURE sp_customer_orders AS\nBEGIN\nEND;".to_owned();
+    assert_eq!(press(&mut app, "y"), vec![Action::Copy(whole.clone())]);
+    assert_eq!(app.shell.status, "copied the source");
+    assert_eq!(press(&mut app, "Y"), vec![Action::Copy(whole)]);
 }
 
 #[test]

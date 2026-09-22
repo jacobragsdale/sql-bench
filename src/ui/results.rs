@@ -123,10 +123,12 @@ pub(super) fn render(frame: &mut Frame, app: &App, theme: &Theme, area: Rect, hi
 }
 
 /// The title's buttons, each only where its key does what it says: `[`, `]`,
-/// `m` and `e` do nothing over an object's source.
+/// `m` and `e` do nothing over an object's source, and `y` copies all of it.
 fn chips(results: &Results) -> Vec<(&'static str, &'static str)> {
     let mut chips = Vec::new();
-    if results.source().is_none() {
+    if results.source().is_some() {
+        chips.push(("Copy", "y"));
+    } else {
         if !results.columns().is_empty() {
             chips.push(("Export", "e"));
         }

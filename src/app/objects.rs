@@ -464,11 +464,8 @@ impl Objects {
         else {
             return Hit::Say("no object here".to_owned());
         };
-        if matches!(object.kind, ObjectKind::Table | ObjectKind::Sequence) {
-            return Hit::Say(format!(
-                "a {} has no source text; i shows its columns",
-                object.kind
-            ));
+        if object.kind == ObjectKind::Sequence {
+            return Hit::Say("a sequence has no source text".to_owned());
         }
         Hit::Load(CatalogRequest::Source {
             schema: object.schema.clone(),

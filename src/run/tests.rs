@@ -72,14 +72,13 @@ fn a_run_draws_the_layout_and_q_ends_it() {
     run_loop(
         &mut terminal,
         &mut app,
-        &mut Keys::new(&["Ctrl-T", "q"]),
+        &mut Keys::new(&["q"]),
         &Trace::new(None),
         &mut driver(),
         None,
     )
     .expect("the loop");
     assert!(app.shell.should_quit);
-    assert_eq!(app.shell.active_tab, 1);
     let row: String = (0..120)
         .map(|x| terminal.backend().buffer()[(x, 0)].symbol())
         .collect();

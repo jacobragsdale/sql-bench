@@ -595,9 +595,15 @@ impl Runtime {
 }
 
 /// The tabs `--connect NAME` and `--connect-all` ask for, in config order.
+/// Neither flag is the first tab, the one on screen: a tab is opened to be
+/// used, and launching opens one. A replay connects only what it is told to,
+/// so a script's frames never depend on whether a server is up.
 pub fn startup_tabs(config: &Config, args: &Cli) -> Result<Vec<usize>> {
     if args.connect_all {
         return Ok((0..config.connections.len()).collect());
+    }
+    if args.connect.is_empty() && args.replay.is_none() {
+        return Ok((0..config.connections.len().min(1)).collect());
     }
     args.connect
         .iter()
@@ -729,7 +735,15 @@ mod tests {
         let cli = |args: &[&str]| {
             Cli::parse_from(std::iter::once("sql-bench").chain(args.iter().copied()))
         };
-        assert_eq!(startup_tabs(&config, &cli(&[])).expect("none"), Vec::new());
+        assert_eq!(startup_tabs(&config, &cli(&[])).expect("the first"), [0]);
+        assert_eq!(
+            startup_tabs(&Config::default(), &cli(&[])).expect("none"),
+            Vec::new()
+        );
+        assert_eq!(
+            startup_tabs(&config, &cli(&["--replay", "keys.txt"])).expect("a replay"),
+            Vec::new()
+        );
         assert_eq!(
             startup_tabs(&config, &cli(&["--connect", "local-oracle"])).expect("one"),
             [1]

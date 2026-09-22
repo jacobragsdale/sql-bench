@@ -229,13 +229,20 @@ mod mssql {
     }
 
     #[test]
-    fn a_table_has_no_source_text() {
+    fn a_table_is_written_as_its_create() {
         let connection = connection!("local-mssql");
-        let failure = catalog::object_source(&connection, "bench", "customers", ObjectKind::Table)
-            .unwrap_err();
+        let source =
+            catalog::object_source(&connection, "bench", "customers", ObjectKind::Table).unwrap();
         assert_eq!(
-            failure.to_string(),
-            "not supported: a table has no source text"
+            source,
+            "CREATE TABLE bench.customers (\n    \
+             id int NOT NULL,\n    \
+             name nvarchar(100) NOT NULL,\n    \
+             email varchar(200) NOT NULL,\n    \
+             country char(2) NOT NULL,\n    \
+             created_at datetime2(7) NOT NULL,\n    \
+             credit_limit decimal(12,2),\n    \
+             PRIMARY KEY (id)\n)"
         );
     }
 }

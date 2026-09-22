@@ -203,6 +203,11 @@ impl CatalogRequest {
             Self::Schemas => schemas_sql(backend),
             Self::Objects { schema, kind } => objects_sql(backend, Some(schema), Some(*kind)),
             Self::Columns { schema, table, .. } => columns_sql(backend, schema, table),
+            Self::Source {
+                schema,
+                name,
+                kind: ObjectKind::Table,
+            } => columns_sql(backend, schema, name),
             Self::Source { schema, name, kind } => source_sql(backend, schema, name, *kind),
         }
     }
@@ -213,6 +218,15 @@ impl CatalogRequest {
             Self::Schemas => CatalogAnswer::Schemas(parse_schemas(&rows)),
             Self::Objects { .. } => CatalogAnswer::Objects(parse_objects(backend, rows)),
             Self::Columns { .. } => CatalogAnswer::Columns(parse_columns(backend, &rows)),
+            Self::Source {
+                schema,
+                name,
+                kind: ObjectKind::Table,
+            } => CatalogAnswer::Source(table_ddl(
+                &fold(backend, schema),
+                &fold(backend, name),
+                &parse_columns(backend, &rows),
+            )?),
             Self::Source { schema, name, .. } => {
                 CatalogAnswer::Source(parse_source(backend, schema, name, &rows)?)
             }
@@ -405,18 +419,22 @@ fn parse_columns(backend: Kind, rows: &[Vec<Cell>]) -> Vec<ColumnInfo> {
         .collect()
 }
 
-/// The text that made an object. A table has none — its columns are what
-/// there is to show, and [`list_columns`] has them.
+/// The text that made an object. A table's is written from its columns,
+/// since neither server keeps the statement that created one.
 pub fn object_source(
     connection: &Connection,
     schema: &str,
     name: &str,
     kind: ObjectKind,
 ) -> Result<String, DbError> {
-    if matches!(kind, ObjectKind::Table | ObjectKind::Sequence) {
+    if kind == ObjectKind::Sequence {
         return Err(DbError::Unsupported(format!("a {kind} has no source text")));
     }
     let backend = connection.kind();
+    if kind == ObjectKind::Table {
+        let columns = list_columns(connection, schema, name)?;
+        return table_ddl(&fold(backend, schema), &fold(backend, name), &columns);
+    }
     let rows = rows(connection, &source_sql(backend, schema, name, kind))?;
     parse_source(backend, schema, name, &rows)
 }
@@ -491,6 +509,42 @@ fn parse_source(
         .map(|(_, body)| format!("CREATE OR REPLACE {}", body.trim_end()))
         .collect::<Vec<_>>()
         .join("\n/\n\n"))
+}
+
+/// A `CREATE TABLE` from the columns: names, types, nullability and the
+/// primary key.
+///
+/// ponytail: no defaults, identity, checks, foreign keys or indexes; ask
+/// `sys.default_constraints` / `ALL_CONSTRAINTS` for them if the sketch
+/// stops being enough. Oracle's `DBMS_METADATA.GET_DDL` has it all but
+/// buries it under storage clauses, and SQL Server has no equivalent.
+fn table_ddl(schema: &str, name: &str, columns: &[ColumnInfo]) -> Result<String, DbError> {
+    if columns.is_empty() {
+        return Err(missing(schema, name));
+    }
+    let mut lines: Vec<String> = columns
+        .iter()
+        .map(|column| {
+            format!(
+                "    {} {}{}",
+                column.name,
+                column.type_text,
+                if column.nullable { "" } else { " NOT NULL" }
+            )
+        })
+        .collect();
+    let key: Vec<&str> = columns
+        .iter()
+        .filter(|column| column.is_pk)
+        .map(|column| column.name.as_str())
+        .collect();
+    if !key.is_empty() {
+        lines.push(format!("    PRIMARY KEY ({})", key.join(", ")));
+    }
+    Ok(format!(
+        "CREATE TABLE {schema}.{name} (\n{}\n)",
+        lines.join(",\n")
+    ))
 }
 
 /// A package is stored as its spec and its body, under two `ALL_SOURCE`
@@ -672,6 +726,28 @@ mod tests {
             None,
             "a body is half of the package that is already listed"
         );
+    }
+
+    #[test]
+    fn a_table_is_written_as_the_create_that_would_make_it() {
+        let column = |name: &str, type_text: &str, nullable, is_pk| ColumnInfo {
+            name: name.to_owned(),
+            type_text: type_text.to_owned(),
+            nullable,
+            is_pk,
+        };
+        let columns = [
+            column("order_id", "int", false, true),
+            column("line_no", "int", false, true),
+            column("note", "nvarchar(max)", true, false),
+        ];
+        assert_eq!(
+            table_ddl("dbo", "order_lines", &columns).unwrap(),
+            "CREATE TABLE dbo.order_lines (\n    order_id int NOT NULL,\n    \
+             line_no int NOT NULL,\n    note nvarchar(max),\n    \
+             PRIMARY KEY (order_id, line_no)\n)"
+        );
+        assert!(table_ddl("dbo", "gone", &[]).is_err());
     }
 
     #[test]

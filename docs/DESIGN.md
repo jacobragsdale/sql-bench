@@ -97,10 +97,15 @@ the worker's, so a `password_cmd` that fails does so against something still
 allowed to print — which is why a file holding ten `password_cmd` lines does
 not run ten commands to answer `--help`.
 
-One tab per connection, in file order, none of them connected. `--connect
-NAME` (repeatable) and `--connect-all` connect after the first frame is on
-screen and never before: a connect takes up to ten seconds and nobody should
-watch a blank terminal for it.
+One tab per connection, in file order. The first one connects at launch;
+`--connect NAME` (repeatable) and `--connect-all` name others instead. Every
+one of them connects after the first frame is on screen and never before: a
+connect takes up to ten seconds and nobody should watch a blank terminal for
+it. A replay connects only what those flags name, so its frames never depend
+on a server being up. Opening a disconnected tab (`Ctrl-T`, a digit, a click)
+connects it; a failed one waits for `c`, so its error stays up. Quitting
+closes every connection before the terminal is given back: the driver owns
+them, and dropping one cancels its query and joins its worker.
 
 `Ctrl-E` writes the pad to a temp file, runs `$VISUAL` or `$EDITOR` (split on
 whitespace, so `code -w` works), reads the file back and resumes the TUI.

@@ -19,13 +19,14 @@ click on ○ disconnected
 wait busy
 expect ● connected
 
-# A tab is shown by clicking it.
+# A tab is shown by clicking it, and a disconnected one connects.
 click on 2 local-oracle
-expect ○ disconnected
-expect [ Connect ]
+wait busy
+expect local-oracle connected
+expect-not [ Connect ]
 click on 1 local-mssql
 expect ● connected
-expect-not [ Connect ]
+expect ▾ dbo
 
 # A click focuses the pane it lands in, which the help chip then names; a
 # click beside the help closes it and reaches nothing under it.
@@ -109,7 +110,7 @@ expect-not 2 statements
 
 # A footer hint is a button.
 click on Ctrl-T next tab
-expect [ Connect ]
+expect nothing has run yet
 click on 1 local-mssql
 expect Results · 50 rows
 

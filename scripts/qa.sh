@@ -85,6 +85,7 @@ if [ "${SQL_BENCH_TEST_DBS:-}" = 1 ]; then
     check "no password leaks" scripts/qa/no-password-leak.sh
     check "max-rows timing" scripts/qa/max-rows-timing.sh
     check "connection lifecycle" scripts/qa/connections.sh
+    check "quit closes every connection" scripts/qa/quit-closes.sh "$BIN"
     check "query replays" scripts/qa/run-queries.sh
     check "the query workflow" scripts/qa/query-workflow.sh
     check "the object browser" scripts/qa/objects.sh

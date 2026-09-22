@@ -670,7 +670,7 @@ impl App {
             }
             KeyCode::Char('t' | 'T') if control => {
                 if !self.tabs.is_empty() {
-                    self.shell.active_tab = (self.shell.active_tab + 1) % self.tabs.len();
+                    return self.open_tab((self.shell.active_tab + 1) % self.tabs.len());
                 }
             }
             KeyCode::Tab if !typing => self.shell.focus = self.shell.focus.next(),
@@ -710,7 +710,7 @@ impl App {
             KeyCode::Char(digit @ '1'..='9') => {
                 let wanted = digit as usize - '1' as usize;
                 if wanted < self.tabs.len() {
-                    self.shell.active_tab = wanted;
+                    return self.open_tab(wanted);
                 }
             }
             _ if self.shell.focus == Focus::Results => return self.results_key(key),
@@ -718,6 +718,17 @@ impl App {
             _ => {}
         }
         Vec::new()
+    }
+
+    /// Put this tab on screen, and connect it if it is not: a tab is opened
+    /// to be used. One that failed waits for `c`, so its error stays up and
+    /// a bad password is not tried again on every visit.
+    pub(crate) fn open_tab(&mut self, index: usize) -> Vec<Action> {
+        self.shell.active_tab = index;
+        match self.tabs.get(index) {
+            Some(tab) if tab.state == TabState::Disconnected => vec![Action::Connect(index)],
+            _ => Vec::new(),
+        }
     }
 
     /// The keys the open overlay keeps for itself — the pane under it never
@@ -826,6 +837,10 @@ impl App {
                     self.shell.inspector = Some(Inspector::default());
                 }
                 Vec::new()
+            }
+            Hit::CopyCell | Hit::CopyRow if open.results.source().is_some() => {
+                let text = open.results.source_text().unwrap_or_default();
+                self.copied(text, "the source")
             }
             Hit::CopyCell => match open.results.cell().map(|cell| cell.display().into_owned()) {
                 Some(text) => self.copied(text, "1 cell"),

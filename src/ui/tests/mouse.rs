@@ -67,7 +67,7 @@ fn every_tab_label_is_a_target_the_width_it_is_drawn() {
 #[test]
 fn a_click_on_a_tab_shows_it_and_a_click_in_a_pane_focuses_it() {
     let mut app = two_tabs();
-    assert!(click(&mut app, 20, 0).is_empty());
+    assert_eq!(click(&mut app, 20, 0), vec![Action::Connect(1)]);
     assert_eq!(app.shell.active_tab, 1);
     for (focus, (x, y)) in [
         (Focus::Scratch, SCRATCH),
@@ -602,13 +602,13 @@ fn each_pane_draws_a_button_only_where_its_key_does_what_it_says() {
             "─".repeat(29)
         )
     );
-    // [ ] m and e do nothing over an object's source.
+    // [ ] m and e do nothing over an object's source; y copies all of it.
     assert_eq!(
         row_with(&source_view(), WIDE, "╭ Source"),
         format!(
-            "│{:34}│╭ Source · bench.p · 3 lines {}╮",
+            "│{:34}│╭ Source · bench.p · 3 lines {} Copy ─╮",
             "",
-            "─".repeat(54)
+            "─".repeat(47)
         )
     );
 
@@ -1083,9 +1083,9 @@ fn a_double_click_on_a_procedure_shows_its_source_as_enter_does() {
     assert_eq!(
         row_with(&app, WIDE, "╭ Source"),
         format!(
-            "│{:34}│╭ Source · dbo.refresh · 1 lines {}╮",
+            "│{:34}│╭ Source · dbo.refresh · 1 lines {} Copy ─╮",
             "",
-            "─".repeat(50)
+            "─".repeat(43)
         )
     );
     assert_eq!(

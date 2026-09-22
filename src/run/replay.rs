@@ -987,14 +987,15 @@ mod tests {
     fn a_click_on_a_tab_shows_that_tab() {
         let directory = tempfile::tempdir().expect("a directory");
         let mut app = two_tabs();
+        // Failed, because a click on a disconnected tab would connect it.
+        app.tabs[0].state = TabState::Failed("login refused".to_owned());
         app.tabs[1].state = TabState::Failed("listener refused".to_owned());
         let code = run(
-            "expect ○ disconnected\n\
+            "expect login refused\n\
              click on 2 local-oracle\n\
-             expect ✗ failed\n\
              expect listener refused\n\
              click 1 0\n\
-             expect ○ disconnected\n\
+             expect login refused\n\
              key q\n",
             app,
             &options(directory.path()),

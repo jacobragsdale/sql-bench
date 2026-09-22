@@ -464,7 +464,7 @@ impl App {
                 return self.results_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
             }
             Target::Source { .. } => self.shell.focus = Focus::Results,
-            Target::Tab(index) if index < self.tabs.len() => self.shell.active_tab = index,
+            Target::Tab(index) if index < self.tabs.len() => return self.open_tab(index),
             Target::Pane(focus) => self.shell.focus = focus,
             Target::Button { pane, key } => {
                 // The help keeps j, k, the arrows and the Page keys for

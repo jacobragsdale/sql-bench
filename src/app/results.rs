@@ -772,7 +772,14 @@ impl Results {
         self.source.as_ref()
     }
 
-    /// The source view's keys: the grid's movement keys, over lines.
+    /// The whole of the source, the way it came, for `y`.
+    #[must_use]
+    pub fn source_text(&self) -> Option<String> {
+        self.source.as_ref().map(|source| source.lines.join("\n"))
+    }
+
+    /// The source view's keys: the grid's movement keys, over lines, and
+    /// `y` or `Y` for all of it — a line of a definition is rarely wanted.
     fn source_key(&mut self, key: KeyEvent) -> Hit {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         #[allow(clippy::cast_possible_wrap)]
@@ -791,6 +798,8 @@ impl Results {
             KeyCode::PageUp => by(source.scroll, -page),
             KeyCode::Char('g') => 0,
             KeyCode::Char('G') => last,
+            KeyCode::Char('y') => return Hit::CopyCell,
+            KeyCode::Char('Y') => return Hit::CopyRow,
             _ => return Hit::Ignored,
         };
         Hit::Moved
