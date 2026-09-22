@@ -1215,6 +1215,14 @@ epics:
     - cargo clippy --all-targets --all-features -- -D warnings
     - cargo test --all-targets
     - scripts/qa.sh
+    verified: true
+    note: 'merged to main 2026-09-22; verified at T8.9:
+      the_pointer_resting_on_one_cell_costs_one_frame_and_a_press_costs_none (1,000 Moved events, one
+      frame past the first), a_click_behind_a_key_that_changed_the_layout_lands_on_the_new_layout,
+      a_click_beside_the_help_closes_it_and_reaches_nothing_under_it, a_click_on_a_tab_shows_that_tab
+      and scripts/replay/qa/mouse.keys (replay), panic-restore.sh and stdin-eof.sh both assert \e[?1000l
+      before the last \e[?1049l, and app::key_named is the one key parser. scripts/qa/mouse-bytes.sh
+      adds real SGR bytes through a pty. No ponytail.'
   - id: T8.2
     tag: dev
     title: T8.2 Buttons, chips and hover everywhere
@@ -1245,6 +1253,14 @@ epics:
     verify:
     - cargo test --all-targets
     - scripts/qa.sh
+    verified: true
+    note: 'merged to main 2026-09-22; verified at T8.9:
+      every_button_drawn_is_exactly_its_key_and_does_something covers the idle, running, truncated,
+      multi-set, filtered, failed, source-view and prompt states;
+      the_pointer_lights_up_a_button_and_nothing_under_an_overlay checks theme.hover through painted();
+      at_60x15_every_title_is_whole_and_what_does_not_fit_is_dropped. mouse.keys clicks Connect, Run,
+      All, Filter, the filter and inspector x, ? Help, a help row, a footer hint, the c/C toggle and
+      Export. No ponytail.'
   - id: T8.3
     tag: dev
     title: T8.3 Click, double-click and wheel in the tree and the grid
@@ -1269,6 +1285,16 @@ epics:
     - Tests use the horizontal wheel, not Shift+wheel, which terminals keep for themselves.
     verify:
     - cargo test --all-targets
+    verified: true
+    note: 'merged to main 2026-09-22; verified at T8.9:
+      clicking_the_bottom_row_of_the_grid_leaves_the_view_where_it_was (500 rows at 120x40, whole
+      lines), clicking_a_column_the_cursor_went_past_leaves_the_columns_where_they_were,
+      a_double_click_on_a_table_drops_its_select_into_the_pad_as_enter_does,
+      a_double_click_on_a_procedure_shows_its_source_as_enter_does, and
+      the_sideways_wheel_scrolls_the_columns_a_column_a_notch with ScrollRight; no test uses
+      Shift+wheel. Ponytails in objects.rs and results.rs: the first j after a deep click moves the view
+      once, the wheel pulls the cursor along, and going left moves the column selection to the new edge,
+      all waiting on pane sizes in the app.'
   - id: T8.4
     tag: dev
     title: T8.4 The scratch pad takes the mouse
@@ -1294,6 +1320,12 @@ epics:
     - A double-click on a word selects the word.
     verify:
     - cargo test --all-targets
+    verified: true
+    note: 'merged to main 2026-09-22; verified at T8.9:
+      a_click_on_the_first_line_of_a_scrolled_pad_puts_the_cursor_there_and_the_view_stays,
+      a_drag_selects_from_the_press_to_the_pointer_and_ctrl_c_copies_exactly_that,
+      a_double_click_selects_the_word_and_on_a_space_only_places_the_cursor; the window ponytail in
+      scratch.rs is retired. Ponytail left: the wheel pulls the cursor along (scratch.rs).'
   - id: T8.5
     tag: dev
     title: T8.5 Sort the grid by a column
@@ -1320,6 +1352,12 @@ epics:
     verify:
     - cargo test --all-targets
     - scripts/perf.sh
+    verified: true
+    note: 'merged to main 2026-09-22; verified at T8.9:
+      o_sorts_by_the_column_up_then_down_then_back_the_way_the_rows_came (decimals, ties and NULL last
+      both ways) and a_traced_sort_says_how_many_rows_and_how_long; the 100,000-row sort is in PERF.md
+      and was 8.9 ms by a decimal column and 11.6 ms by text at T8.9. Ponytail: an i64 past 2^53
+      compares as f64.'
   - id: T8.6
     tag: dev
     title: T8.6 Scrollbars
@@ -1342,6 +1380,11 @@ epics:
     - A track click equals PageDown (parity test).
     verify:
     - cargo test --all-targets
+    verified: true
+    note: 'merged to main 2026-09-22; verified at T8.9:
+      the_thumb_is_at_the_top_the_middle_and_the_bottom_of_its_track,
+      dragging_the_thumb_to_the_bottom_shows_the_last_row, and a_click_on_the_track_is_page_down (parity
+      with the key); mouse.keys clicks a track and drags a thumb against SQL Server. No ponytail.'
   - id: T8.7
     tag: dev
     title: T8.7 Drag the borders between panes
@@ -1365,6 +1408,12 @@ epics:
     - Double-clicking a seam restores 30/40.
     verify:
     - cargo test --all-targets
+    verified: true
+    note: 'merged to main 2026-09-22; verified at T8.9:
+      dragging_each_seam_moves_the_borders_either_side_of_it (corners()),
+      every_pane_keeps_its_least_however_far_a_seam_goes_and_whatever_the_size (60x15 included),
+      a_double_click_on_a_seam_puts_the_split_back; mouse.keys drags and resets both seams. Ponytails in
+      pointer.rs: the split lasts the session, and whole percents step a seam two cells past 100 cells.'
   - id: T8.8
     tag: dev
     title: T8.8 Right-click context menus
@@ -1387,6 +1436,11 @@ epics:
     - A right-click near the bottom-right corner keeps the menu on screen.
     verify:
     - cargo test --all-targets
+    verified: true
+    note: 'merged to main 2026-09-22; verified at T8.9: every_menu_entry_is_a_key_of_its_pane,
+      picking_each_entry_is_exactly_its_key,
+      a_menu_opened_near_the_bottom_right_corner_stays_on_the_screen; mouse.keys opens a grid menu,
+      closes one with a click beside it and picks an entry. No ponytail.'
   - id: T8.9
     tag: qa
     title: 'T8.9 QA: mouse verification, docs and budgets'
@@ -1412,3 +1466,12 @@ epics:
     verify:
     - scripts/qa.sh
     - scripts/perf.sh
+    verified: true
+    note: 'verified 2026-09-22 from a fresh clone of branch T8.9 (c65e5ad): fmt, clippy, 373 tests
+      (the same with SQL_BENCH_TEST_DBS=1), 5 release perf tests, SQL_BENCH_TEST_DBS=1 qa.sh 26 of
+      26 including mouse.keys at 120x40 and 80x24 and the new mouse-bytes.sh pty check,
+      readme-frame.sh --check current, and perf.sh 7 of 7 budgets (startup 1 ms, key-to-frame p95
+      0.186 ms, 100k over 10k draw ratio 0.73); the 100k sort is 8.9 ms. Fixed here: replay frames
+      kept stale text in the cell after a wide glyph (TestBackend does not blank it as a terminal
+      does), which made CJK rows unreliable to expect on. The hand check in a real terminal and in
+      tmux with mouse on is left to a person.'

@@ -350,3 +350,42 @@ the scan.
 | customers, top 100 | 50 | 40 | 0 | 0 | 0 | 0 | 200000 |
 | events, 10k cap | 10000 | 40 | 0 | 0 | 8 | 8 | 1273885 |
 | events, 100k cap | 100000 | 39 | 0 | 2 | 80 | 98 | 1213592 |
+
+### 2026-09-22 (20cee12)
+
+| budget | measured | pass |
+|---|---|---|
+| startup to the first frame, no connections < 50 ms | 1 ms | yes |
+| key to frame p95, 10,000 rows on screen < 16 ms | 0.189 ms | yes |
+| draw cost at 100,000 rows over 10,000 (0.077 ms / 0.087 ms) < 1.20 | 0.89 | yes |
+| `select 1` round trip on local-mssql < 5 ms | 0 ms | yes |
+| 1,000,000 row scan at `--max-rows 100000` on local-mssql < 8 s | 96 ms | yes |
+| `select 1` round trip on local-oracle < 5 ms | 0 ms | yes |
+| 1,000,000 row scan at `--max-rows 100000` on local-oracle < 8 s | 80 ms | yes |
+| 100,000-row sort by `amount` / `note`, `cargo test --release -- --ignored` < 100 ms | 8.9 / 11.6 ms | yes |
+
+T8.9, with the mouse in: every frame now also returns its click targets, one
+per tab, pane, button, seam, scrollbar part and visible grid column, so there
+are as many as the screen holds and not as many as were fetched, and the draw ratio above
+stays flat. The sort row is from the release tests, which `perf.sh` does not
+run.
+
+20 runs, 5 for the 100k scans.
+
+**local-mssql**
+
+| query | rows | connect | first_row p50 | first_row p95 | total p50 | total p95 | rows/s |
+|---|---|---|---|---|---|---|---|
+| select 1 | 1 | 5 | 0 | 0 | 0 | 0 | 20000 |
+| customers, top 100 | 50 | 4 | 0 | 0 | 0 | 0 | 1000000 |
+| events, 10k cap | 10000 | 4 | 4 | 5 | 13 | 15 | 740740 |
+| events, 100k cap | 100000 | 5 | 4 | 5 | 96 | 108 | 1016260 |
+
+**local-oracle**
+
+| query | rows | connect | first_row p50 | first_row p95 | total p50 | total p95 | rows/s |
+|---|---|---|---|---|---|---|---|
+| select 1 | 1 | 39 | 0 | 0 | 0 | 0 | 20000 |
+| customers, top 100 | 50 | 40 | 0 | 0 | 0 | 0 | 200000 |
+| events, 10k cap | 10000 | 39 | 0 | 0 | 7 | 9 | 1333333 |
+| events, 100k cap | 100000 | 38 | 0 | 2 | 80 | 108 | 1190476 |

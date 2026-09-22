@@ -481,12 +481,14 @@ impl Replay {
     }
 
     fn turn(&mut self) -> Result<bool> {
-        self.driver.turn(
+        let turned = self.driver.turn(
             &mut self.terminal,
             &mut self.app,
             &mut self.input,
             &self.trace,
-        )
+        );
+        cover_wide_glyphs(self.terminal.backend_mut());
+        turned
     }
 
     fn wait(&mut self, wait: &Wait, line: usize) -> Result<Option<u8>> {
@@ -561,6 +563,35 @@ impl Replay {
 
 fn write(path: &Path, text: &str) -> Result<()> {
     std::fs::write(path, text).with_context(|| format!("writing {}", path.display()))
+}
+
+/// Does what a terminal does and `TestBackend` does not: a glyph two cells
+/// wide covers the cell after it. ratatui never sends that cell, counting on
+/// the terminal, so without this the cell keeps whatever an older frame left
+/// there, and a row the screen shows as `李 雷` reads `李н雷а` to an `expect`.
+fn cover_wide_glyphs(backend: &mut TestBackend) {
+    use ratatui::backend::Backend as _;
+    use unicode_width::UnicodeWidthStr as _;
+    let buffer = backend.buffer();
+    let area = buffer.area;
+    let mut covered = Vec::new();
+    for y in 0..area.height {
+        let mut x = 0;
+        while x < area.width {
+            let width = u16::try_from(buffer[(x, y)].symbol().width()).unwrap_or(1);
+            for under in x.saturating_add(1)..x.saturating_add(width).min(area.width) {
+                if buffer[(under, y)].symbol() != " " {
+                    let mut blank = buffer[(under, y)].clone();
+                    blank.set_symbol(" ");
+                    covered.push((under, y, blank));
+                }
+            }
+            x = x.saturating_add(width.max(1));
+        }
+    }
+    if !covered.is_empty() {
+        let Ok(()) = backend.draw(covered.iter().map(|(x, y, cell)| (*x, *y, cell)));
+    }
 }
 
 /// The frame as text: one line per row, the padding every row is right-filled
@@ -775,6 +806,22 @@ mod tests {
             kinds(Gesture::Scroll(MouseEventKind::ScrollLeft)),
             [MouseEventKind::ScrollLeft]
         );
+    }
+
+    #[test]
+    fn a_wide_glyph_covers_what_an_older_frame_left_in_the_cell_after_it() {
+        use ratatui::backend::Backend as _;
+        use ratatui::buffer::Cell;
+        let mut backend = TestBackend::new(4, 1);
+        let old = [Cell::new("a"), Cell::new("j")];
+        let Ok(()) = backend.draw([(0, 0, &old[0]), (1, 0, &old[1])].into_iter());
+        // What ratatui sends for `山` over `aj`: the glyph, and not the cell
+        // it covers.
+        let wide = Cell::new("山");
+        let Ok(()) = backend.draw([(0, 0, &wide)].into_iter());
+        assert_eq!(screen_text(backend.buffer()), "山j", "the stale cell");
+        cover_wide_glyphs(&mut backend);
+        assert_eq!(screen_text(backend.buffer()), "山");
     }
 
     #[test]

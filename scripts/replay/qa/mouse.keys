@@ -1,0 +1,241 @@
+# T8.9: every gesture, against the local SQL Server, with keys only to type
+# and to show what a click did. Run at 120x40 and 80x24 by qa.sh, each with a
+# state directory of its own so the pad starts empty. Everything is found
+# with `on <text>` so it holds at both sizes, up to the last section, whose
+# gestures (a drag, a scrollbar, a seam) only take X Y and which therefore
+# resizes to one known layout first.
+#
+# `wait 500` keeps two clicks on one spot from being a double-click.
+
+# The placeholder is a button, and the footer's connection state toggles.
+click on [ Connect ]
+wait busy
+expect ● connected
+expect ▾ dbo
+click on ● connected
+expect ○ disconnected
+expect [ Connect ]
+click on ○ disconnected
+wait busy
+expect ● connected
+
+# A tab is shown by clicking it.
+click on 2 local-oracle
+expect ○ disconnected
+expect [ Connect ]
+click on 1 local-mssql
+expect ● connected
+expect-not [ Connect ]
+
+# A click focuses the pane it lands in, which the help chip then names; a
+# click beside the help closes it and reaches nothing under it.
+click on nothing has run yet
+click on ? Help
+expect Help · Results
+click on ▶ Run
+expect-not Help ·
+expect nothing has run yet
+click on ? Help
+click on ×
+expect-not Help ·
+
+# The tree: a glyph toggles, the wheel scrolls without moving the focus.
+click on ▾ dbo
+expect ▸ dbo
+click on ▸ bench
+wait busy
+expect ▾ bench
+click on ▸ Tables
+wait busy
+expect ▸ customers
+click on ▸ customers
+wait busy
+expect ▾ customers
+click on ▸ all_types
+wait busy
+expect ▾ all_types
+scroll down on ▾ all_types
+expect-not ▾ bench
+scroll up on ▾ all_types
+expect ▾ bench
+click on ▾ all_types
+click on ▾ customers
+expect ▸ all_types
+expect ▸ customers
+
+# A click on a name moves the cursor there, and a help row is its key: Enter
+# on the table the click chose. A double-click is two clicks on one row, so
+# the wait keeps this one from pairing with the glyph's.
+wait 500
+click on customers
+click on ? Help
+expect Help · Objects
+click on select from it
+expect-not Help ·
+expect select top 100 * from bench.customers
+
+# A double-click on a procedure is Enter: its source.
+click on ▸ Procedures
+wait busy
+double-click on sp_customer_o
+wait busy
+expect Source · bench.sp_customer_orders
+
+# The filter button, and the × that clears it.
+click on / Filter
+type cust
+expect Objects /cust
+expect-not ▸ orders
+click on ×
+expect-not Objects /cust
+expect ▸ orders
+
+# The pad: a click places the cursor, Run runs the statement it is in, All
+# runs them all.
+click on select top 100
+key End
+key Enter
+key Enter
+type select 1 as one
+click on ▶▶ All
+wait busy
+expect 2 statements, 2 result sets
+click on select top 100
+wait 500
+click on ▶ Run
+wait busy
+expect Results · 50 rows
+expect-not 2 statements
+
+# A footer hint is a button.
+click on Ctrl-T next tab
+expect [ Connect ]
+click on 1 local-mssql
+expect Results · 50 rows
+
+# The grid: the wheel scrolls rows, the sideways wheel columns.
+expect │   1  Zo
+scroll down on Zoë Bauer
+expect-not │   1  Zo
+expect │   4  José Álvarez
+scroll up on José Álvarez
+expect │   1  Zo
+expect id   name
+scroll right on Zoë Bauer
+expect-not id   name
+expect name              email
+scroll left on Zoë Bauer
+expect id   name
+
+# A click selects a cell, which Enter then inspects; a click beside the
+# inspector closes it and does not reach the tab under it.
+click on customer3@example.com
+key Enter
+expect email · varchar
+click on 2 local-oracle
+expect-not email · varchar
+expect ● connected
+
+# A double-click inspects, and the inspector's × closes it.
+double-click on Ægir Nilsen
+expect name · nvarchar · 11 chars
+click on ×
+expect-not name · nvarchar
+
+# A header click sorts by that column: up, down, then as the rows came.
+click on name
+expect ▲  email
+wait 500
+click on ▲
+expect ▼  email
+wait 500
+click on ▼
+expect id   name              email
+expect │   1  Zo
+
+# A right-click selects the cell and opens the pane's menu. A click beside it
+# only closes it; a click on an entry is its key.
+right-click on customer1@example.com
+expect inspect the cell
+click on 1 local-mssql
+expect-not inspect the cell
+right-click on customer2@example.com
+click on inspect the cell
+expect email · varchar · 21 chars
+click on 1 local-mssql
+expect-not email · varchar
+
+# The Export button opens the prompt; a click beside it gives up, the way
+# Esc does, and the tree under it is left alone.
+click on Export
+expect Export to:
+click on ▸ dbo
+expect-not Export to:
+expect ▸ dbo
+
+# The wheel over the pad scrolls it and leaves the cursor where it can be seen.
+click on select 1 as one
+key End
+key Enter
+key Enter
+key Enter
+key Enter
+key Enter
+key Enter
+key Enter
+key Enter
+key Enter
+key Enter
+key Enter
+key Enter
+key Enter
+key Enter
+type select 2 as two
+expect select 2 as two
+scroll up on select 2 as two
+expect-not select 2 as two
+
+# Hover paints; its style is asserted in src/ui/tests/mouse.rs, and here only
+# that it changes nothing.
+hover on ▶ Run
+expect ▶ Run
+
+# Gestures that take coordinates, at the README's size: Objects is x 0-29,
+# the seam between it and the right column x 30, Scratch rows 1-11 with its
+# bottom border (the other seam) on row 11, and the grid's scrollbar x 99.
+resize 100x30
+expect ╭ Objects ──────── / Filter ─╮╭ Scratch
+expect │   1  Zo
+
+# The track below the thumb is PageDown; dragging the thumb to the bottom
+# shows the last row.
+click 99 25
+expect-not │   1  Zo
+drag 99 16 99 27
+expect customer50@example.com
+
+# Dragging a seam moves the border between the panes; a double-click puts
+# 30/40 back.
+drag 30 5 50 5
+expect ╭ Objects ───────────────── ⟳ Reload ─ / Filter ─╮╭ Scratch
+double-click 50 5
+expect ╭ Objects ──────── / Filter ─╮╭ Scratch
+drag 60 11 60 18
+expect │                            │╰──
+expect │     ▸ orders               ││
+double-click 60 18
+expect │     ▸ orders               │╰──
+expect-not │                            │╰──
+
+# A drag across pad text selects it, and Ctrl-C copies exactly that: the
+# word `select` on line 1, once the wheel has brought line 1 back.
+scroll up 50 5
+scroll up 50 5
+scroll up 50 5
+scroll up 50 5
+scroll up 50 5
+drag 35 2 41 2
+key Ctrl-C
+expect copied 6 characters
+
+key Ctrl-Q

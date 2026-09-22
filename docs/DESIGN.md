@@ -319,18 +319,29 @@ Every frame says what can be clicked: `ui::render` returns a `Hits`, the
 regions it drew in paint order with a `Target` each (`src/app/pointer.rs`),
 and `Hits::at` is the last region pushed that holds the pointer. There are no
 layers. An overlay pushes a whole-frame `Outside` and then its own body, so
-nothing under it can be reached. The run loop keeps the hits of its last draw
-and hands them to `App::pointer` with each mouse event and the time, which is
-how the app still sees no terminal and reads no clock.
+nothing under it can be reached. A `Target` holds indexes and the window it
+was drawn from, never a reference, so the hits are plain data.
+
+The four rules hold because the hits flow back as data and nothing else does.
+The renderer still only reads the app; it returns the hits, and the run loop
+keeps the last frame's and hands them to `App::pointer` with each mouse event
+and `Instant::now()`, so the app sees no terminal and reads no clock. After
+every draw the loop also hands them to `App::drawn`, which copies the pad's
+drawn window into the pad's scroll hint (see The pad), because only the
+renderer knows how tall the pad is. The number of hits is bounded by the
+screen and not by the rows fetched, so drawing them costs what a frame
+costs. Replay drives the same `App::pointer` through its mouse verbs against
+the same hits, which is how every gesture below is checked without a
+terminal (`scripts/replay/qa/mouse.keys`).
 
 - A click fires when the button comes up, on the target that was pressed, and
   only if the pointer never left that target and row on the way. Sliding off
   takes a press back.
 - A double-click is a second click on the same target and row within 400 ms.
   It uses both clicks up, so a third is a single again.
-- A right-click on a tree row, a grid cell or header, an object's source or
-  the pad selects what is under it, then opens that pane's context menu (see
-  Menus). Anywhere else it does what a left click does.
+- A right-click in a pane selects what is under it, then opens that pane's
+  context menu (see Menus). On a tab, the footer, a button or an overlay it
+  does what a left click does.
 - The wheel scrolls what is under the pointer, by 3, and never moves the
   focus: the help, the inspector, the tree, the grid, an object's source
   and the pad.
@@ -382,9 +393,9 @@ how the app still sees no terminal and reads no clock.
   the cursor directly. The keys' `at_row` and `scroll_to` would move a
   window whose bottom row was clicked, by their page of 10, and a column
   hint `h` and `l` leave behind would pull the columns back left. The first
-  `j` after a click ten rows below the top still moves the view once. A click
-  beside the help, the inspector or the export prompt closes the one on top,
-  the way Esc does, and reaches nothing under it.
+  `j` after a click ten rows below the top still moves the view once.
+- A click beside the help, the inspector, the export prompt or a menu closes
+  the one on top, the way Esc does, and reaches nothing under it.
 - What the pointer rests on is painted in the theme's hover style, restyled
   over the finished frame from the same hits a click reads. Only things that
   are there to be clicked light up: a tab, a button, a thumb or a seam, not
@@ -395,7 +406,8 @@ target or row under it changes, so resting the mouse on the app costs one
 frame and not one per event. The loop handles a burst of events together, but
 a mouse event behind one that changed the screen is held for the next turn,
 after the new frame is drawn, so it lands on what the person was looking at.
-Mouse capture goes on with the alternate screen and off before it is left.
+Mouse capture goes on with the alternate screen and off before it is left,
+for the editor Ctrl-E opens as well as on the way out (see Terminal restore).
 
 ### Buttons
 
@@ -557,8 +569,9 @@ the rest of the line exactly as written.
 counts them, or `on <substring>`: the first cell of the first place the text
 is on the frame, found cell by cell so that the blank after a wide glyph is
 not part of what has to be typed. Text that is not on the frame is exit 4,
-like a failed `expect`. Two clicks on one spot less than 400 ms apart are a
-double-click here too; put `wait 500` between them to keep them apart.
+like a failed `expect`. Two clicks less than 400 ms apart on one target and
+row are a double-click here too, even on different cells of it (a tree row's
+glyph and then its name); put `wait 500` between them to keep them apart.
 
 ### Key names
 
@@ -584,7 +597,10 @@ that share a style — `<row> <from>..<to> fg=<colour> bg=<colour>
 mod=<modifiers>` — so a colour can be asserted without a screenshot.
 
 A frame is one character per terminal cell, so a glyph drawn two cells wide
-comes out as itself followed by a space. That is fine for an `expect` and
+comes out as itself followed by a space. ratatui never sends the cell a wide
+glyph covers, counting on the terminal to blank it, and `TestBackend` does
+not, so after every turn the replay blanks it itself; otherwise a row keeps
+whatever an older frame left there. That is fine for an `expect` and
 wrong for a picture, which is why `scripts/replay/readme.keys` picks rows
 whose names are narrow.
 
@@ -626,12 +642,14 @@ key q
 replay scripts in `scripts/replay/qa/` at 60x15, 80x24, 120x40, 200x60 and
 40x10, a resize mid-run, the footer hints following the focus, the quit keys
 from every pane, `NO_COLOR` against a `--frame-styles` dump, the scratch pad's
-frame and its persistence, the two terminal-restore checks below, the stdin-EOF check and the draw latency. CI
-runs it.
+frame and its persistence, the two terminal-restore checks below, the
+stdin-EOF check, `scripts/qa/mouse-bytes.sh` and the draw latency. CI runs
+it.
 
 Everything that needs the two containers is behind `SQL_BENCH_TEST_DBS=1` in
-the same script: the password-leak check, the `--max-rows` timing, the
-connection lifecycle, the query and object replays, the query workflow, a
+the same script: `scripts/replay/qa/mouse.keys` at 120x40 and 80x24, every
+gesture against SQL Server; the password-leak check, the `--max-rows` timing,
+the connection lifecycle, the query and object replays, the query workflow, a
 database outage, and `scripts/readme-frame.sh --check`. CI has no databases,
 so the README's frame is regenerated locally — run `scripts/readme-frame.sh`
 after anything that changes the layout, and commit what it writes. The
@@ -642,12 +660,21 @@ are a clock and not a layout.
 
 Four ways out of a run, and all four give the terminal back. A quit (`q`,
 `Ctrl-Q`), an input that ran out, and an error returning `Err` up to `main`
-all drop the `Restore` guard in `src/run/mod.rs`. A panic runs the hook
-`ratatui::try_init` installed and then unwinds through the same guard. Guard
-and hook do the same two things — raw mode off, then the alternate screen
-left — the guard turning mouse capture off (`\e[?1000l`) first, and the terminal's own `Drop` shows
-the cursor after them. The hook restores *before* it prints, so a panic
-message lands on the normal screen and not on the one about to be thrown away.
+all drop the `Restore` guard in `src/run/mod.rs`, whose `release_terminal`
+turns mouse capture and bracketed paste off (`\e[?1000l` and `\e[?2004l`),
+then raw mode, then leaves the alternate screen; the terminal's own `Drop`
+shows the cursor after it. A shell handed a terminal that still reports the
+mouse gets escape codes typed at it whenever the pointer moves, which is why
+the mouse goes first. A panic runs the hook `ratatui::try_init` installed —
+raw mode off, alternate screen left, *then* the message, so it lands on the
+normal screen — and unwinds through the same guard, which turns the mouse off
+and leaves the alternate screen once more. Either way `\e[?1000l` is written
+before the last `\e[?1049l`.
+
+Ctrl-E is the one way out that comes back: `release_terminal` hands the
+terminal to `$VISUAL` or `$EDITOR` exactly as a quit would, and
+`claim_terminal` takes raw mode, the alternate screen, bracketed paste and
+the mouse back in the order startup took them.
 
 A replay never takes the terminal at all, so QA checks this on a real pty:
 `scripts/qa/panic-restore.sh` runs a debug build under `script` with
@@ -668,6 +695,15 @@ all: crossterm would quietly read `/dev/tty` instead, which is how `sql-bench
 that could quit it. `scripts/qa/stdin-eof.sh` runs that under `script` and
 asserts the shell was drawn, the run exits 0 inside two seconds, and
 `\e[?1049l\e[?25h` is the last thing written, with `\e[?1000l` before it.
+
+Replay injects crossterm events, so it never sees how a terminal encodes the
+mouse. `scripts/qa/mouse-bytes.sh` types SGR mouse reports (`\e[<0;x;yM` and
+`m`) into a pty under `script`: a click in the pad, Ctrl-E with `true` as the
+editor, a click on `? Help`, Ctrl-Q. It asserts capture was asked for
+(`\e[?1000h`, `\e[?1006h`), that `Help · Scratch` was drawn — so both
+clicks were decoded and landed — that capture went off and on again around
+the editor, and that the last `\e[?1000l` comes before the last `\e[?1049l`.
+How tmux and a real terminal pass the mouse on is checked by hand.
 
 ## Trace format
 

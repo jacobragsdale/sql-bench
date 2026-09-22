@@ -2,12 +2,15 @@
 
 [![CI](https://github.com/jacobragsdale/sql-bench/actions/workflows/ci.yml/badge.svg)](https://github.com/jacobragsdale/sql-bench/actions/workflows/ci.yml)
 
-A fast, lightweight terminal workbench for SQL Server and Oracle: connect to
-both, run SQL from a scratch pad, browse schemas and read the source of a
-procedure, without leaving the terminal. It is one Rust binary that never
-blocks on a database — every driver call runs on a worker thread, and the grid
-formats the window it shows and not the scan behind it, so a million rows cost
-what a screenful costs. It is the sibling of
+A fast, lightweight terminal workbench for SQL Server and Oracle that works
+like a desktop app: click a tab, a pane, a button, a row, a cell, a header, a
+scrollbar or the border between two panes and it does what it looks like it
+does, and every click is a key, so the keyboard reaches all of it too. Connect
+to both databases, run SQL from a scratch pad, browse schemas and read the
+source of a procedure without leaving the terminal. It is one Rust binary that
+never blocks on a database — every driver call runs on a worker thread, and
+the grid formats the window it shows and not the scan behind it, so a million
+rows cost what a screenful costs. It is the sibling of
 [ticket-tui](https://github.com/jacobragsdale/ticket-tui) and az-tui: same
 stack, same layout, same keys.
 
@@ -116,6 +119,30 @@ One `[[connection]]` per database, in the order the tabs appear.
 
 Exactly one of `password`, `password_env` and `password_cmd` per connection. A
 password never reaches a trace file or the screen.
+
+## Mouse
+
+| Gesture | Does |
+|---|---|
+| click a tab | show it |
+| click in a pane | focus it |
+| click a button, a footer hint or a help row | press its key |
+| click a tree row, or its `▸` `▾` | move the cursor there, or expand or collapse it |
+| double-click a tree row | Enter: a table's select into the pad, a procedure's source |
+| click a grid cell, double-click it | select it, inspect it |
+| click a column header | sort by it: up, down, then as fetched |
+| click in the pad, Shift+click | place the cursor, extend the selection |
+| drag in the pad, double-click a word | select |
+| wheel | scroll what is under the pointer, 3 rows a notch |
+| sideways wheel, or Shift+wheel, over the grid | scroll its columns |
+| right-click a row, a cell or the pad | select it and open a menu of that pane's keys |
+| click a scrollbar's track, drag its thumb | page up or down, scroll there |
+| drag the border between two panes | resize them; a double-click puts them back |
+| click beside the help, the inspector, a menu or the prompt | close it, and nothing else |
+
+The app takes the mouse, so selecting text to copy off the screen is the
+terminal's own Shift+drag. Inside tmux the mouse reaches the app only with
+`set -g mouse on`.
 
 ## Keys
 
@@ -302,12 +329,13 @@ scripts/qa.sh
 `scripts/qa.sh` is everything that needs no database: the replay scripts at
 five terminal sizes, a resize mid-run, the footer hints following the focus,
 the quit keys from every pane, `NO_COLOR`, the scratch pad coming back after a
-restart, the terminal given back after a panic, and the draw latency. CI runs
-all four.
+restart, the terminal given back after a panic, a click typed into a real pty,
+and the draw latency. CI runs all four.
 
 With the containers up, `SQL_BENCH_TEST_DBS=1` turns on the rest — the
 integration tests in `tests/`, which return early without it, and the half of
-`scripts/qa.sh` that needs a server, the README frame included:
+`scripts/qa.sh` that needs a server, every mouse gesture and the README frame
+included:
 
 ```sh
 SQL_BENCH_TEST_DBS=1 cargo test --all-targets
