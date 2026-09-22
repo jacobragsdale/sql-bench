@@ -1466,3 +1466,12 @@ epics:
     verify:
     - scripts/qa.sh
     - scripts/perf.sh
+    verified: true
+    note: 'verified 2026-09-22 from a fresh clone of branch T8.9 (c65e5ad): fmt, clippy, 373 tests
+      (the same with SQL_BENCH_TEST_DBS=1), 5 release perf tests, SQL_BENCH_TEST_DBS=1 qa.sh 26 of
+      26 including mouse.keys at 120x40 and 80x24 and the new mouse-bytes.sh pty check,
+      readme-frame.sh --check current, and perf.sh 7 of 7 budgets (startup 1 ms, key-to-frame p95
+      0.186 ms, 100k over 10k draw ratio 0.73); the 100k sort is 8.9 ms. Fixed here: replay frames
+      kept stale text in the cell after a wide glyph (TestBackend does not blank it as a terminal
+      does), which made CJK rows unreliable to expect on. The hand check in a real terminal and in
+      tmux with mouse on is left to a person.'
