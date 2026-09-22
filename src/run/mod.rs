@@ -17,12 +17,16 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use crossterm::event::{self, DisableBracketedPaste, EnableBracketedPaste, Event};
+use crossterm::event::{
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{EnterAlternateScreen, enable_raw_mode};
 use ratatui::Terminal;
 use ratatui::backend::Backend;
 
+use crate::app::pointer::Hits;
 use crate::app::results::grouped;
 use crate::app::{Action, App, SPIN_EVERY};
 use crate::cli::Cli;
@@ -171,7 +175,7 @@ pub fn run(config: &Config, args: &Cli, panic_after: Option<Duration>) -> Result
     let _restore = Restore;
     // A pasted block arrives as one `Event::Paste` rather than as however
     // many key presses, which is what makes it one undo and one redraw.
-    let _ = execute!(std::io::stdout(), EnableBracketedPaste);
+    let _ = execute!(std::io::stdout(), EnableBracketedPaste, EnableMouseCapture);
     let mut driver = Driver::new(Theme::from_env(), config);
     driver.set_max_rows(args.max_rows);
     driver.restore_scratch(&mut app);
@@ -196,8 +200,16 @@ impl Drop for Restore {
 
 /// Hands the terminal back to the shell: the editor gets it exactly as the
 /// shell had it, and so does whatever ran sql-bench.
+///
+/// The mouse goes back before the alternate screen is left: a shell handed a
+/// terminal that still reports the mouse gets escape codes typed at it every
+/// time the pointer moves.
 fn release_terminal() {
-    let _ = execute!(std::io::stdout(), DisableBracketedPaste);
+    let _ = execute!(
+        std::io::stdout(),
+        DisableMouseCapture,
+        DisableBracketedPaste
+    );
     ratatui::restore();
 }
 
@@ -207,7 +219,8 @@ fn claim_terminal() -> Result<()> {
     execute!(
         std::io::stdout(),
         EnterAlternateScreen,
-        EnableBracketedPaste
+        EnableBracketedPaste,
+        EnableMouseCapture
     )
     .context("failed to take the screen back")
 }
@@ -219,7 +232,9 @@ fn claim_terminal() -> Result<()> {
 /// defined as two consecutive calls to [`InputSource::next`] that return
 /// `Ok(None)`, which is what a replay does once its keys have run out. The
 /// drain's non-blocking poll counts as one such call, so a replay ends one
-/// idle timeout after its last key.
+/// idle timeout after its last key. A mouse event the drain held back is
+/// handled before `input` is asked again, so the loop never ends with one
+/// still owed.
 pub fn run_loop<B: Backend>(
     terminal: &mut Terminal<B>,
     app: &mut App,
@@ -293,6 +308,11 @@ pub struct Driver {
     /// Whether this run owns a terminal it can hand to an editor. A replay
     /// draws into a buffer and owns nothing.
     terminal: bool,
+    /// Where the last frame drew what can be clicked.
+    hits: Hits,
+    /// A mouse event that arrived behind one that changed the screen. It is
+    /// handled next turn, after the frame it was aimed at has been drawn.
+    held: Option<Event>,
 }
 
 impl Driver {
@@ -307,6 +327,8 @@ impl Driver {
             startup: Vec::new(),
             store: Store::from_env(),
             terminal: true,
+            hits: Hits::default(),
+            held: None,
         }
     }
 
@@ -375,7 +397,7 @@ impl Driver {
         let mut drew = Duration::ZERO;
         if self.dirty {
             let at = Instant::now();
-            terminal.draw(|frame| ui::render(frame, app, &self.theme))?;
+            terminal.draw(|frame| self.hits = ui::render(frame, app, &self.theme))?;
             self.dirty = false;
             drew = at.elapsed();
             if trace.is_on() {
@@ -395,7 +417,11 @@ impl Driver {
             (false, true) => SETTLE_POLL,
             (false, false) => IDLE_TIMEOUT,
         };
-        let Some(first) = input.next(timeout)? else {
+        let first = match self.held.take() {
+            Some(held) => Some(held),
+            None => input.next(timeout)?,
+        };
+        let Some(first) = first else {
             if (spinning || settling) && input.live() {
                 // An app still working is not an exhausted one — unless
                 // there is nobody left to watch it work.
@@ -409,14 +435,17 @@ impl Driver {
         };
         self.empty = 0;
         // Everything already queued is handled before the screen is painted
-        // again, so a burst of keys is one frame rather than one frame each.
+        // again, so a burst of keys is one frame rather than one frame each —
+        // except a click behind a key that changed the screen, which is held
+        // until the screen it was aimed at is the one its targets come from.
         let handling = Instant::now();
         let mut event = Some(first);
         while let Some(this) = event {
-            self.dirty = true;
-            for action in app.handle(this) {
-                self.act(terminal, app, action)?;
+            if self.dirty && matches!(this, Event::Mouse(_)) {
+                self.held = Some(this);
+                break;
             }
+            self.dirty |= self.handle(terminal, app, this)?;
             if app.shell.should_quit || handling.elapsed() >= DRAIN_LIMIT {
                 break;
             }
@@ -442,6 +471,42 @@ impl Driver {
 
 /// What the app asked for, done.
 impl Driver {
+    /// One event into the app, and whether the screen has to be drawn again.
+    ///
+    /// A key always changes something worth a frame. The mouse mostly does
+    /// not: a press is only a press until it comes up, and the pointer moving
+    /// is only a frame when it moves onto something else.
+    fn handle<B: Backend>(
+        &mut self,
+        terminal: &mut Terminal<B>,
+        app: &mut App,
+        event: Event,
+    ) -> Result<bool>
+    where
+        B::Error: std::error::Error + Send + Sync + 'static,
+    {
+        let (actions, changed) = match event {
+            Event::Mouse(mouse) => {
+                let before = app.shell.mouse.pointer;
+                let actions = app.pointer(mouse, Instant::now(), &self.hits);
+                let changed = match mouse.kind {
+                    MouseEventKind::Down(_) => false,
+                    MouseEventKind::Moved => {
+                        let spot = |at: Option<_>| at.and_then(|at| self.hits.spot(at));
+                        spot(before) != spot(app.shell.mouse.pointer)
+                    }
+                    _ => true,
+                };
+                (actions, changed)
+            }
+            other => (app.handle(other), true),
+        };
+        for action in actions {
+            self.act(terminal, app, action)?;
+        }
+        Ok(changed)
+    }
+
     fn act<B: Backend>(
         &mut self,
         terminal: &mut Terminal<B>,

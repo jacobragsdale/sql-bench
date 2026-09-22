@@ -242,3 +242,67 @@ fn a_leading_tilde_is_the_home_directory_and_nothing_else_is_expanded() {
         std::path::Path::new("~other/a.csv")
     );
 }
+
+/// Everything already queued, as a terminal delivers a burst: the loop's
+/// drain finds each event waiting behind the one before it.
+struct Burst(std::collections::VecDeque<Event>);
+
+impl InputSource for Burst {
+    fn next(&mut self, _timeout: Duration) -> Result<Option<Event>> {
+        Ok(self.0.pop_front())
+    }
+}
+
+fn mouse(kind: crossterm::event::MouseEventKind, column: u16, row: u16) -> Event {
+    Event::Mouse(crossterm::event::MouseEvent {
+        kind,
+        column,
+        row,
+        modifiers: crossterm::event::KeyModifiers::NONE,
+    })
+}
+
+/// How many frames a run of these events draws, the first one included.
+fn frames_for(events: Vec<Event>) -> usize {
+    let directory = tempfile::tempdir().expect("a directory");
+    let path = directory.path().join("trace.tsv");
+    drive(&mut Burst(events.into()), &Trace::new(Some(path.clone())));
+    std::fs::read_to_string(&path)
+        .expect("a trace file")
+        .lines()
+        .filter(|line| line.split('\t').nth(1) == Some("frame"))
+        .count()
+}
+
+#[test]
+fn the_pointer_resting_on_one_cell_costs_one_frame_and_a_press_costs_none() {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    // The second tab's label: its hover is the one frame.
+    let resting = vec![mouse(MouseEventKind::Moved, 20, 0); 1000];
+    assert_eq!(frames_for(resting), 2, "the first frame and the hover");
+    let pressed = vec![mouse(MouseEventKind::Down(MouseButton::Left), 20, 0)];
+    assert_eq!(
+        frames_for(pressed),
+        1,
+        "a press is not a click until it is let go"
+    );
+}
+
+#[test]
+fn a_click_behind_a_key_that_changed_the_layout_lands_on_the_new_layout() {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    let left = MouseButton::Left;
+    // `?` opens the help, and x 20 of the tab bar is the second tab on the
+    // frame before it and outside the help on the frame after.
+    let mut burst = Burst(
+        vec![
+            Event::Key(key("?")),
+            mouse(MouseEventKind::Down(left), 20, 0),
+            mouse(MouseEventKind::Up(left), 20, 0),
+        ]
+        .into(),
+    );
+    let app = drive(&mut burst, &Trace::new(None));
+    assert!(!app.shell.help, "the click beside the help closed it");
+    assert_eq!(app.shell.active_tab, 0, "and reached nothing under it");
+}

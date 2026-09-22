@@ -4,6 +4,7 @@
 //! what makes the whole app testable without either.
 
 pub mod objects;
+pub mod pointer;
 pub mod prompt;
 pub mod results;
 pub mod scratch;
@@ -133,6 +134,63 @@ pub fn keys_for(
             _ => true,
         }
     })
+}
+
+/// A key the way [`KEYS`], the help overlay and `docs/DESIGN.md` spell one:
+/// `Enter`, `F5`, `q`, and any of them after `Ctrl-`, `Alt-` or `Shift-`.
+///
+/// Replay scripts and the tests both read keys through this, so a key name
+/// means the same thing wherever it is written.
+pub(crate) fn key_named(name: &str) -> Option<KeyEvent> {
+    let (modifiers, base) = match name.split_once('-') {
+        Some(("Ctrl", rest)) => (KeyModifiers::CONTROL, rest),
+        Some(("Alt", rest)) => (KeyModifiers::ALT, rest),
+        Some(("Shift", rest)) => (KeyModifiers::SHIFT, rest),
+        _ => (KeyModifiers::NONE, name),
+    };
+    let code = match base {
+        "Enter" => KeyCode::Enter,
+        "Esc" => KeyCode::Esc,
+        // Shift-Tab is what a keyboard calls it and BackTab is what crossterm
+        // sends; both spellings are the one key.
+        "Tab" if modifiers == KeyModifiers::SHIFT => KeyCode::BackTab,
+        "Tab" => KeyCode::Tab,
+        "BackTab" => KeyCode::BackTab,
+        "Up" => KeyCode::Up,
+        "Down" => KeyCode::Down,
+        "Left" => KeyCode::Left,
+        "Right" => KeyCode::Right,
+        "PageUp" => KeyCode::PageUp,
+        "PageDown" => KeyCode::PageDown,
+        "Home" => KeyCode::Home,
+        "End" => KeyCode::End,
+        "Backspace" => KeyCode::Backspace,
+        "Delete" => KeyCode::Delete,
+        "Insert" => KeyCode::Insert,
+        "Space" => KeyCode::Char(' '),
+        other => function_key(other).or_else(|| character_key(other))?,
+    };
+    // BackTab is already the shifted key, and saying so twice is how a key the
+    // app matches on stops matching.
+    let modifiers = if code == KeyCode::BackTab {
+        modifiers.difference(KeyModifiers::SHIFT)
+    } else {
+        modifiers
+    };
+    Some(KeyEvent::new(code, modifiers))
+}
+
+fn function_key(name: &str) -> Option<KeyCode> {
+    let number: u8 = name.strip_prefix('F')?.parse().ok()?;
+    (1..=12).contains(&number).then_some(KeyCode::F(number))
+}
+
+fn character_key(name: &str) -> Option<KeyCode> {
+    let mut characters = name.chars();
+    match (characters.next(), characters.next()) {
+        (Some(character), None) => Some(KeyCode::Char(character)),
+        _ => None,
+    }
 }
 
 /// What the app asks the run loop to do. The app itself never does IO, so
@@ -343,6 +401,8 @@ pub struct Shell {
     /// What Ctrl-C last copied. The terminal's own clipboard is a best
     /// effort the run loop makes; this one is always there.
     pub clipboard: String,
+    /// Where the pointer is and what a button held down is pressing.
+    pub mouse: pointer::Mouse,
     /// When that frame went up. The clock comes from the caller, so this
     /// module still reads none of its own.
     spun_at: Option<Instant>,
@@ -605,8 +665,7 @@ impl App {
             }
             KeyCode::Esc => {
                 if self.shell.help {
-                    self.shell.help = false;
-                    self.shell.help_scroll = 0;
+                    self.close_help();
                 } else if self.shell.inspector.is_some() {
                     self.shell.inspector = None;
                 } else if self.tab().is_some_and(|tab| tab.results.running()) {
@@ -648,39 +707,42 @@ impl App {
     /// The keys the open overlay keeps for itself — the pane under it never
     /// sees them — and whether this was one of them.
     fn help_key(&mut self, key: KeyEvent) -> bool {
+        match scroll_by(key) {
+            Some(by) => self.scroll_help(by),
+            None => return false,
+        }
+        true
+    }
+
+    /// The help closed, and back at its top for the next time it opens.
+    fn close_help(&mut self) {
+        self.shell.help = false;
+        self.shell.help_scroll = 0;
+    }
+
+    fn scroll_help(&mut self, by: isize) {
         // Past the last row is as far as it goes, so an offset the overlay
         // clamps away does not have to be scrolled back through.
         let last = keys_for(self.shell.focus).count().saturating_sub(1);
         let scroll = &mut self.shell.help_scroll;
-        match key.code {
-            KeyCode::Char('j') | KeyCode::Down => *scroll += 1,
-            KeyCode::Char('k') | KeyCode::Up => *scroll = scroll.saturating_sub(1),
-            KeyCode::PageDown => *scroll += HELP_PAGE,
-            KeyCode::PageUp => *scroll = scroll.saturating_sub(HELP_PAGE),
-            _ => return false,
-        }
-        *scroll = (*scroll).min(last);
-        true
+        *scroll = scroll.saturating_add_signed(by).min(last);
     }
 
     /// The scroll keys of the open inspector, which the grid under it never
     /// sees — the same bargain the help overlay strikes.
     fn inspector_key(&mut self, key: KeyEvent) -> bool {
-        let last = self.inspect_height().saturating_sub(1);
-        let Some(inspector) = self.shell.inspector.as_mut() else {
-            return false;
-        };
-        match key.code {
-            KeyCode::Char('j') | KeyCode::Down => inspector.scroll += 1,
-            KeyCode::Char('k') | KeyCode::Up => {
-                inspector.scroll = inspector.scroll.saturating_sub(1);
-            }
-            KeyCode::PageDown => inspector.scroll += HELP_PAGE,
-            KeyCode::PageUp => inspector.scroll = inspector.scroll.saturating_sub(HELP_PAGE),
+        match scroll_by(key) {
+            Some(by) if self.shell.inspector.is_some() => self.scroll_inspector(by),
             _ => return false,
         }
-        inspector.scroll = inspector.scroll.min(last);
         true
+    }
+
+    fn scroll_inspector(&mut self, by: isize) {
+        let last = self.inspect_height().saturating_sub(1);
+        if let Some(inspector) = self.shell.inspector.as_mut() {
+            inspector.scroll = inspector.scroll.saturating_add_signed(by).min(last);
+        }
     }
 
     /// How many lines the cell the inspector is open on comes to. The
@@ -890,6 +952,20 @@ impl App {
                 vec![Action::Copy(text)]
             }
         }
+    }
+}
+
+/// How far an overlay's scroll keys move it, or `None` for a key that is not
+/// one of them.
+fn scroll_by(key: KeyEvent) -> Option<isize> {
+    #[allow(clippy::cast_possible_wrap)]
+    let page = HELP_PAGE as isize;
+    match key.code {
+        KeyCode::Char('j') | KeyCode::Down => Some(1),
+        KeyCode::Char('k') | KeyCode::Up => Some(-1),
+        KeyCode::PageDown => Some(page),
+        KeyCode::PageUp => Some(-page),
+        _ => None,
     }
 }
 

@@ -14,6 +14,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph};
 
+use crate::app::pointer::{Hits, Target};
 use crate::app::prompt::Prompt;
 use crate::app::results::{INSPECT_WIDTH, Inspector, inspect_title};
 use crate::app::scratch::Scratch;
@@ -42,7 +43,9 @@ const NO_CONNECTIONS: &[&str] = &[
     "q quits.",
 ];
 
-pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
+/// The frame, and where on it each thing that can be clicked was drawn.
+pub fn render(frame: &mut Frame, app: &App, theme: &Theme) -> Hits {
+    let mut hits = Hits::default();
     let area = frame.area();
     if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
         let message = format!("sql-bench needs {MIN_WIDTH}x{MIN_HEIGHT}");
@@ -50,7 +53,7 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
             Paragraph::new(Span::styled(message, theme.dim)).alignment(Alignment::Center),
             middle_row(area),
         );
-        return;
+        return hits;
     }
     if app.tabs.is_empty() {
         let lines: Vec<Line> = NO_CONNECTIONS
@@ -61,7 +64,7 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
             Paragraph::new(lines).block(titled(" sql-bench ", theme.accent, theme.border)),
             area,
         );
-        return;
+        return hits;
     }
 
     let [bar, body, footer] = Layout::vertical([
@@ -75,36 +78,69 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) {
     let [scratch, results] =
         Layout::vertical([Constraint::Percentage(40), Constraint::Min(3)]).areas(right);
 
-    frame.render_widget(tab_bar(app, theme), bar);
+    frame.render_widget(tab_bar(app, theme, bar, &mut hits), bar);
     objects::render(frame, app, theme, objects);
     scratch_pane(frame, app, theme, scratch);
     results::render(frame, app, theme, results);
+    hits.push(objects, Target::Pane(Focus::Objects));
+    hits.push(scratch, Target::Pane(Focus::Scratch));
+    hits.push(results, Target::Pane(Focus::Results));
     frame.render_widget(footer_line(app, theme, area.width), footer);
     if let Some(inspector) = &app.shell.inspector {
-        render_inspector(frame, area, app, inspector, theme);
+        render_inspector(frame, area, app, inspector, theme, &mut hits);
     }
     // The help goes over the inspector, because Esc closes them in that
     // order too.
     if app.shell.help {
-        render_help(frame, area, app, theme);
+        render_help(frame, area, app, theme, &mut hits);
+    }
+    // The prompt takes every key, so it takes every click too: one beside it
+    // gives up the way Esc does.
+    if app.shell.prompt.is_some() {
+        hits.push(area, Target::Outside);
+    }
+    hover(frame, app, theme, &hits);
+    hits
+}
+
+/// What is under the pointer, restyled last so it sits over everything —
+/// and read from the same hits a click is, so what lights up is exactly what
+/// a click there would act on.
+fn hover(frame: &mut Frame, app: &App, theme: &Theme, hits: &Hits) {
+    if let Some((rect, target)) = app.shell.mouse.pointer.and_then(|at| hits.at(at))
+        && target.hovers()
+    {
+        frame.buffer_mut().set_style(rect, theme.hover);
     }
 }
 
 /// `1 local-mssql ●  2 local-oracle ○`, the tab showing in the accent colour.
-fn tab_bar(app: &App, theme: &Theme) -> Line<'static> {
+/// Each label is a click target, cut to the bar where it runs off the end.
+fn tab_bar(app: &App, theme: &Theme, bar: Rect, hits: &mut Hits) -> Line<'static> {
     let mut spans = Vec::with_capacity(app.tabs.len() * 2);
+    let mut x = bar.x;
     for (index, tab) in app.tabs.iter().enumerate() {
-        spans.push(Span::raw(if index == 0 { " " } else { "  " }));
-        spans.push(Span::styled(
+        let gap = Span::raw(if index == 0 { " " } else { "  " });
+        let label = Span::styled(
             format!("{} {} {}", index + 1, tab.name, app.shell.mark(&tab.state)),
             if index == app.shell.active_tab {
                 theme.accent
             } else {
                 theme.dim
             },
-        ));
+        );
+        x = x.saturating_add(width(&gap));
+        let region = Rect::new(x, bar.y, width(&label), 1).intersection(bar);
+        hits.push(region, Target::Tab(index));
+        x = x.saturating_add(width(&label));
+        spans.push(gap);
+        spans.push(label);
     }
     Line::from(spans)
+}
+
+fn width(span: &Span) -> u16 {
+    u16::try_from(span.width()).unwrap_or(u16::MAX)
 }
 
 /// The scratch pad: a line number gutter, the text with the cursor cell and
@@ -312,7 +348,7 @@ fn hints(focus: Focus, budget: usize) -> String {
 /// The keys that work in the focused pane, from the one table the footer
 /// hints come from too. It never grows past the screen: what does not fit
 /// scrolls, and the title says which rows are showing.
-fn render_help(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+fn render_help(frame: &mut Frame, area: Rect, app: &App, theme: &Theme, hits: &mut Hits) {
     let focus = app.shell.focus;
     let rows: Vec<&(&str, &str, &str)> = keys_for(focus).collect();
     let key_width = rows
@@ -351,6 +387,8 @@ fn render_help(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         Paragraph::new(lines).block(titled(&title, theme.accent, theme.accent)),
         overlay,
     );
+    hits.push(area, Target::Outside);
+    hits.push(overlay, Target::Overlay);
 }
 
 /// The whole of one cell over the grid: the column, its type and how much of
@@ -364,6 +402,7 @@ fn render_inspector(
     app: &App,
     inspector: &Inspector,
     theme: &Theme,
+    hits: &mut Hits,
 ) {
     let Some(results) = app.tab().map(|tab| &tab.results) else {
         return;
@@ -393,6 +432,8 @@ fn render_inspector(
         )),
         overlay,
     );
+    hits.push(area, Target::Outside);
+    hits.push(overlay, Target::Overlay);
 }
 
 fn titled(title: &str, title_style: Style, border_style: Style) -> Block<'static> {
