@@ -336,7 +336,20 @@ how the app still sees no terminal and reads no clock.
   notch. The tree's and the grid's cursors come along only as far as they
   must to stay in view, because the app's window is a hint clamped round
   the cursor.
-- A drag selects on pad text and does nothing anywhere else.
+- A drag selects on pad text, scrolls on a scrollbar's thumb, and does
+  nothing anywhere else.
+- The tree, the grid's rows, the pad and an object's source get a scrollbar
+  over their pane's right border, between its corners, while there is more
+  than fits. The track keeps the border's glyph and the thumb is `┃`, so it
+  reads under `NO_COLOR`. One pure function, `pointer::thumb(offset, content,
+  viewport, track)`, places the thumb for the painter, and its inverse
+  `pointer::offset` turns a dragged thumb back into a row, so what is drawn is
+  what is hit, in O(1). The track above and below the thumb is a PageUp and a
+  PageDown button for the pane. A `Target::Thumb` carries the content, the
+  viewport and the track it was drawn on; dragging it moves the view through
+  the pane's wheel function, which pulls the cursor along the same way, and
+  like the wheel it leaves the focus alone. Pressing it and letting go does
+  nothing.
 - Clicking a tab shows it. Clicking anywhere in a pane focuses it.
 - In the tree a click moves the cursor to the row, a click on its `▸` or
   `▾` is Space, and a double-click is Enter: a table's select goes into the
@@ -358,7 +371,7 @@ how the app still sees no terminal and reads no clock.
   the way Esc does, and reaches nothing under it.
 - What the pointer rests on is painted in the theme's hover style, restyled
   over the finished frame from the same hits a click reads. Only things that
-  are there to be clicked light up: a tab or a button, not a pane.
+  are there to be clicked light up: a tab, a button or a thumb, not a pane.
 
 A press paints nothing, and the pointer moving costs a frame only when the
 target or row under it changes, so resting the mouse on the app costs one

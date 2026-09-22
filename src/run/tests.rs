@@ -365,6 +365,6 @@ fn the_pad_scrolls_from_the_window_the_last_frame_drew() {
             .collect::<String>()
     };
     assert_eq!(app.tabs[0].scratch.cursor(), (34, 0));
-    assert_eq!(row(2).trim_end_matches([' ', '│']), "28 select 28");
-    assert_eq!(row(14).trim_end_matches([' ', '│']), "40 select 40");
+    assert_eq!(row(2).trim_end_matches([' ', '│', '┃']), "28 select 28");
+    assert_eq!(row(14).trim_end_matches([' ', '│', '┃']), "40 select 40");
 }

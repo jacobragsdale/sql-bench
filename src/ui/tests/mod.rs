@@ -79,3 +79,12 @@ fn corners(terminal: &Terminal<TestBackend>) -> Vec<(u16, u16)> {
         .filter(|(x, y)| buffer[(*x, *y)].symbol() == "╭")
         .collect()
 }
+
+/// `row` with a scrollbar's thumb over its last cell, the pane's right
+/// border.
+fn thumbed(row: &str) -> String {
+    let mut row = row.to_owned();
+    row.pop();
+    row.push('┃');
+    row
+}

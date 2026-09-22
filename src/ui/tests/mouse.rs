@@ -450,12 +450,57 @@ fn parity(app: &App, (width, height): (u16, u16), state: &str) -> (usize, Vec<St
     (buttons.len(), wrong)
 }
 
+/// Sixty tables in `dbo`, more than the tree has rows for.
+fn tall_tree(app: &mut App) {
+    let request = CatalogRequest::Objects {
+        schema: "dbo".to_owned(),
+        kind: ObjectKind::Table,
+    };
+    let tables = (0..60)
+        .map(|n| crate::app::tests::object("dbo", &format!("t{n:03}"), ObjectKind::Table))
+        .collect();
+    app.apply(RuntimeEvent::Catalog {
+        tab: 0,
+        request,
+        result: Ok(CatalogAnswer::Objects(tables)),
+    });
+}
+
+/// The tree, the grid and the pad each longer than their pane and scrolled
+/// part way, so each has track above its thumb and below it.
+fn scrolled() -> App {
+    let mut app = deep();
+    tall_tree(&mut app);
+    for _ in 0..3 {
+        app.tabs[0].objects.key(key("PageDown"));
+    }
+    let text: Vec<String> = (1..=40).map(|n| format!("select {n}")).collect();
+    let scratch = &mut app.tabs[0].scratch;
+    scratch.set_text(&text.join("\n"));
+    for _ in 0..20 {
+        scratch.handle(key("Down"));
+    }
+    app
+}
+
+/// An object's source a hundred lines long, scrolled part way.
+fn long_source() -> App {
+    let mut app = idle();
+    let text: Vec<String> = (1..=100).map(|n| format!("-- line {n}")).collect();
+    let results = &mut app.tabs[0].results;
+    results.show_source("bench.p".to_owned(), &text.join("\n"));
+    for _ in 0..4 {
+        results.key(key("PageDown"));
+    }
+    app
+}
+
 /// A state the parity test is run in, and how to get an app into it.
 type State = (&'static str, fn() -> App);
 
 #[test]
 fn every_button_drawn_is_exactly_its_key_and_does_something() {
-    let states: [State; 9] = [
+    let states: [State; 11] = [
         ("idle", idle),
         ("running", running),
         ("truncated", truncated),
@@ -465,6 +510,8 @@ fn every_button_drawn_is_exactly_its_key_and_does_something() {
         ("source view", source_view),
         ("prompt", prompting),
         ("roomy", roomy),
+        ("scrolled", scrolled),
+        ("long source", long_source),
     ];
     let mut checked = 0;
     let mut wrong = Vec::new();
@@ -889,7 +936,7 @@ fn the_wheel_scrolls_the_grid_and_pulls_the_cursor_along() {
     mouse(&mut app, MouseEventKind::ScrollUp, 40, 25);
     let terminal = frame(120, 40, &app);
     assert_eq!(line(&terminal, 19), grid_row(478));
-    assert_eq!(line(&terminal, 37), grid_row(496));
+    assert_eq!(line(&terminal, 37), thumbed(&grid_row(496)));
     assert_eq!(app.tabs[0].results.selected(), (496, 0));
 }
 
@@ -1050,18 +1097,7 @@ fn a_double_click_on_a_procedure_shows_its_source_as_enter_does() {
 #[test]
 fn the_wheel_scrolls_the_tree_and_pulls_the_cursor_along() {
     let mut app = idle();
-    let request = CatalogRequest::Objects {
-        schema: "dbo".to_owned(),
-        kind: ObjectKind::Table,
-    };
-    let tables = (0..60)
-        .map(|n| crate::app::tests::object("dbo", &format!("t{n:03}"), ObjectKind::Table))
-        .collect();
-    app.apply(RuntimeEvent::Catalog {
-        tab: 0,
-        request,
-        result: Ok(CatalogAnswer::Objects(tables)),
-    });
+    tall_tree(&mut app);
     let name = |app: &App| {
         let objects = &app.tabs[0].objects;
         objects.nodes()[objects.cursor()].item.name()
@@ -1078,7 +1114,238 @@ fn the_wheel_scrolls_the_tree_and_pulls_the_cursor_along() {
     assert_eq!(name(&app), "t001");
     mouse(&mut app, MouseEventKind::ScrollUp, 8, 10);
     mouse(&mut app, MouseEventKind::ScrollUp, 8, 10);
-    assert_eq!(first(&app), format!("│ ▾ dbo{:28}│", ""));
+    assert_eq!(first(&app), format!("│ ▾ dbo{:28}┃", ""));
     assert_eq!(name(&app), "t001", "still showing, so it stays");
     assert_eq!(app.shell.focus, Focus::Objects);
+}
+
+/// Each scrollbar's track buttons on a 120x40 frame of `app`: where, which
+/// pane, and the key, top to bottom.
+fn tracks(app: &App) -> Vec<(Rect, Focus, String)> {
+    drawn(app, 120, 40)
+        .1
+        .into_iter()
+        .filter(|(.., label)| label == "│")
+        .map(|(rect, pane, key, _)| (rect, pane, format!("{:?}", key.code)))
+        .collect()
+}
+
+/// Where the thumb of `pane`'s scrollbar is on a 120x40 frame of `app`.
+fn thumb_of(app: &App, pane: Focus) -> Rect {
+    hits(app)
+        .regions()
+        .find_map(|(rect, target)| match target {
+            Target::Thumb { pane: of, .. } if of == pane => Some(rect),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no {pane:?} thumb"))
+}
+
+#[test]
+fn every_scrollbar_is_a_page_up_and_a_page_down_either_side_of_its_thumb() {
+    let theirs = |app: &App| {
+        tracks(app)
+            .into_iter()
+            .map(|(rect, pane, key)| (rect.x, pane, key))
+            .collect::<Vec<_>>()
+    };
+    let page = |x, pane, key: &str| (x, pane, key.to_owned());
+    let wanted = vec![
+        page(35, Focus::Objects, "PageUp"),
+        page(35, Focus::Objects, "PageDown"),
+        page(119, Focus::Scratch, "PageUp"),
+        page(119, Focus::Scratch, "PageDown"),
+        page(119, Focus::Results, "PageUp"),
+        page(119, Focus::Results, "PageDown"),
+    ];
+    assert_eq!(theirs(&scrolled()), wanted);
+    assert_eq!(
+        theirs(&long_source()),
+        vec![
+            page(119, Focus::Results, "PageUp"),
+            page(119, Focus::Results, "PageDown"),
+        ]
+    );
+}
+
+#[test]
+fn a_click_on_the_track_is_page_down() {
+    let mut clicked = scrolled();
+    let thumb = thumb_of(&clicked, Focus::Results);
+    let mut pressed = clicked.clone();
+    click(&mut clicked, thumb.x, thumb.bottom() + 2);
+    pressed.handle(Event::Key(key("PageDown")));
+    assert_eq!(settled(clicked.clone()), settled(pressed));
+    assert_eq!(clicked.tabs[0].results.selected(), (41, 0));
+}
+
+#[test]
+fn there_is_no_scrollbar_where_everything_fits() {
+    for app in [idle(), multi_set(), source_view()] {
+        let terminal = frame(120, 40, &app);
+        assert!(!text(&terminal).contains('┃'), "{}", text(&terminal));
+        assert!(
+            !hits(&app)
+                .regions()
+                .any(|(_, target)| matches!(target, Target::Thumb { .. }))
+        );
+    }
+}
+
+#[test]
+fn the_grid_scrollbar_spans_its_rows_and_the_thumb_follows_them() {
+    // Rows 31 to 49 of 500, nineteen showing on nineteen cells: a one-cell
+    // thumb, one cell down.
+    let mut app = deep();
+    let terminal = frame(120, 40, &app);
+    assert_eq!(thumb_of(&app, Focus::Results), Rect::new(119, 20, 1, 1));
+    assert_eq!(line(&terminal, 19), grid_row(31));
+    assert_eq!(line(&terminal, 20), thumbed(&grid_row(32)));
+    // The two header rows above the first row are not track.
+    let track = tracks(&app);
+    assert_eq!(track[0].0, Rect::new(119, 19, 1, 1));
+    assert_eq!(track[1].0, Rect::new(119, 21, 1, 17));
+    for (spec, y) in [("g", 19), ("G", 37)] {
+        app.handle(Event::Key(key(spec)));
+        assert_eq!(thumb_of(&app, Focus::Results), Rect::new(119, y, 1, 1));
+    }
+}
+
+#[test]
+fn dragging_the_thumb_to_the_bottom_shows_the_last_row() {
+    let mut app = deep();
+    let thumb = thumb_of(&app, Focus::Results);
+    mouse(
+        &mut app,
+        MouseEventKind::Down(MouseButton::Left),
+        thumb.x,
+        thumb.y,
+    );
+    mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), 100, 39);
+    mouse(&mut app, MouseEventKind::Up(MouseButton::Left), 100, 39);
+    let terminal = frame(120, 40, &app);
+    assert_eq!(line(&terminal, 19), grid_row(481));
+    assert_eq!(line(&terminal, 37), thumbed(&grid_row(499)));
+    assert_eq!(
+        app.tabs[0].results.selected(),
+        (481, 0),
+        "pulled along into the view"
+    );
+
+    // And back up to the middle, by the cell it was grabbed on.
+    let thumb = thumb_of(&app, Focus::Results);
+    mouse(
+        &mut app,
+        MouseEventKind::Down(MouseButton::Left),
+        thumb.x,
+        thumb.y,
+    );
+    mouse(
+        &mut app,
+        MouseEventKind::Drag(MouseButton::Left),
+        thumb.x,
+        28,
+    );
+    assert_eq!(thumb_of(&app, Focus::Results), Rect::new(119, 28, 1, 1));
+    assert_eq!(app.shell.focus, Focus::Results);
+}
+
+#[test]
+fn dragging_a_thumb_scrolls_each_pane_and_keeps_its_cursor_in_view() {
+    let mut app = scrolled();
+    app.shell.focus = Focus::Results;
+    for pane in [Focus::Objects, Focus::Scratch] {
+        let thumb = thumb_of(&app, pane);
+        mouse(
+            &mut app,
+            MouseEventKind::Down(MouseButton::Left),
+            thumb.x,
+            thumb.y,
+        );
+        mouse(
+            &mut app,
+            MouseEventKind::Drag(MouseButton::Left),
+            thumb.x,
+            1,
+        );
+        mouse(&mut app, MouseEventKind::Up(MouseButton::Left), thumb.x, 1);
+    }
+    let terminal = frame(120, 40, &app);
+    assert_eq!(
+        line(&terminal, 2),
+        format!("│ ▾ dbo{:28}┃│  1 select 1{:70}┃", "", "")
+    );
+    assert_eq!(app.tabs[0].scratch.cursor().0, 12, "the pad's last row");
+    assert_eq!(app.shell.focus, Focus::Results, "the drag is the wheel's");
+
+    let mut app = long_source();
+    let thumb = thumb_of(&app, Focus::Results);
+    mouse(
+        &mut app,
+        MouseEventKind::Down(MouseButton::Left),
+        thumb.x,
+        thumb.y,
+    );
+    mouse(
+        &mut app,
+        MouseEventKind::Drag(MouseButton::Left),
+        thumb.x,
+        39,
+    );
+    assert_eq!(
+        line(&frame(120, 40, &app), 37),
+        thumbed(&right("100 -- line 100"))
+    );
+}
+
+#[test]
+fn a_thumb_pressed_and_let_go_does_nothing() {
+    let mut app = scrolled();
+    let before = app.clone();
+    for pane in [Focus::Objects, Focus::Scratch, Focus::Results] {
+        let thumb = thumb_of(&app, pane);
+        click(&mut app, thumb.x, thumb.y);
+    }
+    assert_eq!(settled(app), settled(before));
+}
+
+#[test]
+fn the_pointer_lights_up_the_thumb_it_rests_on() {
+    let hover = Theme::new(false).hover;
+    let mut app = deep();
+    let thumb = thumb_of(&app, Focus::Results);
+    app.shell.mouse.pointer = Some(thumb.as_position());
+    let terminal = frame(120, 40, &app);
+    let lit = |y| {
+        let cell = &terminal.backend().buffer()[(thumb.x, y)];
+        Style::new().fg(cell.fg).bg(cell.bg) == hover
+    };
+    assert!(lit(thumb.y));
+    assert!(!lit(thumb.y + 1), "the track under it is not the thumb");
+}
+
+#[test]
+fn at_60x15_the_scrollbars_leave_the_titles_and_their_buttons_alone() {
+    let app = scrolled();
+    let terminal = frame(60, 15, &app);
+    assert_eq!(
+        line(&terminal, 1),
+        "╭ Objects ───────╮╭ Scratch [modified] ─── ▶▶ All ─ ▶ Run ─╮"
+    );
+    assert_eq!(
+        line(&terminal, 3),
+        format!("│     ▸ t021     ││ 20 select 20{:27}┃", "")
+    );
+    assert_eq!(
+        line(&terminal, 5),
+        format!("│     ▸ t023     │╰{}╯", "─".repeat(40))
+    );
+    assert_eq!(
+        line(&terminal, 6),
+        "│     ▸ t024     ┃╭ Results · 500 rows · 42 ms ─── Export ─╮"
+    );
+    assert_eq!(
+        line(&terminal, 13),
+        format!("╰{}╯╰{}╯", "─".repeat(16), "─".repeat(40))
+    );
 }

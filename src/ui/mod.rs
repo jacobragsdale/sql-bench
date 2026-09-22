@@ -15,7 +15,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::pointer::{Hits, Target};
+use crate::app::pointer::{Hits, Target, thumb};
 use crate::app::prompt::Prompt;
 use crate::app::results::{INSPECT_WIDTH, Inspector, inspect_title};
 use crate::app::scratch::Scratch;
@@ -210,6 +210,55 @@ pub(super) fn buttons(
     }
 }
 
+/// A scrollbar over the right border of `pane`, beside `rows`, drawn from
+/// row `top` of `content`, when there is more than `rows` holds. The track
+/// keeps the border's glyph, which is why it is only there for a click, and
+/// the thumb is `┃`: a shape, so it reads with `NO_COLOR` too. The track
+/// either side of the thumb is PageUp or PageDown for `focus`.
+///
+/// It stays between the border's corners, so the title and its buttons are
+/// never under it.
+pub(super) fn scrollbar(
+    frame: &mut Frame,
+    (pane, rows): (Rect, Rect),
+    (focus, top, content): (Focus, usize, usize),
+    style: Style,
+    hits: &mut Hits,
+) {
+    let viewport = usize::from(rows.height);
+    let x = pane.right().saturating_sub(1);
+    let track = Rect::new(x, rows.y, 1, rows.height).intersection(Rect::new(
+        x,
+        pane.y.saturating_add(1),
+        1,
+        pane.height.saturating_sub(2),
+    ));
+    if content <= viewport || track.is_empty() {
+        return;
+    }
+    let cells = thumb(top, content, viewport, track.height);
+    for y in cells.clone() {
+        frame.buffer_mut().set_string(x, track.y + y, "┃", style);
+    }
+    hits.push(
+        Rect::new(x, track.y, 1, cells.start),
+        button(focus, "PageUp"),
+    );
+    hits.push(
+        Rect::new(x, track.y + cells.start, 1, cells.end - cells.start),
+        Target::Thumb {
+            pane: focus,
+            content,
+            viewport,
+            track,
+        },
+    );
+    hits.push(
+        Rect::new(x, track.y + cells.end, 1, track.height - cells.end),
+        button(focus, "PageDown"),
+    );
+}
+
 /// A placeholder that is a button, `[ Connect ]`, on the first row of
 /// `area`.
 pub(super) fn placeholder_button(
@@ -280,21 +329,27 @@ fn scratch_pane(frame: &mut Frame, app: &App, theme: &Theme, area: Rect, hits: &
         );
         return;
     }
-    frame.render_widget(
-        Paragraph::new(scratch_lines(scratch, theme, inner, focused, hits)),
-        inner,
+    let (lines, top) = scratch_lines(scratch, theme, inner, focused, hits);
+    frame.render_widget(Paragraph::new(lines), inner);
+    scrollbar(
+        frame,
+        (area, inner),
+        (Focus::Scratch, top, scratch.lines().len()),
+        border_style,
+        hits,
     );
 }
 
-/// The rows of the pad that are on screen, gutter and all, and the window
-/// they were drawn from for a click to land in.
+/// The rows of the pad that are on screen, gutter and all, and the line they
+/// start from. The window they were drawn from goes in the hits for a click
+/// to land in.
 fn scratch_lines(
     scratch: &Scratch,
     theme: &Theme,
     area: Rect,
     focused: bool,
     hits: &mut Hits,
-) -> Vec<Line<'static>> {
+) -> (Vec<Line<'static>>, usize) {
     let height = usize::from(area.height);
     let lines = scratch.lines();
     let digits = lines.len().to_string().len();
@@ -312,7 +367,7 @@ fn scratch_lines(
     let (cursor_line, cursor_column) = scratch.cursor();
     let selection = scratch.selection();
     let flagged = scratch.flagged();
-    lines
+    let lines = lines
         .iter()
         .enumerate()
         .skip(top)
@@ -362,7 +417,8 @@ fn scratch_lines(
             }
             Line::from(spans)
         })
-        .collect()
+        .collect();
+    (lines, top)
 }
 
 fn placeholder(text: &str, theme: &Theme) -> Line<'static> {
