@@ -132,9 +132,10 @@ impl Runtime {
 
     /// Open (or re-open) this tab's connection on a thread of its own.
     ///
-    /// Re-connecting drops the connection that is there, which cancels
-    /// whatever it was running. A second `c` while one is already in flight
-    /// is ignored: the attempt has its own ten second timeout.
+    /// Re-connecting closes the connection that is there, which cancels
+    /// whatever it was running, and forgets every request made of it. A
+    /// second `c` while one is already in flight is ignored: the attempt has
+    /// its own ten second timeout.
     pub fn connect(&mut self, app: &mut App, tab: usize) {
         let (Some(runtime), Some(spec)) =
             (self.tabs.get_mut(tab), self.config.connections.get(tab))
@@ -144,7 +145,7 @@ impl Runtime {
         if runtime.pending.is_some() {
             return;
         }
-        runtime.connection = None;
+        runtime.reset();
         let (reply, answer) = mpsc::channel();
         let (spec, config) = (spec.clone(), self.config.clone());
         let started = std::thread::Builder::new()
@@ -168,20 +169,13 @@ impl Runtime {
     }
 
     /// Close this tab's connection, and forget an attempt still in flight.
-    ///
-    /// Dropping the handle cancels the query it was running before it joins
-    /// the worker, which is why nothing else has to be stopped first.
     pub fn disconnect(&mut self, app: &mut App, tab: usize) {
         let Some(runtime) = self.tabs.get_mut(tab) else {
             return;
         };
-        runtime.connection = None;
+        runtime.reset();
         runtime.pending = None;
         runtime.started = None;
-        runtime.queued = None;
-        runtime.running = None;
-        runtime.catalog = None;
-        runtime.waiting.clear();
         app.apply(RuntimeEvent::Disconnected { tab });
     }
 
@@ -293,6 +287,12 @@ impl Runtime {
         let Some(runtime) = self.tabs.get_mut(tab) else {
             return;
         };
+        if runtime.running.is_some() {
+            // The worker runs one statement at a time: a second would queue
+            // behind the first, and the first's rows would be taken for its.
+            app.shell.status = "Esc cancels the running query".to_owned();
+            return;
+        }
         let Some(connection) = runtime.connection.as_ref() else {
             // Disconnected between the key and the turn: say so rather than
             // leave a pane that says `Running` for ever.
@@ -597,6 +597,39 @@ impl Runtime {
     }
 }
 
+impl TabRuntime {
+    /// Close the connection and forget everything asked of it.
+    fn reset(&mut self) {
+        close(self.connection.take());
+        self.queued = None;
+        self.running = None;
+        self.catalog = None;
+        self.waiting.clear();
+    }
+}
+
+/// Every connection still open is closed off the loop thread, so quitting
+/// does not wait on a worker stuck in a call nothing can interrupt — the
+/// process ending takes that worker with it.
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        for tab in &mut self.tabs {
+            close(tab.connection.take());
+        }
+    }
+}
+
+/// Drops a connection on a thread of its own. Dropping one cancels its query
+/// and joins its worker, and a worker inside a PL/SQL sleep, which no break
+/// reaches, would otherwise hold the screen for as long as the sleep lasts.
+fn close(connection: Option<Connection>) {
+    if let Some(connection) = connection {
+        let _ = std::thread::Builder::new()
+            .name("close".to_owned())
+            .spawn(move || drop(connection));
+    }
+}
+
 /// The tabs `--connect NAME` and `--connect-all` ask for, in config order.
 /// Neither flag is the first tab, the one on screen: a tab is opened to be
 /// used, and launching opens one. A replay connects only what it is told to,
@@ -718,6 +751,34 @@ mod tests {
 
         runtime.disconnect(&mut app, 0);
         assert_eq!(runtime.queued(0), None, "a disconnect drops it");
+    }
+
+    /// C3: the query a disconnect or a reconnect takes with it is over, or
+    /// the pane says `Running` for ever and `wait busy` never returns.
+    #[test]
+    fn a_query_the_connection_takes_with_it_is_over() {
+        let config = refused("s3cret");
+        let started = |app: &mut App| {
+            app.apply(RuntimeEvent::QueryStarted {
+                tab: 0,
+                at: Instant::now(),
+                statement: 0,
+                of: 1,
+                keep_view: false,
+            });
+            assert!(app.tabs[0].results.running());
+        };
+        let mut app = App::new(&config);
+        let mut runtime = Runtime::new(&config);
+        started(&mut app);
+        runtime.disconnect(&mut app, 0);
+        assert!(!app.tabs[0].results.running());
+        assert!(!app.busy());
+
+        started(&mut app);
+        runtime.connect(&mut app, 0);
+        assert!(!app.tabs[0].results.running(), "a reconnect ends it too");
+        settle(&mut runtime, &mut app);
     }
 
     #[test]

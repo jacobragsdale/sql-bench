@@ -572,6 +572,11 @@ impl App {
         let Some(tab) = self.tabs.get_mut(index) else {
             return;
         };
+        // A query the connection took with it is over, and nothing else is
+        // left that would say so.
+        if tab.results.running() {
+            tab.results.apply(QueryEvent::Error(DbError::Cancelled));
+        }
         // Whatever the tree held was that connection's; the run loop asks
         // for the schemas again as soon as this one is up.
         tab.objects.clear();
@@ -1131,7 +1136,12 @@ impl App {
             return Vec::new();
         };
         let kind = open.kind;
-        match open.scratch.handle(key) {
+        let outcome = open.scratch.handle(key);
+        if matches!(outcome, Outcome::RunStatement | Outcome::RunAll) && open.results.running() {
+            self.shell.status = "Esc cancels the running query".to_owned();
+            return Vec::new();
+        }
+        match outcome {
             Outcome::Unchanged | Outcome::Edited => Vec::new(),
             Outcome::RunStatement => match open.scratch.statement_at_cursor(kind) {
                 Some((sql, lines)) => {
