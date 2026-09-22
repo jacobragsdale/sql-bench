@@ -157,6 +157,7 @@ Anywhere:
 | `?` | help |
 | `Esc` | cancel or close help |
 | `Ctrl-Q` | quit |
+| `Ctrl-F` | find an object |
 
 Anywhere but the scratch pad, which types them instead:
 
@@ -203,7 +204,7 @@ Objects:
 | `s` | source |
 | `i` | columns |
 | `r` | reload |
-| `/` | filter |
+| `/` | find in every schema |
 | `y` | copy the name |
 | `Arrows` | move about the tree |
 | `g` | first row |

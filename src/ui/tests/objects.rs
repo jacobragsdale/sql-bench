@@ -2,8 +2,9 @@
 //! that failed says, the filter in the title, and the source viewer.
 
 use super::*;
+use crate::app::RuntimeEvent;
 use crate::app::objects::Objects;
-use crate::app::tests::browsed;
+use crate::app::tests::{browsed, object};
 use crate::config::Kind;
 use crate::db::catalog::{CatalogAnswer, CatalogRequest, ObjectKind};
 use crate::db::model::DbError;
@@ -117,6 +118,39 @@ fn the_filter_is_in_the_title_and_what_it_hides_is_off_the_pane() {
         app.handle(Event::Key(key(spec)));
     }
     assert_eq!(tree(&app), ["no objects match", "[ Clear filter ]"]);
+}
+
+#[test]
+fn a_closed_branch_the_filter_found_something_in_is_drawn_open() {
+    let mut app = browsing();
+    app.shell.focus = Focus::Objects;
+    app.handle(Event::Key(key("/")));
+    app.catalog_started(0, &CatalogRequest::AllObjects);
+    let screen = text(&frame(120, 40, &app));
+    assert!(screen.contains("╭ Objects / … ─"), "{screen}");
+    app.apply(RuntimeEvent::Catalog {
+        tab: 0,
+        request: CatalogRequest::AllObjects,
+        result: Ok(CatalogAnswer::Objects(vec![object(
+            "bench",
+            "sp_customer_orders",
+            ObjectKind::Procedure,
+        )])),
+    });
+    for spec in ["c", "u", "s", "t"] {
+        app.handle(Event::Key(key(spec)));
+    }
+    assert_eq!(
+        tree(&app),
+        [
+            "▾ dbo",
+            "  ▾ Tables",
+            "    ▸ customers",
+            "▾ bench",
+            "  ▾ Procedures",
+            "      sp_customer_orders",
+        ]
+    );
 }
 
 #[test]

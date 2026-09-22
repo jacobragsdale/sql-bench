@@ -249,14 +249,22 @@ The connection's own schema is listed first and opened as soon as the
 connection is up: `dbo` on SQL Server, the user name on Oracle, where every
 catalog name is upper case.
 
-`/` narrows the pane to the rows whose name contains what is typed, plus the
-branches above them, and says so in the title: `Objects /cust`. Esc clears it.
+`/` (or `Ctrl-F` from any pane) searches the whole database, not just what is
+open: the first `/` lists every object of every schema in one query (the
+title says `…` until it lands) and fills every branch nobody opened. The pane
+narrows to the schemas, objects and open columns whose name contains what is
+typed — `schema.name` when it has a dot in it — plus the branches above them,
+and says so in the title: `Objects /cust`. The cursor jumps to the first match
+and Up/Down step between matches while typing; Enter keeps the filter and
+gives the keys back. Esc clears it and opens the branches above the cursor,
+so the row the filter found stays under it.
 Enter on a table or a view writes `select top 100 * from schema.name` —
 `select * from schema.name fetch first 100 rows only` on Oracle — into the pad
 on a line of its own and moves the focus there. `i` puts a table's columns in
 the results pane as a grid, `s` puts an object's source there as numbered
-lines that the pane's own movement keys scroll, and `y` copies the qualified
-name.
+lines that the pane's own movement keys scroll — for a table, a `CREATE
+TABLE` written from its columns and primary key — and `y` copies the
+qualified name. Over a source, `y` (or its title's `Copy`) copies all of it.
 
 ## Results grid (`src/app/results.rs`, `src/ui/results.rs`)
 

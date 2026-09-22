@@ -438,6 +438,7 @@ fn the_keys_of_a_pane_are_its_own_and_the_ones_that_work_anywhere() {
             "?",
             "Esc",
             "Ctrl-Q",
+            "Ctrl-F",
         ],
         "the pad's own keys, and the ones that are not characters"
     );
@@ -1051,6 +1052,95 @@ fn esc_clears_a_filter_enter_committed() {
     press(&mut app, "Esc");
     assert_eq!(app.tabs[1].objects.filter(), "");
     assert!(rows(&app.tabs[1].objects).contains(&"    orders".to_owned()));
+}
+
+#[test]
+fn the_filter_finds_what_is_under_a_closed_branch_and_leaves_it_on_screen() {
+    let mut app = browsing();
+    go_to(&mut app.tabs[1].objects, "Procedures");
+    app.shell.focus = Focus::Scratch;
+    // Ctrl-F from anywhere: the pane, the filter, and every object to search.
+    assert_eq!(
+        press(&mut app, "Ctrl-F"),
+        vec![Action::LoadObjects {
+            tab: 1,
+            request: CatalogRequest::AllObjects
+        }]
+    );
+    assert_eq!(app.shell.focus, Focus::Objects);
+    assert!(app.tabs[1].objects.filtering());
+    let everything = vec![
+        object("dbo", "customers", ObjectKind::Table),
+        object("dbo", "orders", ObjectKind::Table),
+        object("dbo", "order_totals", ObjectKind::View),
+        object("bench", "order_pkg", ObjectKind::Package),
+        object("bench", "orders", ObjectKind::Table),
+    ];
+    app.apply(RuntimeEvent::Catalog {
+        tab: 1,
+        request: CatalogRequest::AllObjects,
+        result: Ok(CatalogAnswer::Objects(everything)),
+    });
+    assert!(!app.tabs[1].objects.busy());
+    let under = |app: &App| {
+        let objects = &app.tabs[1].objects;
+        objects.nodes()[objects.cursor()].item.qualified()
+    };
+    assert_eq!(
+        under(&app),
+        "dbo",
+        "rows filled in above it moved the cursor"
+    );
+    assert_eq!(
+        app.tabs[1].objects.nodes()[app.tabs[1].objects.cursor()]
+            .item
+            .name(),
+        "Procedures"
+    );
+
+    for character in ["o", "r", "d"] {
+        press(&mut app, character);
+    }
+    assert_eq!(
+        rows(&app.tabs[1].objects),
+        [
+            "dbo",
+            "  Tables",
+            "    orders",
+            "  Views",
+            "    order_totals",
+            "bench",
+            "  Tables",
+            "    orders",
+            "  Packages",
+            "    order_pkg",
+        ],
+        "a closed Views and a schema nobody opened are searched too"
+    );
+    assert_eq!(under(&app), "dbo.orders", "the first match");
+    press(&mut app, "Down");
+    assert_eq!(under(&app), "dbo.order_totals", "the next, past its branch");
+    press(&mut app, "Up");
+    press(&mut app, "Up");
+    assert_eq!(under(&app), "dbo.orders", "and no further than the first");
+
+    // A dot searches `schema.name`.
+    for _ in 0..3 {
+        press(&mut app, "Backspace");
+    }
+    for character in "bench.ord".chars() {
+        press(&mut app, &character.to_string());
+    }
+    assert_eq!(under(&app), "bench.orders");
+    press(&mut app, "Down");
+    assert_eq!(under(&app), "bench.order_pkg");
+
+    // Esc drops the filter and keeps the row it found on screen.
+    press(&mut app, "Esc");
+    assert_eq!(under(&app), "bench.order_pkg");
+    assert!(rows(&app.tabs[1].objects).contains(&"    order_pkg".to_owned()));
+    // Everything is here now, so another `/` asks for nothing.
+    assert_eq!(press(&mut app, "/"), vec![]);
 }
 
 #[test]

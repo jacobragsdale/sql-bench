@@ -109,7 +109,8 @@ fn a_press_that_slides_off_its_target_is_taken_back() {
 fn a_click_beside_the_help_closes_it_and_reaches_nothing_under_it() {
     let mut app = two_tabs();
     app.handle(Event::Key(key("?")));
-    let (x, y) = SCRATCH;
+    // Scratch, right of the overlay.
+    let (x, y) = (115, 5);
     assert_eq!(
         hits(&app).at(Position::new(x, y)).map(|(_, target)| target),
         Some(Target::Outside),

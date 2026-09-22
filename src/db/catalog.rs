@@ -169,6 +169,8 @@ pub struct ColumnInfo {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CatalogRequest {
     Schemas,
+    /// Every object in every schema, which is what `/` searches.
+    AllObjects,
     Objects {
         schema: String,
         kind: ObjectKind,
@@ -201,6 +203,7 @@ impl CatalogRequest {
     pub fn sql(&self, backend: Kind) -> String {
         match self {
             Self::Schemas => schemas_sql(backend),
+            Self::AllObjects => objects_sql(backend, None, None),
             Self::Objects { schema, kind } => objects_sql(backend, Some(schema), Some(*kind)),
             Self::Columns { schema, table, .. } => columns_sql(backend, schema, table),
             Self::Source {
@@ -216,7 +219,9 @@ impl CatalogRequest {
     pub fn answer(&self, backend: Kind, rows: Vec<Vec<Cell>>) -> Result<CatalogAnswer, DbError> {
         Ok(match self {
             Self::Schemas => CatalogAnswer::Schemas(parse_schemas(&rows)),
-            Self::Objects { .. } => CatalogAnswer::Objects(parse_objects(backend, rows)),
+            Self::AllObjects | Self::Objects { .. } => {
+                CatalogAnswer::Objects(parse_objects(backend, rows))
+            }
             Self::Columns { .. } => CatalogAnswer::Columns(parse_columns(backend, &rows)),
             Self::Source {
                 schema,

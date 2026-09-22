@@ -44,6 +44,7 @@ expect V_RECENT_ORDERS
 
 # /cust keeps what matches and the branches above it, and nothing else.
 key /
+wait busy
 type cust
 expect ╭ Objects /cust ─
 expect CUSTOMERS
@@ -53,11 +54,10 @@ key Esc
 expect ▸ Procedures
 
 # s: the text that made a procedure, in the results pane with line numbers.
-key h
-key j
-key l
-wait busy
-key j
+# The filter finds it under a branch nobody opened, and Enter keeps it.
+key /
+type customer_orders
+key Enter
 key s
 wait busy
 expect Source · BENCH.CUSTOMER_ORDERS

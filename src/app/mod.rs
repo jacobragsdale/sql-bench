@@ -61,6 +61,7 @@ pub const KEYS: &[(&str, &str, &str)] = &[
     ("Esc", ANYWHERE, "cancel or close help"),
     ("q", NOT_SCRATCH, "quit"),
     ("Ctrl-Q", ANYWHERE, "quit"),
+    ("Ctrl-F", ANYWHERE, "find an object"),
     ("j", RESULTS, "row down"),
     ("k", RESULTS, "row up"),
     ("h", RESULTS, "column left"),
@@ -91,7 +92,7 @@ pub const KEYS: &[(&str, &str, &str)] = &[
     ("s", OBJECTS, "source"),
     ("i", OBJECTS, "columns"),
     ("r", OBJECTS, "reload"),
-    ("/", OBJECTS, "filter"),
+    ("/", OBJECTS, "find in every schema"),
     ("y", OBJECTS, "copy the name"),
     ("Arrows", OBJECTS, "move about the tree"),
     ("g", OBJECTS, "first row"),
@@ -667,6 +668,13 @@ impl App {
                 if filtering && !control =>
             {
                 return self.objects_key(key);
+            }
+            KeyCode::Char('f' | 'F') if control => {
+                self.shell.focus = Focus::Objects;
+                // Typing the filter already, a `/` would be a letter of it.
+                if !filtering {
+                    return self.objects_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+                }
             }
             KeyCode::Char('t' | 'T') if control => {
                 if !self.tabs.is_empty() {

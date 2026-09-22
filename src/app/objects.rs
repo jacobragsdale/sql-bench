@@ -10,6 +10,8 @@
 //! [`CatalogRequest`] that would fill it and marks itself loading; the run
 //! loop runs it and comes back through [`Objects::answer`].
 
+use std::collections::BTreeMap;
+
 use crossterm::event::{KeyCode, KeyEvent};
 
 use crate::config::Kind;
@@ -152,9 +154,11 @@ pub struct Objects {
     filter: String,
     /// Whether `/` is still being typed into.
     filtering: bool,
-    /// Whether the schema list itself is on its way, which is the one load
-    /// with no row of its own to say so.
+    /// Whether the schema list itself is on its way, which is one of the two
+    /// loads with no row of their own to say so.
     loading_schemas: bool,
+    /// Whether the other one is: every object, for `/` to search.
+    searching: bool,
     /// Where the window starts; the pane's height is known only to the
     /// renderer, so this is a hint [`Objects::window`] clamps.
     scroll: usize,
@@ -177,6 +181,7 @@ impl Objects {
             filter: String::new(),
             filtering: false,
             loading_schemas: false,
+            searching: false,
             scroll: 0,
         }
     }
@@ -215,11 +220,17 @@ impl Objects {
         self.filtering
     }
 
+    /// Whether `/` is still fetching the objects it searches.
+    #[must_use]
+    pub const fn searching(&self) -> bool {
+        self.searching
+    }
+
     /// Whether a catalog query this tree asked for is still running, which
     /// is what a replay's `wait busy` waits out.
     #[must_use]
     pub fn busy(&self) -> bool {
-        self.loading_schemas || self.nodes.iter().any(|node| node.loading)
+        self.loading_schemas || self.searching || self.nodes.iter().any(|node| node.loading)
     }
 
     /// A load is on its way: the row says so until the answer arrives, and
@@ -230,14 +241,22 @@ impl Objects {
                 self.nodes[index].loading = true;
                 self.nodes[index].error = None;
             }
-            None => self.loading_schemas = matches!(request, CatalogRequest::Schemas),
+            None => match request {
+                CatalogRequest::Schemas => self.loading_schemas = true,
+                CatalogRequest::AllObjects => self.searching = true,
+                _ => {}
+            },
         }
     }
 
     /// What the load came back with. The results pane is the app's to fill;
     /// this is only the tree's half.
     pub fn answer(&mut self, request: &CatalogRequest, result: &Result<CatalogAnswer, DbError>) {
-        self.loading_schemas = false;
+        match request {
+            CatalogRequest::Schemas => self.loading_schemas = false,
+            CatalogRequest::AllObjects => self.searching = false,
+            _ => {}
+        }
         let index = self.find(request);
         if let Some(index) = index {
             self.nodes[index].loading = false;
@@ -254,6 +273,9 @@ impl Objects {
         };
         match (answer, index) {
             (CatalogAnswer::Schemas(schemas), _) => self.fill_schemas(schemas),
+            (CatalogAnswer::Objects(objects), None) if *request == CatalogRequest::AllObjects => {
+                self.fill_all(objects);
+            }
             (CatalogAnswer::Objects(objects), Some(index)) => {
                 let depth = self.nodes[index].depth + 1;
                 let children = objects
@@ -294,6 +316,63 @@ impl Objects {
         }
     }
 
+    /// Every branch nobody has opened yet, filled from one listing of the
+    /// whole database, so `/` finds what is under a closed branch too. What
+    /// is already loaded is kept: it may have columns open under it.
+    fn fill_all(&mut self, objects: &[DbObject]) {
+        let mut by_kind: BTreeMap<(&str, ObjectKind), Vec<&DbObject>> = BTreeMap::new();
+        for object in objects {
+            by_kind
+                .entry((object.schema.as_str(), object.kind))
+                .or_default()
+                .push(object);
+        }
+        let backend = self.backend;
+        let push_kind = |nodes: &mut Vec<Node>, mut node: Node, schema: &str, kind| {
+            node.loaded = true;
+            node.error = None;
+            let depth = node.depth + 1;
+            nodes.push(node);
+            nodes.extend(
+                by_kind
+                    .get(&(schema, kind))
+                    .into_iter()
+                    .flatten()
+                    .map(|object| Node::new(Item::Object((*object).clone()), depth)),
+            );
+        };
+        let old = std::mem::take(&mut self.nodes);
+        let cursor = self.cursor;
+        let mut nodes = Vec::with_capacity(old.len() + objects.len());
+        for (index, mut node) in old.into_iter().enumerate() {
+            if index == cursor {
+                self.cursor = nodes.len();
+            }
+            match node.item.clone() {
+                Item::Schema(schema) if !node.loaded => {
+                    node.loaded = true;
+                    let depth = node.depth + 1;
+                    nodes.push(node);
+                    for kind in ObjectKind::all_for(backend) {
+                        let item = Item::Kind {
+                            schema: schema.clone(),
+                            kind,
+                        };
+                        push_kind(&mut nodes, Node::new(item, depth), &schema, kind);
+                    }
+                }
+                Item::Kind { schema, kind } if !node.loaded => {
+                    push_kind(&mut nodes, node, &schema, kind);
+                }
+                _ => nodes.push(node),
+            }
+        }
+        self.nodes = nodes;
+        if !self.filter.is_empty() {
+            self.seek(0);
+        }
+    }
+
     /// One key of the objects pane.
     pub fn key(&mut self, key: KeyEvent) -> Hit {
         if self.filtering {
@@ -316,40 +395,98 @@ impl Objects {
             KeyCode::Char('i') => self.columns(),
             KeyCode::Char('r') => self.reload(),
             KeyCode::Char('y') => self.copy(),
-            KeyCode::Char('/') => {
-                self.filtering = true;
-                Hit::Moved
-            }
+            KeyCode::Char('/') => self.search(),
             // A filter Enter committed is still a filter, and Esc is the way
             // out of one whether or not it is being typed into.
             KeyCode::Esc if !self.filter.is_empty() => {
-                self.filter.clear();
-                self.show_cursor();
+                self.clear_filter();
                 Hit::Moved
             }
             _ => Hit::Ignored,
         }
     }
 
+    /// `/`: start typing a filter, and fetch every object for it to search
+    /// unless the whole tree is here already.
+    pub fn search(&mut self) -> Hit {
+        self.filtering = true;
+        let whole = self
+            .nodes
+            .iter()
+            .all(|node| node.loaded || !matches!(node.item, Item::Schema(_) | Item::Kind { .. }));
+        if whole || self.searching || self.nodes.is_empty() {
+            return Hit::Moved;
+        }
+        Hit::Load(CatalogRequest::AllObjects)
+    }
+
     /// The keys `/` takes for itself while it is being typed into.
     fn filter_key(&mut self, key: KeyEvent) -> Hit {
         match key.code {
-            KeyCode::Char(character) => self.filter.push(character),
+            KeyCode::Char(character) => {
+                self.filter.push(character);
+                self.seek(0);
+            }
             KeyCode::Backspace => {
                 if self.filter.pop().is_none() {
                     self.filtering = false;
                 }
+                self.seek(0);
             }
+            KeyCode::Down => self.seek(1),
+            KeyCode::Up => self.seek(-1),
             // Esc clears it; Enter keeps it and gives the keys back.
-            KeyCode::Esc => {
-                self.filter.clear();
-                self.filtering = false;
-            }
+            KeyCode::Esc => self.clear_filter(),
             KeyCode::Enter => self.filtering = false,
             _ => return Hit::Ignored,
         }
-        self.show_cursor();
         Hit::Moved
+    }
+
+    /// Put the cursor on the next row the filter matches (`by` 1), the one
+    /// before (-1) or the first (0), so what was typed is what Enter opens.
+    fn seek(&mut self, by: isize) {
+        if self.filter.is_empty() {
+            self.show_cursor();
+            return;
+        }
+        let visible = self.visible();
+        let wanted = self.filter.to_lowercase();
+        let hit = |index: &usize| matches(&self.nodes[*index].item, &wanted);
+        let at = visible.iter().position(|index| *index == self.cursor);
+        let found = match (by, at) {
+            (1, Some(at)) => visible[at + 1..]
+                .iter()
+                .position(hit)
+                .map(|found| at + 1 + found),
+            (-1, Some(at)) => visible[..at].iter().rposition(hit),
+            _ => visible.iter().position(hit),
+        };
+        match found {
+            Some(found) => {
+                self.cursor = visible[found];
+                self.scroll_to(found);
+            }
+            None => self.show_cursor(),
+        }
+    }
+
+    /// Drop the filter and open every branch above the cursor, so the row it
+    /// found is still the one under it.
+    fn clear_filter(&mut self) {
+        self.filter.clear();
+        self.filtering = false;
+        let mut depth = self.nodes.get(self.cursor).map_or(0, |node| node.depth);
+        for index in (0..self.cursor).rev() {
+            if depth == 0 {
+                break;
+            }
+            if self.nodes[index].depth < depth {
+                self.nodes[index].expanded = true;
+                depth = self.nodes[index].depth;
+            }
+        }
+        self.show_cursor();
     }
 
     /// `l`: open what is closed, step into what is open, and show what has
@@ -361,10 +498,21 @@ impl Objects {
         if !node.item.parent() {
             return self.activate();
         }
-        if node.expanded {
+        if node.expanded || self.shows_children(self.cursor) {
             return self.by(1);
         }
         self.toggle()
+    }
+
+    /// Whether the row after `index` on screen is under it, which a filter
+    /// does for a closed branch with a match in it.
+    fn shows_children(&self, index: usize) -> bool {
+        let visible = self.visible();
+        visible
+            .iter()
+            .position(|row| *row == index)
+            .and_then(|at| visible.get(at + 1))
+            .is_some_and(|next| self.nodes[*next].depth > self.nodes[index].depth)
     }
 
     /// `h`: close what is open, and go up a level from what is closed.
@@ -593,56 +741,53 @@ impl Objects {
         end
     }
 
-    /// The rows on screen, top to bottom: what is open, and — with a filter
-    /// on — only the rows that match it and the rows above them.
+    /// The rows on screen, top to bottom: what is open, or — with a filter
+    /// on — the rows that match it, open or not, and the branches above them.
+    /// A column only counts under a table that is open: `id` is in every one.
+    ///
+    /// ponytail: every row's name is lowered on every call, which is O(rows)
+    /// allocations a frame. Fine to tens of thousands of objects; keep a
+    /// lowered copy on each node if a bigger catalog makes typing lag.
     #[must_use]
     pub fn visible(&self) -> Vec<usize> {
-        let mut open = Vec::with_capacity(self.nodes.len());
+        let mut open = vec![false; self.nodes.len()];
         let mut closed: Option<usize> = None;
         for (index, node) in self.nodes.iter().enumerate() {
             match closed {
                 Some(depth) if node.depth > depth => continue,
                 _ => closed = None,
             }
-            open.push(index);
+            open[index] = true;
             if !node.expanded {
                 closed = Some(node.depth);
             }
         }
         if self.filter.is_empty() {
-            return open;
+            return (0..self.nodes.len()).filter(|index| open[*index]).collect();
         }
         let wanted = self.filter.to_lowercase();
-        let mut keep = vec![false; open.len()];
-        for position in 0..open.len() {
-            if !self.nodes[open[position]]
-                .item
-                .name()
-                .to_lowercase()
-                .contains(&wanted)
+        let mut keep = vec![false; self.nodes.len()];
+        // The rows above this one, nearest last.
+        let mut path: Vec<usize> = Vec::new();
+        for (index, node) in self.nodes.iter().enumerate() {
+            while path
+                .last()
+                .is_some_and(|above| self.nodes[*above].depth >= node.depth)
             {
-                continue;
+                path.pop();
             }
-            keep[position] = true;
-            // ponytail: the ancestors are walked back one row at a time,
-            // which is O(rows × depth). The tree is a screenful of rows and
-            // four levels deep; an index of parents is the fix if it ever
-            // holds ten thousand.
-            let mut depth = self.nodes[open[position]].depth;
-            for above in (0..position).rev() {
-                if self.nodes[open[above]].depth < depth {
-                    keep[above] = true;
-                    depth = self.nodes[open[above]].depth;
-                    if depth == 0 {
+            let counts = open[index] || !matches!(node.item, Item::Column(_));
+            if counts && matches(&node.item, &wanted) {
+                keep[index] = true;
+                for above in path.iter().rev() {
+                    if std::mem::replace(&mut keep[*above], true) {
                         break;
                     }
                 }
             }
+            path.push(index);
         }
-        open.into_iter()
-            .zip(keep)
-            .filter_map(|(index, keep)| keep.then_some(index))
-            .collect()
+        (0..self.nodes.len()).filter(|index| keep[*index]).collect()
     }
 
     /// The first row of a window `height` high, so the cursor is on it.
@@ -755,5 +900,20 @@ impl Objects {
         } else if at >= self.scroll + PAGE {
             self.scroll = at + 1 - PAGE;
         }
+    }
+}
+
+/// Whether a row is one the filter `wanted` (lower case) is looking for: its
+/// name has it in it, or with a dot in it, an object's `schema.name` does.
+/// A branch of kinds is never one: `t` would keep every `Tables`.
+fn matches(item: &Item, wanted: &str) -> bool {
+    match item {
+        Item::Kind { .. } => false,
+        Item::Object(object) if wanted.contains('.') => {
+            format!("{}.{}", object.schema, object.name)
+                .to_lowercase()
+                .contains(wanted)
+        }
+        _ => item.name().to_lowercase().contains(wanted),
     }
 }

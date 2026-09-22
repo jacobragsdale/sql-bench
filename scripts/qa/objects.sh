@@ -222,8 +222,10 @@ browse() {
         echo "frame $label-tree"
 
         # The filter: what it keeps, what it says when it keeps nothing, and
-        # that Esc gives the tree back from either.
+        # that Esc gives the tree back from either. The first `/` lists every
+        # schema's objects for it to search.
         echo "key /"
+        echo "wait busy"
         echo "type cust"
         echo "expect ╭ Objects /cust ─"
         echo "expect $customers"
@@ -241,9 +243,10 @@ browse() {
         echo "key Esc"
         echo "expect ▸ $orders"
 
-        # i on customers: its columns in the grid.
+        # i on customers: its columns in the grid. `schema.name`, since other
+        # schemas have a customers too.
         echo "key /"
-        echo "type $customers"
+        echo "type $schema.$customers"
         echo "key Enter"
         echo "key G"
         echo "key i"
@@ -257,7 +260,7 @@ browse() {
         var=$upper\_sourced
         for name in ${!var}; do
             echo "key /"
-            echo "type $name"
+            echo "type $schema.$name"
             echo "key Enter"
             echo "key G"
             echo "key s"

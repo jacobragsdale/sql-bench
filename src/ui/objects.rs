@@ -29,9 +29,11 @@ pub(super) fn render(frame: &mut Frame, app: &App, theme: &Theme, area: Rect, hi
     let objects = &tab.objects;
     // Esc cancels a running query before it reaches the filter.
     let clears = !objects.filter().is_empty() && !tab.results.running();
+    // The listing `/` searches can take a moment on a big catalog.
+    let searching = if objects.searching() { " …" } else { "" };
     let title = match objects.filter() {
-        "" => " Objects ".to_owned(),
-        filter => format!(" Objects /{filter} "),
+        "" if !objects.filtering() => " Objects ".to_owned(),
+        filter => format!(" Objects /{filter}{searching} "),
     };
     let block = titled(&title, title_style, border_style);
     let inner = block.inner(area);
@@ -90,11 +92,19 @@ pub(super) fn render(frame: &mut Frame, app: &App, theme: &Theme, area: Rect, hi
         border_style,
         hits,
     );
+    // A filter shows what matched under a closed branch, so a branch is drawn
+    // open when the row after it is under it.
     let lines: Vec<Line> = visible
-        .into_iter()
+        .iter()
+        .enumerate()
         .skip(top)
         .take(height)
-        .map(|index| row(objects, index, theme, width))
+        .map(|(at, index)| {
+            let shows = visible
+                .get(at + 1)
+                .is_some_and(|next| objects.nodes()[*next].depth > objects.nodes()[*index].depth);
+            row(objects, *index, shows, theme, width)
+        })
         .collect();
     let rows = Rect {
         height: u16::try_from(lines.len()).unwrap_or(u16::MAX),
@@ -105,9 +115,9 @@ pub(super) fn render(frame: &mut Frame, app: &App, theme: &Theme, area: Rect, hi
 }
 
 /// One row: the indent, the glyph, the name, and what the node is doing.
-fn row(objects: &Objects, index: usize, theme: &Theme, width: usize) -> Line<'static> {
+fn row(objects: &Objects, index: usize, shows: bool, theme: &Theme, width: usize) -> Line<'static> {
     let node = &objects.nodes()[index];
-    let glyph = match (node.item.parent(), node.expanded) {
+    let glyph = match (node.item.parent(), node.expanded || shows) {
         (true, true) => "▾ ",
         (true, false) => "▸ ",
         (false, _) => "  ",
