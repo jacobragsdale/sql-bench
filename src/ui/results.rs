@@ -15,7 +15,7 @@ use ratatui::widgets::{Paragraph, Wrap};
 use super::theme::Theme;
 use super::{buttons, placeholder, placeholder_button, scrollbar, titled};
 use crate::app::pointer::{Hits, Target};
-use crate::app::results::{Results, Source, Status, cut, grouped_u64, shown};
+use crate::app::results::{Results, Source, Status, counted, cut, shown};
 use crate::app::{App, Focus, TabState};
 use crate::db::model::{Cell, Column};
 use crate::export::pad;
@@ -92,10 +92,9 @@ pub(super) fn render(frame: &mut Frame, app: &App, theme: &Theme, area: Rect, hi
     }
     if results.columns().is_empty() {
         let mut lines = vec![match (results.rows_affected, &results.status) {
-            (Some(affected), _) => Line::from(Span::raw(format!(
-                "{} rows affected",
-                grouped_u64(affected)
-            ))),
+            (Some(affected), _) => {
+                Line::from(Span::raw(format!("{} affected", counted(affected, "row"))))
+            }
             (None, Status::Idle) => placeholder("nothing has run yet", theme),
             (None, _) => placeholder("no rows", theme),
         }];

@@ -174,7 +174,8 @@ fn tab_bar(frame: &mut Frame, app: &App, theme: &Theme, bar: Rect, hits: &mut Hi
         frame.buffer_mut().set_string(x, bar.y, help, theme.dim);
         hits.push(
             Rect::new(x, bar.y, cells(help), 1),
-            button(app.shell.focus, "?"),
+            // F1, because the pad types a `?`.
+            button(app.shell.focus, "F1"),
         );
     }
 }

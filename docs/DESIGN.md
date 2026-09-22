@@ -322,9 +322,11 @@ receiver ends in `Cancelled`, the rows that did arrive stay on screen and the
 title reads `cancelled after 1.2 s, 4,500 rows`.
 
 A run of several statements runs them one after another, each started when the
-one before it is done. The pane shows the last result set and a summary line,
-`3 statements, 2 result sets, 1 rows affected`; `[` and `]` switch between the
-sets of one statement. **A statement the server says no to stops the run**:
+one before it is done. The pane shows the last result set, `[` and `]` switch
+between the sets of every statement of the run, and the title counts the rows
+of the set on screen. The footer sums the run up,
+`3 statements, 2 result sets, 1 row affected`, which is where an update's
+count is once a later select is on screen. **A statement the server says no to stops the run**:
 the statements after it were written to follow it, so they are dropped rather
 than run against whatever state the failure left. The footer says which one it
 was (`statement 2 of 3 failed`), the pane shows the driver's own message with
@@ -397,13 +399,14 @@ give up. Enter writes every fetched row of the set on screen: JSON for a
 headless subcommands use, so a file is the same bytes whichever door it left
 by. The footer says `exported 1,234 rows to <path>`, or what stopped it.
 
-`?` opens the help over the layout: `<key>  <what it does>` for the keys of
+`?` (F1 in the pad, or anywhere) opens the help over the layout: `<key>  <what it does>` for the keys of
 the focused pane only — `Help · Scratch` — with the key column as wide as the
 widest key it lists. It is never taller than the screen: a list that does not
-fit scrolls with j k, the arrows and PageUp/PageDown, which the pane under it
-does not see while it is open, and the title says which rows are showing
-(`Help · Scratch (1-11 of 20)`). `?` and Esc close it and put it back to the
-top.
+fit scrolls with j k, the arrows and PageUp/PageDown, and the title says
+which rows are showing (`Help · Scratch (1-11 of 20)`). It takes every key
+while it is open, the way a menu does, so nothing typed reaches the pane
+hidden under it. `?`, F1 and Esc close it and put it back to the top; Ctrl-Q
+still quits.
 
 ## Mouse
 
@@ -608,7 +611,7 @@ the README honest.
 `not Scratch` is the interesting column. The pad has to be able to type `c`,
 `q` and `1`, so those keys only act as commands where nothing is being typed,
 and every pane keeps a way out that the pad does not swallow: `Shift-Tab`,
-`Ctrl-T`, `Ctrl-P`, `Ctrl-Q` and `?` work everywhere. `Tab` is in the table
+`Ctrl-T`, `Ctrl-P`, `Ctrl-Q` and `F1` work everywhere. `Tab` is in the table
 twice for the same reason — next pane outside the pad, two spaces inside it.
 The finder's own keys — the arrows, Ctrl-N and Ctrl-P, the pages, Enter and
 Esc — are not in the table, the way the help overlay's and the inspector's
@@ -888,10 +891,11 @@ is asked for the things that are actually big: a table's columns, an
 object's source. The cost is that the index is as old as the connection;
 `r` on a kind asks for it again, and a reconnect always does.
 
-**`?` toggles help everywhere, including the pad.** A key that is only
-sometimes help is a key nobody trusts. `?` is not a character anybody needs
-often in SQL, and Ctrl-E hands the pad to a real editor for anything heavier,
-so the pad gives up `?` and keeps everything else.
+**The pad types `?`; F1 is the help key that works everywhere.** `?` was
+once help everywhere, including the pad, but it is a character SQL needs — a
+`LIKE` pattern, a comment, a string, a driver placeholder — and a pad that
+cannot type it cannot hold every statement. `?` stays help in the other
+panes, and F1 and the `? Help` button reach it from the pad.
 
 **Tab types two spaces in the pad.** A tab character in SQL is a merge
 conflict waiting to happen and renders differently everywhere. Two spaces are

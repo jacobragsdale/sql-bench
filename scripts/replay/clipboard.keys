@@ -21,7 +21,7 @@ expect pasted 1 line
 # A cut goes onto the clipboard, and pastes back twice.
 key Shift-Left
 key Ctrl-X
-expect cut 1 characters
+expect cut 1 character
 expect-not select 1
 key Ctrl-V
 key Ctrl-V

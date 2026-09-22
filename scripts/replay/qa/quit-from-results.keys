@@ -3,7 +3,7 @@
 
 key Shift-Tab
 key ?
-expect ╭ Help · Results ─
+expect ╭ Help · Results
 key Esc
 key Ctrl-Q
 key ?

@@ -60,12 +60,15 @@ pub const KEYS: &[(&str, &str, &str)] = &[
     ("Ctrl-W", SCRATCH, "delete the word before"),
     ("Ctrl-Left", SCRATCH, "word left"),
     ("Ctrl-Right", SCRATCH, "word right"),
-    ("?", ANYWHERE, "help"),
+    ("Ctrl-Home", SCRATCH, "pad start"),
+    ("Ctrl-End", SCRATCH, "pad end"),
+    ("?", NOT_SCRATCH, "help"),
     ("Ctrl-P", ANYWHERE, "find an object"),
     ("Esc", ANYWHERE, "cancel or close help"),
     ("q", NOT_SCRATCH, "quit"),
     ("Ctrl-Q", ANYWHERE, "quit"),
     ("Ctrl-V", ANYWHERE, "paste into the pad"),
+    ("F1", ANYWHERE, "help"),
     ("j", RESULTS, "row down"),
     ("k", RESULTS, "row up"),
     ("h", RESULTS, "column left"),
@@ -619,7 +622,9 @@ impl App {
                 String::new()
             };
         } else {
-            self.shell.status.clear();
+            // What the statements before the last did is not on screen, and
+            // an update's count is nowhere else once a later select has run.
+            self.shell.status = open.results.summary().unwrap_or_default();
         }
     }
 
@@ -675,8 +680,8 @@ impl App {
         {
             return self.finder_key(key);
         }
-        if self.shell.help && self.help_key(key) {
-            return Vec::new();
+        if self.shell.help {
+            return self.help_key(key);
         }
         if self.shell.inspector.is_some() && self.inspector_key(key) {
             return Vec::new();
@@ -705,7 +710,10 @@ impl App {
             }
             KeyCode::Char('v' | 'V') if control => {
                 if !self.overlaid() && !self.tabs.is_empty() {
-                    self.shell.focus = Focus::Scratch;
+                    // The filter being typed is where it goes, if one is.
+                    if !filtering {
+                        self.shell.focus = Focus::Scratch;
+                    }
                     return vec![Action::ReadClipboard {
                         tab: self.shell.active_tab,
                     }];
@@ -713,14 +721,12 @@ impl App {
             }
             KeyCode::Tab if !typing => self.shell.focus = self.shell.focus.next(),
             KeyCode::BackTab => self.shell.focus = self.shell.focus.previous(),
-            KeyCode::Char('?') => {
-                self.shell.help = !self.shell.help;
-                self.shell.help_scroll = 0;
-            }
+            // `?` is a character of SQL in the pad, so F1 is the help key
+            // that works everywhere.
+            KeyCode::Char('?') if !typing => self.shell.help = true,
+            KeyCode::F(1) => self.shell.help = true,
             KeyCode::Esc => {
-                if self.shell.help {
-                    self.close_help();
-                } else if self.shell.inspector.is_some() {
+                if self.shell.inspector.is_some() {
                     self.shell.inspector = None;
                 } else if self.tab().is_some_and(|tab| tab.results.running()) {
                     return vec![Action::Cancel(self.shell.active_tab)];
@@ -731,6 +737,13 @@ impl App {
                         .is_some_and(|tab| tab.results.clear_selection())
                 {
                     // The range was all this Esc was for.
+                } else if typing
+                    && self
+                        .tabs
+                        .get_mut(self.shell.active_tab)
+                        .is_some_and(|tab| tab.scratch.clear_selection())
+                {
+                    // So was the pad's.
                 } else if self.shell.focus == Focus::Objects
                     && self
                         .tab()
@@ -744,12 +757,12 @@ impl App {
                 }
             }
             _ if typing => return self.scratch_key(key),
-            KeyCode::Char('q') => return vec![Action::Quit],
-            // Not `control`: Ctrl-C is the copy key, not a connect key.
-            KeyCode::Char('c') if !control && !self.tabs.is_empty() => {
+            KeyCode::Char('q') if !chord(key) => return vec![Action::Quit],
+            // Not a chord: Ctrl-C is the copy key, not a connect key.
+            KeyCode::Char('c') if !chord(key) && !self.tabs.is_empty() => {
                 return vec![Action::Connect(self.shell.active_tab)];
             }
-            KeyCode::Char('C') if !control && !self.tabs.is_empty() => {
+            KeyCode::Char('C') if !chord(key) && !self.tabs.is_empty() => {
                 return vec![Action::Disconnect(self.shell.active_tab)];
             }
             KeyCode::Char(digit @ '1'..='9') => {
@@ -771,10 +784,10 @@ impl App {
         self.shell.help || self.shell.inspector.is_some() || self.shell.mouse.menu.is_some()
     }
 
-    /// A bracketed paste. The finder and the footer prompt are one line
-    /// being typed, so they take it as one line; anywhere else it goes into
-    /// the pad, which takes the focus, because that is the only place text
-    /// can be put.
+    /// A bracketed paste. The finder, the footer prompt and the tree's
+    /// filter are one line being typed, so they take it as one line;
+    /// anywhere else it goes into the pad, which takes the focus, because
+    /// that is the only place text can be put.
     fn paste(&mut self, text: &str) {
         let line = || text.split_whitespace().collect::<Vec<_>>().join(" ");
         if let Some(prompt) = self.shell.prompt.as_mut() {
@@ -782,6 +795,8 @@ impl App {
         } else if let Some(finder) = self.shell.finder.as_mut() {
             finder.query.insert(&line());
             finder.search(&self.tabs);
+        } else if let Some(tab) = self.filtering_tab() {
+            tab.objects.paste_filter(&line());
         } else if !self.overlaid()
             && let Some(tab) = self.tabs.get_mut(self.shell.active_tab)
         {
@@ -804,6 +819,13 @@ impl App {
                 return;
             }
         };
+        if tab == self.shell.active_tab
+            && let Some(open) = self.filtering_tab()
+        {
+            open.objects
+                .paste_filter(&text.split_whitespace().collect::<Vec<_>>().join(" "));
+            return;
+        }
         let Some(open) = self.tabs.get_mut(tab) else {
             return;
         };
@@ -811,6 +833,14 @@ impl App {
         let lines = text.lines().count().max(1);
         let noun = if lines == 1 { "line" } else { "lines" };
         self.shell.status = format!("pasted {lines} {noun}{from}");
+    }
+
+    /// The tab on screen, when its tree's filter is what is being typed.
+    fn filtering_tab(&mut self) -> Option<&mut Tab> {
+        let focused = self.shell.focus == Focus::Objects;
+        self.tabs
+            .get_mut(self.shell.active_tab)
+            .filter(|tab| focused && tab.objects.filtering())
     }
 
     /// Put this tab on screen, and connect it if it is not: a tab is opened
@@ -824,14 +854,21 @@ impl App {
         }
     }
 
-    /// The keys the open overlay keeps for itself — the pane under it never
-    /// sees them — and whether this was one of them.
-    fn help_key(&mut self, key: KeyEvent) -> bool {
-        match scroll_by(key) {
-            Some(by) => self.scroll_help(by),
-            None => return false,
+    /// A key while the help is open. It takes every one, the way a menu
+    /// does: a key it has no use for would otherwise act on the pane hidden
+    /// under it. Esc, `?` and F1 close it and Ctrl-Q still quits.
+    fn help_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Char('q' | 'Q') if control => return vec![Action::Quit],
+            KeyCode::Esc | KeyCode::Char('?') | KeyCode::F(1) => self.close_help(),
+            _ => {
+                if let Some(by) = scroll_by(key) {
+                    self.scroll_help(by);
+                }
+            }
         }
-        true
+        Vec::new()
     }
 
     /// The help closed, and back at its top for the next time it opens.
@@ -1009,10 +1046,7 @@ impl App {
                 let copy = open.results.rows_text();
                 open.results.clear_selection();
                 match copy {
-                    Some((text, 1)) => self.copied(text, "1 row"),
-                    Some((text, rows)) => {
-                        self.copied(text, &format!("{} rows", results::grouped(rows)))
-                    }
+                    Some((text, rows)) => self.copied(text, &results::counted(rows as u64, "row")),
                     None => Vec::new(),
                 }
             }
@@ -1165,7 +1199,7 @@ impl App {
             }
             Outcome::OpenEditor => vec![Action::OpenEditor { tab }],
             Outcome::Copy(text) => {
-                let characters = format!("{} characters", text.chars().count());
+                let characters = results::counted(text.chars().count() as u64, "character");
                 self.copied(text, &characters)
             }
             Outcome::CopyStatement => match open.scratch.statement_at_cursor(kind) {
@@ -1173,13 +1207,20 @@ impl App {
                 None => Vec::new(),
             },
             Outcome::Cut(text) => {
-                let characters = format!("{} characters", text.chars().count());
+                let characters = results::counted(text.chars().count() as u64, "character");
                 let actions = self.copied(text, &characters);
                 self.shell.status = format!("cut {characters}");
                 actions
             }
         }
     }
+}
+
+/// Whether a letter key came with Ctrl or Alt held, which makes it a
+/// different key from the letter: Ctrl-R in the tree is not `r`.
+pub(crate) fn chord(key: KeyEvent) -> bool {
+    key.modifiers
+        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
 }
 
 /// How far an overlay's scroll keys move it, or `None` for a key that is not

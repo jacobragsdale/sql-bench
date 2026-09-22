@@ -149,7 +149,8 @@ terminal's own Shift+drag. Inside tmux the mouse reaches the app only with
 
 ## Keys
 
-`?` opens the same list in the app, for the focused pane only.
+`?` (or `F1`, which the scratch pad does not type) opens the same list in the
+app, for the focused pane only.
 
 Anywhere:
 
@@ -157,11 +158,11 @@ Anywhere:
 |---|---|
 | `Shift-Tab` | previous pane |
 | `Ctrl-T` | next tab |
-| `?` | help |
 | `Ctrl-P` | find an object |
 | `Esc` | cancel or close help |
 | `Ctrl-Q` | quit |
 | `Ctrl-V` | paste into the pad |
+| `F1` | help |
 
 Anywhere but the scratch pad, which types them instead:
 
@@ -171,6 +172,7 @@ Anywhere but the scratch pad, which types them instead:
 | `1-9` | select tab |
 | `c` | connect |
 | `C` | disconnect |
+| `?` | help |
 | `q` | quit |
 
 Scratch:
@@ -195,6 +197,8 @@ Scratch:
 | `Ctrl-W` | delete the word before |
 | `Ctrl-Left` | word left |
 | `Ctrl-Right` | word right |
+| `Ctrl-Home` | pad start |
+| `Ctrl-End` | pad end |
 
 Objects:
 

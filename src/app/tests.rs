@@ -260,12 +260,13 @@ fn esc_closes_the_help_first_and_the_error_after() {
 }
 
 #[test]
-fn the_open_help_takes_the_scroll_keys_the_pane_would_have_had() {
+fn the_open_help_takes_every_key_the_pane_would_have_had() {
     let mut app = two_tabs();
     app.shell.focus = Focus::Scratch;
-    press(&mut app, "?");
-    for spec in ["j", "Down", "PageDown"] {
-        press(&mut app, spec);
+    press(&mut app, "F1");
+    assert!(app.shell.help, "F1 is help in the pad");
+    for spec in ["j", "Down", "PageDown", "x", "Enter", "Ctrl-R", "Tab"] {
+        assert_eq!(press(&mut app, spec), vec![], "{spec}");
     }
     assert_eq!(app.shell.help_scroll, 2 + HELP_PAGE);
     assert_eq!(
@@ -273,6 +274,7 @@ fn the_open_help_takes_the_scroll_keys_the_pane_would_have_had() {
         "",
         "the pad typed the help's keys"
     );
+    assert!(app.shell.help && app.shell.focus == Focus::Scratch);
     for spec in ["k", "Up", "PageUp"] {
         press(&mut app, spec);
     }
@@ -282,9 +284,14 @@ fn the_open_help_takes_the_scroll_keys_the_pane_would_have_had() {
     press(&mut app, "?");
     assert!(!app.shell.help);
     assert_eq!(app.shell.help_scroll, 0, "the next ? opens at the top");
-    // With it closed the pad has them back.
-    press(&mut app, "j");
-    assert_eq!(app.tabs[0].scratch.text(), "j");
+    // With it closed the pad has them back, `?` included: it is SQL.
+    for spec in ["j", "?"] {
+        press(&mut app, spec);
+    }
+    assert_eq!(app.tabs[0].scratch.text(), "j?");
+    assert!(!app.shell.help);
+    assert_eq!(press(&mut app, "F1"), vec![]);
+    assert_eq!(press(&mut app, "Ctrl-Q"), vec![Action::Quit], "still quits");
 }
 
 #[test]
@@ -436,11 +443,13 @@ fn the_keys_of_a_pane_are_its_own_and_the_ones_that_work_anywhere() {
             "Ctrl-W",
             "Ctrl-Left",
             "Ctrl-Right",
-            "?",
+            "Ctrl-Home",
+            "Ctrl-End",
             "Ctrl-P",
             "Esc",
             "Ctrl-Q",
             "Ctrl-V",
+            "F1",
         ],
         "the pad's own keys, and the ones that are not characters"
     );
@@ -1310,10 +1319,7 @@ fn i_asks_for_the_columns_and_s_for_the_source_of_what_the_cursor_is_on() {
         ])),
     });
     assert_eq!(app.tabs[1].results.rows().len(), 1);
-    assert_eq!(
-        app.tabs[1].results.title(),
-        "dbo.customers columns · 1 rows"
-    );
+    assert_eq!(app.tabs[1].results.title(), "dbo.customers columns · 1 row");
     press(&mut app, "l");
     assert!(rows(&app.tabs[1].objects).contains(&"      id".to_owned()));
 }
@@ -1826,9 +1832,172 @@ fn ctrl_c_with_nothing_selected_copies_the_statement_and_ctrl_x_cuts() {
         press(&mut app, "Ctrl-X"),
         vec![Action::Copy("s".to_owned())]
     );
-    assert_eq!(app.shell.status, "cut 1 characters");
+    assert_eq!(app.shell.status, "cut 1 character");
     assert_eq!(app.shell.clipboard, "s");
     assert_eq!(app.tabs[0].scratch.text(), "select 1;\n\nelect 2\nfrom t");
     assert_eq!(press(&mut app, "Ctrl-X"), vec![], "nothing selected");
-    assert_eq!(app.shell.status, "cut 1 characters", "and nothing said");
+    assert_eq!(app.shell.status, "cut 1 character", "and nothing said");
+}
+
+#[test]
+fn a_chord_is_not_the_letter_under_it() {
+    let mut app = browsing();
+    assert_eq!(press(&mut app, "Ctrl-R"), vec![], "not `r`, a reload");
+    assert_eq!(press(&mut app, "Alt-q"), vec![], "not `q`, a quit");
+
+    let mut app = ready(Focus::Results);
+    assert_eq!(press(&mut app, "Ctrl-E"), vec![], "not `e`, an export");
+    assert!(app.shell.prompt.is_none());
+    assert_eq!(press(&mut app, "Ctrl-Y"), vec![], "not `y`, a copy");
+}
+
+#[test]
+fn ctrl_u_clears_the_filter_being_typed_and_a_paste_lands_in_it() {
+    let mut app = browsing();
+    app.shell.focus = Focus::Objects;
+    press(&mut app, "/");
+    for character in ["c", "u"] {
+        press(&mut app, character);
+    }
+    for chord in ["Ctrl-W", "Alt-x"] {
+        press(&mut app, chord);
+    }
+    assert_eq!(app.tabs[1].objects.filter(), "cu", "a chord types nothing");
+    press(&mut app, "Ctrl-U");
+    assert_eq!(app.tabs[1].objects.filter(), "");
+    assert!(app.tabs[1].objects.filtering(), "and is still being typed");
+
+    app.handle(Event::Paste("cust\n".to_owned()));
+    assert_eq!(app.tabs[1].objects.filter(), "cust");
+    assert_eq!(app.shell.focus, Focus::Objects);
+    assert_eq!(app.tabs[1].scratch.text(), "", "not the pad's");
+
+    // Ctrl-V asks for the clipboard without leaving the filter, and what it
+    // held goes on the end of it.
+    assert_eq!(
+        press(&mut app, "Ctrl-V"),
+        vec![Action::ReadClipboard { tab: 1 }]
+    );
+    app.pasted(1, Some("omers".to_owned()));
+    assert_eq!(app.tabs[1].objects.filter(), "customers");
+    assert_eq!(app.tabs[1].scratch.text(), "");
+}
+
+#[test]
+fn source_for_one_kind_leaves_a_namesake_of_another_kind_alone() {
+    let mut app = browsing();
+    go_to(&mut app.tabs[1].objects, "customers");
+    // A procedure that happens to share the table's name.
+    app.apply(RuntimeEvent::Catalog {
+        tab: 1,
+        request: CatalogRequest::Source {
+            schema: "dbo".to_owned(),
+            name: "customers".to_owned(),
+            kind: ObjectKind::Procedure,
+        },
+        result: Ok(CatalogAnswer::Source(
+            "create procedure customers".to_owned(),
+        )),
+    });
+    assert!(
+        matches!(
+            press(&mut app, "l").as_slice(),
+            [Action::LoadObjects {
+                request: CatalogRequest::Columns { .. },
+                ..
+            }]
+        ),
+        "the table's columns were never loaded"
+    );
+}
+
+#[test]
+fn esc_drops_the_pads_selection_and_ctrl_home_and_ctrl_end_go_to_its_ends() {
+    let mut app = two_tabs();
+    app.shell.focus = Focus::Scratch;
+    app.shell.error = Some("boom".to_owned());
+    app.tabs[0].scratch.set_text("select 1;\n\nselect 22");
+    press(&mut app, "Ctrl-End");
+    assert_eq!(app.tabs[0].scratch.cursor(), (2, 9));
+    press(&mut app, "Shift-Left");
+    assert!(app.tabs[0].scratch.selection().is_some());
+    press(&mut app, "Esc");
+    assert_eq!(app.tabs[0].scratch.selection(), None);
+    assert_eq!(app.tabs[0].scratch.cursor(), (2, 8), "the cursor stays");
+    assert_eq!(
+        app.shell.error.as_deref(),
+        Some("boom"),
+        "one Esc, one thing"
+    );
+    press(&mut app, "Ctrl-Home");
+    assert_eq!(app.tabs[0].scratch.cursor(), (0, 0));
+}
+
+#[test]
+fn run_all_keeps_every_statements_sets_and_says_what_they_did() {
+    let mut app = two_tabs();
+    let set = |app: &mut App, name: &str, rows: i64| {
+        for event in [
+            QueryEvent::Columns(vec![Column {
+                name: name.to_owned(),
+                type_name: "int".to_owned(),
+            }]),
+            QueryEvent::Rows((0..rows).map(|row| vec![Cell::Int(row)]).collect()),
+        ] {
+            app.apply(RuntimeEvent::Query { tab: 0, event });
+        }
+    };
+    let done = |app: &mut App, rows: usize| {
+        app.apply(RuntimeEvent::Query {
+            tab: 0,
+            event: QueryEvent::Done {
+                rows,
+                truncated: false,
+                connect_ms: 0,
+                first_row_ms: 0,
+                total_ms: 1,
+            },
+        });
+    };
+    let started = |app: &mut App, statement: usize| {
+        app.apply(RuntimeEvent::QueryStarted {
+            tab: 0,
+            at: Instant::now(),
+            statement,
+            of: 3,
+            keep_view: false,
+        });
+    };
+    started(&mut app, 0);
+    set(&mut app, "first", 12);
+    done(&mut app, 12);
+    app.shell.focus = Focus::Results;
+    press(&mut app, "G");
+    started(&mut app, 1);
+    set(&mut app, "second", 1);
+    done(&mut app, 1);
+    started(&mut app, 2);
+    app.apply(RuntimeEvent::Query {
+        tab: 0,
+        event: QueryEvent::RowsAffected(1),
+    });
+    done(&mut app, 0);
+
+    let results = &app.tabs[0].results;
+    assert_eq!(results.sets(), 2, "the first statement's set is still here");
+    assert_eq!(results.columns()[0].name, "second");
+    assert_eq!(results.selected(), (0, 0), "on a cell of the set on screen");
+    assert!(results.title().starts_with("Results · set 2/2 · 1 row · "));
+    assert_eq!(
+        app.shell.status, "3 statements, 2 result sets, 1 row affected",
+        "the update's count, which no set shows"
+    );
+    press(&mut app, "[");
+    assert_eq!(app.tabs[0].results.columns()[0].name, "first");
+    assert!(
+        app.tabs[0]
+            .results
+            .title()
+            .starts_with("Results · set 1/2 · 12 rows · ")
+    );
 }

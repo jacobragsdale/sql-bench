@@ -12,8 +12,9 @@
 
 use std::collections::BTreeMap;
 
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use super::chord;
 use super::finder::Index;
 use crate::config::Kind;
 use crate::db::catalog::{CatalogAnswer, CatalogRequest, ColumnInfo, DbObject, ObjectKind};
@@ -479,6 +480,8 @@ impl Objects {
         #[allow(clippy::cast_possible_wrap)]
         let page = PAGE as isize;
         match key.code {
+            // Ctrl-R is not `r`: a chord is some other pane's key, or none.
+            KeyCode::Char(_) if chord(key) => Hit::Ignored,
             KeyCode::Char('j') | KeyCode::Down => self.by(1),
             KeyCode::Char('k') | KeyCode::Up => self.by(-1),
             KeyCode::PageDown => self.by(page),
@@ -519,9 +522,20 @@ impl Objects {
         Hit::Load(CatalogRequest::Index)
     }
 
+    /// A paste while the filter is being typed into: one more piece of it.
+    pub fn paste_filter(&mut self, text: &str) {
+        self.filter.push_str(text);
+        self.seek(0);
+    }
+
     /// The keys `/` takes for itself while it is being typed into.
     fn filter_key(&mut self, key: KeyEvent) -> Hit {
         match key.code {
+            KeyCode::Char('u' | 'U') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.filter.clear();
+                self.seek(0);
+            }
+            KeyCode::Char(_) if chord(key) => return Hit::Ignored,
             KeyCode::Char(character) => {
                 self.filter.push(character);
                 self.seek(0);
@@ -819,8 +833,9 @@ impl Objects {
                 (Item::Object(object), CatalogRequest::Columns { schema, table, .. }) => {
                     object.schema == *schema && object.name == *table
                 }
-                (Item::Object(object), CatalogRequest::Source { schema, name, .. }) => {
-                    object.schema == *schema && object.name == *name
+                // Kind too: one name can be two objects of different kinds.
+                (Item::Object(object), CatalogRequest::Source { schema, name, kind }) => {
+                    object.schema == *schema && object.name == *name && object.kind == *kind
                 }
                 _ => false,
             })

@@ -512,3 +512,33 @@ fn a_wide_glyph_takes_two_columns_and_the_column_after_it_still_lines_up() {
         );
     }
 }
+
+#[test]
+fn k_after_g_in_a_source_moves_from_the_last_line_showing() {
+    let mut app = two_tabs();
+    app.shell.focus = Focus::Results;
+    let lines: Vec<String> = (1..=100).map(|n| format!("line {n}")).collect();
+    app.tabs[0]
+        .results
+        .show_source("bench.p".to_owned(), &lines.join("\n"));
+    let draw = |app: &mut App| {
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("a test terminal");
+        let mut hits = crate::app::pointer::Hits::default();
+        terminal
+            .draw(|frame| hits = render(frame, app, &Theme::new(false)))
+            .expect("a frame");
+        // The run loop hands every frame's window back, as it does after a
+        // draw.
+        app.drawn(&hits);
+        text(&terminal)
+    };
+    app.handle(Event::Key(key("G")));
+    let bottom = draw(&mut app);
+    assert!(bottom.contains(" 100 line 100"), "{bottom}");
+    app.handle(Event::Key(key("k")));
+    let up = draw(&mut app);
+    assert!(
+        !up.contains("line 100"),
+        "k moved the view up a line, not a line short of past the end:\n{up}"
+    );
+}

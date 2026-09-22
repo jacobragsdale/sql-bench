@@ -601,7 +601,7 @@ fn each_pane_draws_a_button_only_where_its_key_does_what_it_says() {
     assert_eq!(
         row_with(&multi_set(), WIDE, "╭ Results"),
         format!(
-            "│{:34}│╭ Results · set 2/2 · 3 rows · 3 ms {} Export ─ ◀ ─ ▶ ─╮",
+            "│{:34}│╭ Results · set 2/2 · 2 rows · 3 ms {} Export ─ ◀ ─ ▶ ─╮",
             "",
             "─".repeat(30)
         )
@@ -685,7 +685,7 @@ fn at_60x15_every_title_is_whole_and_what_does_not_fit_is_dropped() {
     assert!(row_with(&running, SMALL, "╭ Running").ends_with(" 3 rows ─ ■ Cancel ─╮"));
     assert_eq!(
         row_with(&multi_set(), SMALL, "╭ Results"),
-        "│   ▸ Views        │╭ Results · set 2/2 · 3 rows · 3 ms ───╮"
+        "│   ▸ Views        │╭ Results · set 2/2 · 2 rows · 3 ms ───╮"
     );
     assert_eq!(
         row_with(&filtered(), SMALL, "╭ Objects"),
@@ -734,7 +734,7 @@ fn a_help_row_closes_the_help_and_then_presses_its_key() {
     assert_eq!(app.shell.focus, Focus::Scratch);
 
     // Its close button is Esc, which with the help open closes only that.
-    app.handle(Event::Key(key("?")));
+    app.handle(Event::Key(key("F1")));
     let (x, y) = place(&app, "×");
     click(&mut app, x, y);
     assert!(!app.shell.help);

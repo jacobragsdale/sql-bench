@@ -494,11 +494,13 @@ impl App {
             Target::Tab(index) if index < self.tabs.len() => return self.open_tab(index),
             Target::Pane(focus) => self.shell.focus = focus,
             Target::Button { pane, key } => {
-                // The help keeps j, k, the arrows and the Page keys for
-                // itself, so a row of it is pressed with the help gone. Esc
-                // and `?` are the help's own way out, and closing it first
-                // would make them act on what is under it instead.
-                if self.shell.help && !matches!(key.code, KeyCode::Esc | KeyCode::Char('?')) {
+                // The help takes every key, so a row of it is pressed with
+                // the help gone. Esc, `?` and F1 are the help's own way out,
+                // and closing it first would make them act on what is under
+                // it instead.
+                if self.shell.help
+                    && !matches!(key.code, KeyCode::Esc | KeyCode::Char('?') | KeyCode::F(1))
+                {
                     self.close_help();
                 }
                 self.shell.focus = pane;
@@ -815,17 +817,39 @@ impl App {
         Vec::new()
     }
 
-    /// What the last frame showed of the pad is where it goes on showing
-    /// from, so a key that moves the cursor around inside the view leaves
-    /// the view where it is. The run loop calls this after every draw,
-    /// because only the renderer knows how tall the pad is.
+    /// What the last frame showed of the pad, an object's source, the help
+    /// and the inspector is where each goes on showing from, so a key that
+    /// moves inside the view leaves the view where it is — and `k` after `G`
+    /// moves from the last line showing rather than from past it. The run
+    /// loop calls this after every draw, because only the renderer knows
+    /// how tall each is.
     pub fn drawn(&mut self, hits: &Hits) {
-        if let Some((_, Target::Pad { top, left, .. })) = hits
-            .regions()
-            .find(|(_, target)| matches!(target, Target::Pad { .. }))
-            && let Some(tab) = self.tabs.get_mut(self.shell.active_tab)
-        {
-            tab.scratch.show_from(top, left);
+        let mut overlay = None;
+        for (rect, target) in hits.regions() {
+            let tab = self.tabs.get_mut(self.shell.active_tab);
+            match (target, tab) {
+                (Target::Pad { top, left, .. }, Some(tab)) => tab.scratch.show_from(top, left),
+                (Target::Source { top }, Some(tab)) => tab.results.source_from(top),
+                (Target::Overlay, _) => overlay = Some(rect),
+                _ => {}
+            }
+        }
+        // The help goes over the inspector, so the last overlay is the one
+        // the scroll keys move — unless a menu or the finder is over both.
+        let Some(overlay) =
+            overlay.filter(|_| self.shell.finder.is_none() && self.shell.mouse.menu.is_none())
+        else {
+            return;
+        };
+        let showing = usize::from(overlay.height.saturating_sub(2));
+        if self.shell.help {
+            let last = keys_for(self.shell.focus).count().saturating_sub(showing);
+            self.shell.help_scroll = self.shell.help_scroll.min(last);
+        } else if self.shell.inspector.is_some() {
+            let last = self.inspect_height().saturating_sub(showing);
+            if let Some(inspector) = self.shell.inspector.as_mut() {
+                inspector.scroll = inspector.scroll.min(last);
+            }
         }
     }
 

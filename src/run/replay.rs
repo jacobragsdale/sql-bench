@@ -970,7 +970,7 @@ mod tests {
              expect 1 local-mssql\n\
              key Tab\n\
              expect ╭ Scratch\n\
-             key ?\n\
+             key F1\n\
              expect Ctrl-T        next tab\n\
              frame help\n\
              key Esc\n\
@@ -1132,7 +1132,7 @@ mod tests {
              expect select 1\n\
              key Shift-Left\n\
              key Ctrl-C\n\
-             expect copied 1 characters\n\
+             expect copied 1 character\n\
              key Ctrl-R\n\
              expect connecting… then running\n\
              key Ctrl-E\n\
@@ -1156,7 +1156,7 @@ mod tests {
              expect pasted 1 line\n\
              key Shift-Left\n\
              key Ctrl-X\n\
-             expect cut 1 characters\n\
+             expect cut 1 character\n\
              key Ctrl-V\n\
              key Ctrl-V\n\
              expect 1 select 11\n\

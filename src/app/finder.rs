@@ -209,7 +209,7 @@ impl Finder {
                         &index.names[position]
                     };
                     match rank(word, against) {
-                        Some(rank) => total += rank,
+                        Some(rank) => total = rank.saturating_add(total),
                         None => {
                             all = false;
                             break;
@@ -260,13 +260,15 @@ fn rank(query: &str, name: &str) -> Option<u32> {
 fn subsequence(query: &str, name: &str) -> Option<u32> {
     let mut rest = name.char_indices();
     let mut first = None;
-    let mut last = 0;
+    let mut end = 0;
     for wanted in query.chars() {
-        let (at, _) = rest.by_ref().find(|(_, found)| *found == wanted)?;
+        let (at, found) = rest.by_ref().find(|(_, found)| *found == wanted)?;
         first.get_or_insert(at);
-        last = at;
+        end = at + found.len_utf8();
     }
-    let span = last - first? + 1;
+    // The matched letters are the query's own, so the span holds at least
+    // its bytes.
+    let span = end - first?;
     Some(u32::try_from(span - query.len()).unwrap_or(u32::MAX - 3_000))
 }
 
@@ -285,6 +287,9 @@ mod tests {
         assert_eq!(rank("orders", "customers"), None);
         assert_eq!(subsequence("ord", "order"), Some(0));
         assert_eq!(subsequence("ors", "orders"), Some(3));
+        // The last letter three bytes wide, a one-byte gap before it.
+        assert_eq!(subsequence("a日", "ax日"), Some(1));
+        assert_eq!(subsequence("é", "é"), Some(0));
     }
 
     /// Two tabs with an index each, so a search has two connections to
