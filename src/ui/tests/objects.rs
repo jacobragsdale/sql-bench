@@ -197,7 +197,7 @@ fn the_columns_of_a_table_are_a_grid_like_any_other_result() {
     );
     let screen = text(&frame(120, 40, &app));
     assert!(
-        screen.contains("╭ bench.customers columns · 1 rows ─"),
+        screen.contains("╭ bench.customers columns · 1 row ─"),
         "{screen}"
     );
     assert!(screen.contains("name  type  nullable  pk"), "{screen}");

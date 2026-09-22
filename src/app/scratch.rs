@@ -262,6 +262,13 @@ impl Scratch {
 
     /// A double-click: the run of letters, digits and underscores the cursor
     /// is on, selected. Anywhere else there is no word, and nothing is.
+    /// Esc: the selection drops and the cursor stays. Whether there was one.
+    pub fn clear_selection(&mut self) -> bool {
+        let had = self.selection().is_some();
+        self.selection = None;
+        had
+    }
+
     pub fn select_word(&mut self) {
         let (line, column) = self.cursor;
         let characters: Vec<char> = self.lines[line].chars().collect();
@@ -358,6 +365,11 @@ impl Scratch {
             KeyCode::PageUp => self.move_rows(-(PAGE as isize), shift),
             #[allow(clippy::cast_possible_wrap)]
             KeyCode::PageDown => self.move_rows(PAGE as isize, shift),
+            KeyCode::Home if control => self.move_to((0, 0), shift),
+            KeyCode::End if control => {
+                let last = self.lines.len() - 1;
+                self.move_to((last, self.line_length(last)), shift)
+            }
             KeyCode::Home => self.move_to((self.cursor.0, 0), shift),
             KeyCode::End => self.move_to((self.cursor.0, self.line_length(self.cursor.0)), shift),
             KeyCode::Backspace => self.backspace(),

@@ -53,7 +53,7 @@ fn the_help_lists_the_keys_of_the_focused_pane_and_no_others() {
 fn a_help_too_long_for_the_screen_scrolls_instead_of_being_cut_off() {
     let mut app = two_tabs();
     app.shell.focus = Focus::Scratch;
-    app.handle(Event::Key(key("?")));
+    app.handle(Event::Key(key("F1")));
     let width = key_width(Focus::Scratch);
     let rows: Vec<String> = keys_for(Focus::Scratch)
         .map(|(spec, _, does)| format!(" {spec:<width$}{does}"))
@@ -98,9 +98,9 @@ fn a_help_too_long_for_the_screen_scrolls_instead_of_being_cut_off() {
         assert!(screen.contains(row), "no {row:?} in\n{screen}");
     }
 
-    // Esc puts the offset back, so the next ? opens at the top.
+    // Esc puts the offset back, so the next F1 opens at the top.
     app.handle(Event::Key(key("Esc")));
-    app.handle(Event::Key(key("?")));
+    app.handle(Event::Key(key("F1")));
     assert!(text(&frame(60, 15, &app)).contains(&rows[0]));
 }
 
@@ -274,4 +274,27 @@ fn the_finder_says_when_there_is_nothing_indexed_and_when_nothing_matches() {
     let screen = text(&frame(120, 40, &app));
     assert!(screen.contains("╭ Find · 0 of 4 ─"), "{screen}");
     assert!(screen.contains("no objects match"), "{screen}");
+}
+
+#[test]
+fn k_at_the_end_of_a_scrolled_help_moves_it_up_straight_away() {
+    let mut app = two_tabs();
+    app.shell.focus = Focus::Scratch;
+    app.handle(Event::Key(key("F1")));
+    let draw = |app: &mut App| {
+        let mut terminal = Terminal::new(TestBackend::new(60, 15)).expect("a test terminal");
+        let mut hits = crate::app::pointer::Hits::default();
+        terminal
+            .draw(|frame| hits = render(frame, app, &Theme::new(false)))
+            .expect("a frame");
+        app.drawn(&hits);
+        text(&terminal)
+    };
+    for _ in 0..5 {
+        app.handle(Event::Key(key("PageDown")));
+    }
+    let end = draw(&mut app);
+    app.handle(Event::Key(key("k")));
+    let up = draw(&mut app);
+    assert_ne!(end, up, "k did nothing at the end of the help");
 }

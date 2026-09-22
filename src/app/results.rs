@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use super::chord;
 use crate::db::catalog::ColumnInfo;
 use crate::db::model::{Cell, Column, DbError, QueryEvent};
 use crate::export::{tsv_row, width as width_of};
@@ -255,8 +256,12 @@ impl Results {
             self.sets_total = 0;
             self.affected_total = 0;
         }
-        self.sets.clear();
-        self.shown = 0;
+        // Every statement of a run keeps its sets for `[` and `]`; the first
+        // one, and `m`, start from none.
+        if statement == 0 {
+            self.sets.clear();
+            self.shown = 0;
+        }
         self.rows_affected = None;
         self.source = None;
         self.label = None;
@@ -306,6 +311,12 @@ impl Results {
                 // result is what a person asked the statement for.
                 self.shown = self.sets.len() - 1;
                 self.clear_selection();
+                // A cursor left on the last set's twelfth column would be on
+                // no cell of this one. The first set keeps it for `m`.
+                if self.sets.len() > 1 {
+                    self.selected = (0, 0);
+                    self.scroll = (0, 0);
+                }
             }
             QueryEvent::Rows(batch) => self.keep(batch),
             QueryEvent::RowsAffected(rows) => {
@@ -374,10 +385,17 @@ impl Results {
     /// any other move drops it: the range is the rectangle between where it
     /// started and the cursor.
     pub fn key(&mut self, key: KeyEvent) -> Hit {
+        let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        // Ctrl-E is not `e`: past Ctrl-C, Ctrl-D and Ctrl-U a chord is no
+        // key of the grid's, or of the source view's.
+        if chord(key)
+            && matches!(key.code, KeyCode::Char(letter) if !(control && "cCdDuU".contains(letter)))
+        {
+            return Hit::Ignored;
+        }
         if self.source.is_some() {
             return self.source_key(key);
         }
-        let control = key.modifiers.contains(KeyModifiers::CONTROL);
         let arrow = matches!(
             key.code,
             KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right
@@ -623,6 +641,14 @@ impl Results {
         }
     }
 
+    /// The line the source view was drawn from, which is where its keys
+    /// move from next.
+    pub fn source_from(&mut self, top: usize) {
+        if let Some(source) = self.source.as_mut() {
+            source.scroll = top;
+        }
+    }
+
     /// `o`: the selected column ascending, then descending, then the order
     /// the rows came in. The cursor keeps its row number, not its row. How
     /// many rows were put in order.
@@ -744,14 +770,16 @@ impl Results {
         }
     }
 
-    /// `3 statements, 2 result sets, 1 rows affected`, for a run of more
+    /// `3 statements, 2 result sets, 1 row affected`, for a run of more
     /// than one statement.
     #[must_use]
     pub fn summary(&self) -> Option<String> {
         (self.of > 1).then(|| {
             format!(
-                "{} statements, {} result sets, {} rows affected",
-                self.ran, self.sets_total, self.affected_total
+                "{}, {}, {} affected",
+                counted(self.ran as u64, "statement"),
+                counted(self.sets_total as u64, "result set"),
+                counted(self.affected_total, "row")
             )
         })
     }
@@ -782,21 +810,30 @@ impl Results {
         match &self.status {
             Status::Idle => "Results".to_owned(),
             Status::Running { since, rows_so_far } => format!(
-                "Running · {} · {} rows",
+                "Running · {} · {}",
                 seconds(since.elapsed()),
-                grouped(*rows_so_far)
+                counted(*rows_so_far as u64, "row")
             ),
             Status::Done {
                 rows,
                 truncated,
                 elapsed,
             } => {
-                let what = match (self.rows_affected, *rows) {
-                    (Some(affected), 0) => format!("{} rows affected", grouped_u64(affected)),
+                // With more than one set the title counts the one on screen,
+                // and only the last can have been cut short.
+                let (rows, truncated) = match self.set() {
+                    Some(set) if self.sets.len() > 1 => (
+                        set.rows.len(),
+                        *truncated && self.shown + 1 == self.sets.len(),
+                    ),
+                    _ => (*rows, *truncated),
+                };
+                let what = match (self.rows_affected, rows) {
+                    (Some(affected), 0) => format!("{} affected", counted(affected, "row")),
                     _ => format!(
-                        "{} rows{}",
-                        grouped(*rows),
-                        if *truncated { " (truncated)" } else { "" }
+                        "{}{}",
+                        counted(rows as u64, "row"),
+                        if truncated { " (truncated)" } else { "" }
                     ),
                 };
                 match &self.label {
@@ -812,9 +849,9 @@ impl Results {
                 elapsed,
                 rows,
             } => format!(
-                "Results{set} · cancelled after {}, {} rows",
+                "Results{set} · cancelled after {}, {}",
                 seconds(*elapsed),
-                grouped(*rows)
+                counted(*rows as u64, "row")
             ),
             Status::Failed { .. } => "Results · failed".to_owned(),
         }
@@ -1113,6 +1150,13 @@ pub fn grouped(number: usize) -> String {
     grouped_u64(u64::try_from(number).unwrap_or(u64::MAX))
 }
 
+/// `1 row`, `2 rows`, `10,000 rows`.
+#[must_use]
+pub fn counted(number: u64, noun: &str) -> String {
+    let plural = if number == 1 { "" } else { "s" };
+    format!("{} {noun}{plural}", grouped_u64(number))
+}
+
 #[must_use]
 pub fn grouped_u64(number: u64) -> String {
     let digits = number.to_string();
@@ -1264,7 +1308,11 @@ mod tests {
         assert_eq!(results.sets(), 2);
         assert_eq!(results.shown(), 2, "the last set is the one on screen");
         assert_eq!(results.columns()[0].name, "second");
-        assert_eq!(results.title(), "Results · set 2/2 · 3 rows · 8 ms");
+        assert_eq!(
+            results.title(),
+            "Results · set 2/2 · 2 rows · 8 ms",
+            "the rows of the set on screen"
+        );
 
         results.key(key("["));
         assert_eq!(results.columns()[0].name, "first");
@@ -1275,12 +1323,25 @@ mod tests {
     }
 
     #[test]
+    fn a_second_set_of_one_statement_puts_the_cursor_on_its_first_cell() {
+        let mut results = started();
+        results.apply(columns(&[("a", "int"), ("b", "int"), ("c", "int")]));
+        results.apply(Rows(vec![vec![Cell::Int(1), Cell::Int(2), Cell::Int(3)]]));
+        results.key(key("$"));
+        assert_eq!(results.selected(), (0, 2));
+        results.apply(columns(&[("only", "int")]));
+        results.apply(Rows(vec![vec![Cell::Int(4)]]));
+        assert_eq!(results.selected(), (0, 0));
+        assert_eq!(results.cell(), Some(&Cell::Int(4)), "a cell Enter can open");
+    }
+
+    #[test]
     fn a_run_of_several_statements_counts_what_they_did() {
         let mut results = Results::default();
         results.start(Instant::now(), 0, 3, false);
         results.apply(RowsAffected(1));
         results.apply(done(0, false, 2));
-        assert_eq!(results.title(), "Results · 1 rows affected · 2 ms");
+        assert_eq!(results.title(), "Results · 1 row affected · 2 ms");
 
         results.start(Instant::now(), 1, 3, false);
         results.apply(columns(&[("id", "int")]));
@@ -1291,7 +1352,7 @@ mod tests {
         results.apply(done(0, false, 1));
         assert_eq!(
             results.summary().as_deref(),
-            Some("3 statements, 2 result sets, 1 rows affected")
+            Some("3 statements, 2 result sets, 1 row affected")
         );
         assert_eq!(
             started().summary(),

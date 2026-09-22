@@ -22,7 +22,7 @@ expect-not ╭ Help
 # one stops at the end on a taller screen), and a list clipped instead of
 # scrolled fails here.
 key Tab
-key ?
+key F1
 expect ╭ Help · Scratch
 expect Ctrl-R        run the statement
 key PageDown

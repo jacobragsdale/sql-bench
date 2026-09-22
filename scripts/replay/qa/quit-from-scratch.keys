@@ -1,12 +1,12 @@
-# The scratch pad is where q is a character and not a quit: the help still
-# opens after one. Ctrl-Q quits from here like everywhere else.
+# The scratch pad is where q and ? are characters and not a quit or the help:
+# F1 still opens it after one. Ctrl-Q quits from here like everywhere else.
 
 key Tab
 key q
-key ?
+key F1
 expect ╭ Help · Scratch ─
 key Esc
 expect-not ╭ Help
 key Ctrl-Q
-key ?
+key F1
 expect-not ╭ Help
