@@ -680,7 +680,11 @@ impl App {
             top + usize::from(position.y - rect.y)
         };
         let x = usize::from(position.x.saturating_sub(rect.x));
-        let column = if x < gutter { 0 } else { left + x - gutter };
+        let column = if x < gutter {
+            0
+        } else {
+            tab.scratch.column_at(line, left + x - gutter)
+        };
         tab.scratch.show_from(top, left);
         if keep
             && tab

@@ -19,7 +19,7 @@ use crate::app::finder::Finder;
 use crate::app::pointer::{Hits, Menu, Seam, Target, menu, thumb};
 use crate::app::prompt::Prompt;
 use crate::app::results::{INSPECT_WIDTH, Inspector, inspect_title};
-use crate::app::scratch::Scratch;
+use crate::app::scratch::{Scratch, char_width};
 use crate::app::{App, Focus, TabState, key_named, keys_for};
 use theme::Theme;
 
@@ -421,7 +421,7 @@ fn scratch_lines(
                 last = last.max(cursor_column + 1);
             }
             if flagged.is_some_and(|lines| lines.contains(&number)) {
-                last = last.max(left + width);
+                last = last.max(characters.len() + left + width);
             }
             if let Some((_, (end_line, end_column))) = selection
                 && number == end_line
@@ -434,7 +434,19 @@ fn scratch_lines(
             )];
             let mut run = String::new();
             let mut run_style = Style::default();
-            for column in left..last.min(left + width) {
+            // `left` and `width` are terminal columns and `column` is a
+            // character, so a wide one moves `cell` on by two.
+            let mut cell = 0;
+            for column in 0..last {
+                let character = characters.get(column).copied().unwrap_or(' ');
+                let start = cell;
+                cell += char_width(character);
+                if cell <= left {
+                    continue;
+                }
+                if cell > left + width {
+                    break;
+                }
                 let style = if focused && (number, column) == (cursor_line, cursor_column) {
                     theme.cursor
                 } else if selection
@@ -450,7 +462,9 @@ fn scratch_lines(
                     spans.push(Span::styled(std::mem::take(&mut run), run_style));
                 }
                 run_style = style;
-                run.push(characters.get(column).copied().unwrap_or(' '));
+                // Half a wide character is left of the window: its other
+                // half is a blank.
+                run.push(if start < left { ' ' } else { character });
             }
             if !run.is_empty() {
                 spans.push(Span::styled(run, run_style));

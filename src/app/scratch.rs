@@ -11,6 +11,7 @@ use std::ops::Range;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use unicode_width::UnicodeWidthChar;
 
 use crate::config::Kind;
 
@@ -229,11 +230,23 @@ impl Scratch {
     /// Where a pane `height` rows by `width` columns starts showing the pad:
     /// where it last did, moved only as far as it takes to put the cursor on
     /// it, and never so far down that rows are left empty under the last
-    /// line.
+    /// line. The line is a line and the column a terminal column, because a
+    /// CJK character is two of them.
     #[must_use]
     pub fn window(&self, height: usize, width: usize) -> (usize, usize) {
         let (height, width) = (height.max(1), width.max(1));
         let (line, column) = self.cursor;
+        let mut characters = self.lines[line].chars();
+        // Past the end of the line a column is a blank, one terminal column.
+        let (mut at, mut counted) = (0, 0);
+        for character in characters.by_ref().take(column) {
+            at += char_width(character);
+            counted += 1;
+        }
+        at += column - counted;
+        let under = characters
+            .next()
+            .map_or(1, |character| char_width(character).max(1));
         (
             self.scroll
                 .0
@@ -242,9 +255,23 @@ impl Scratch {
                 .min(self.lines.len().saturating_sub(height)),
             self.scroll
                 .1
-                .min(column)
-                .max((column + 1).saturating_sub(width)),
+                .min(at)
+                .max((at + under).saturating_sub(width)),
         )
+    }
+
+    /// The character of `line` drawn over terminal column `cell`, or the end
+    /// of the line when it is past it: where a click there puts the cursor.
+    #[must_use]
+    pub fn column_at(&self, line: usize, cell: usize) -> usize {
+        let text = &self.lines[line.min(self.lines.len() - 1)];
+        let mut drawn = 0;
+        text.chars()
+            .position(|character| {
+                drawn += char_width(character);
+                drawn > cell
+            })
+            .unwrap_or_else(|| text.chars().count() + cell.saturating_sub(drawn))
     }
 
     /// Show the pad from this line and column, the way a frame just did or a
@@ -767,6 +794,12 @@ fn split_lines(text: &str) -> Vec<String> {
     } else {
         lines
     }
+}
+
+/// How many terminal columns a character of the pad is drawn in.
+#[must_use]
+pub fn char_width(character: char) -> usize {
+    UnicodeWidthChar::width(character).unwrap_or(0)
 }
 
 /// Characters `from..to` of a line, `to` past the end meaning the rest.
