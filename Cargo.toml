@@ -16,7 +16,7 @@ ratatui = "0.30.2"
 serde = { version = "1.0.229", features = ["derive"] }
 tiberius = { version = "0.12.3", default-features = false, features = ["tds73", "rustls"] }
 time = { version = "0.3.55", features = ["formatting", "macros", "parsing"] }
-tokio = { version = "1.53.1", features = ["rt", "net", "time"] }
+tokio = { version = "1.53.1", features = ["rt", "net", "time", "signal"] }
 tokio-util = { version = "0.7.19", features = ["compat"] }
 toml = "0.9.12"
 unicode-width = "0.2.2"

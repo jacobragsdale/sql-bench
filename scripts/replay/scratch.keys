@@ -2,9 +2,8 @@
 # back. Run by scripts/qa/scratch-frame.sh, which diffs the frame this writes
 # against scripts/replay/expected/scratch.txt.
 #
-# It types into an empty pad, so give it a state directory of its own —
-# SQL_BENCH_STATE_DIR=$(mktemp -d) — or it types on top of what the last run
-# saved there.
+# It types into an empty pad: a replay keeps no pads unless
+# SQL_BENCH_STATE_DIR names a directory, and that one should be its own.
 
 key Tab
 expect ╭ Scratch
