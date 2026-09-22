@@ -493,9 +493,14 @@ impl Driver {
         let (actions, changed) = match event {
             Event::Mouse(mouse) => {
                 let before = app.shell.mouse.pointer;
+                let split = app.shell.split;
+                let seam = app.shell.mouse.seam().is_some();
                 let actions = app.pointer(mouse, Instant::now(), &self.hits);
                 let changed = match mouse.kind {
                     MouseEventKind::Down(_) => false,
+                    // A held seam stays lit wherever the pointer goes, so
+                    // only a move of the seam itself shows.
+                    MouseEventKind::Drag(_) if seam => split != app.shell.split,
                     MouseEventKind::Moved => {
                         let spot = |at: Option<_>| at.and_then(|at| self.hits.spot(at));
                         spot(before) != spot(app.shell.mouse.pointer)

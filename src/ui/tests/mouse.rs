@@ -5,7 +5,7 @@ use ratatui::layout::Position;
 use std::time::Instant;
 
 use super::*;
-use crate::app::pointer::Mouse;
+use crate::app::pointer::{Mouse, Seam, Split};
 use crate::app::results::{Inspector, Results};
 use crate::app::tests::browsed;
 use crate::app::{Action, RuntimeEvent};
@@ -666,24 +666,24 @@ fn at_60x15_every_title_is_whole_and_what_does_not_fit_is_dropped() {
     assert_eq!(
         row_with(&running, SMALL, "╭ Objects"),
         format!(
-            "╭ Objects {}╮╭ Scratch [modified] ─── ▶ Run ─ ■ Stop ─╮",
-            "─".repeat(7)
+            "╭ Objects {}╮╭ Scratch [modified] ─ ▶ Run ─ ■ Stop ─╮",
+            "─".repeat(9)
         )
     );
-    assert!(row_with(&running, SMALL, "╭ Running").ends_with(" 3 rows ─── ■ Cancel ─╮"));
+    assert!(row_with(&running, SMALL, "╭ Running").ends_with(" 3 rows ─ ■ Cancel ─╮"));
     assert_eq!(
         row_with(&multi_set(), SMALL, "╭ Results"),
-        "│   ▸ Views      │╭ Results · set 2/2 · 3 rows · 3 ms ─ ▶ ─╮"
+        "│   ▸ Views        │╭ Results · set 2/2 · 3 rows · 3 ms ───╮"
     );
     assert_eq!(
         row_with(&filtered(), SMALL, "╭ Objects"),
-        "╭ Objects /zzz ──╮╭ Scratch [modified] ─── ▶▶ All ─ ▶ Run ─╮"
+        "╭ Objects /zzz ────╮╭ Scratch [modified] ─ ▶▶ All ─ ▶ Run ─╮"
     );
     assert_eq!(
         row_with(&failed(), SMALL, "╭ Objects"),
         format!(
-            "╭ Objects {}╮╭ Scratch ─── ✎ Editor ─ ▶▶ All ─ ▶ Run ─╮",
-            "─".repeat(7)
+            "╭ Objects {}╮╭ Scratch ─ ✎ Editor ─ ▶▶ All ─ ▶ Run ─╮",
+            "─".repeat(9)
         )
     );
     assert_eq!(
@@ -1330,22 +1330,199 @@ fn at_60x15_the_scrollbars_leave_the_titles_and_their_buttons_alone() {
     let terminal = frame(60, 15, &app);
     assert_eq!(
         line(&terminal, 1),
-        "╭ Objects ───────╮╭ Scratch [modified] ─── ▶▶ All ─ ▶ Run ─╮"
+        "╭ Objects ─────────╮╭ Scratch [modified] ─ ▶▶ All ─ ▶ Run ─╮"
     );
     assert_eq!(
         line(&terminal, 3),
-        format!("│     ▸ t021     ││ 20 select 20{:27}┃", "")
+        format!("│     ▸ t021       ││ 20 select 20{:25}┃", "")
     );
     assert_eq!(
         line(&terminal, 5),
-        format!("│     ▸ t023     │╰{}╯", "─".repeat(40))
+        format!("│     ▸ t023       │╰{}╯", "─".repeat(38))
     );
     assert_eq!(
         line(&terminal, 6),
-        "│     ▸ t024     ┃╭ Results · 500 rows · 42 ms ─── Export ─╮"
+        "│     ▸ t024       ┃╭ Results · 500 rows · 42 ms ─ Export ─╮"
     );
     assert_eq!(
         line(&terminal, 13),
-        format!("╰{}╯╰{}╯", "─".repeat(16), "─".repeat(40))
+        format!("╰{}╯╰{}╯", "─".repeat(18), "─".repeat(38))
     );
+}
+
+/// One mouse event at `at`, against a `width`x`height` frame of `app`.
+fn mouse_on(app: &mut App, (width, height): (u16, u16), kind: MouseEventKind, at: (u16, u16)) {
+    let hits = drawn(app, width, height).0;
+    let event = MouseEvent {
+        kind,
+        column: at.0,
+        row: at.1,
+        modifiers: KeyModifiers::NONE,
+    };
+    app.pointer(event, Instant::now(), &hits);
+}
+
+/// `seam` pressed half way along, dragged to `to` and let go there.
+fn drag(app: &mut App, size: (u16, u16), seam: Seam, to: (u16, u16)) {
+    let from = seam_of(app, size, seam);
+    mouse_on(app, size, MouseEventKind::Down(MouseButton::Left), from);
+    mouse_on(app, size, MouseEventKind::Drag(MouseButton::Left), to);
+    mouse_on(app, size, MouseEventKind::Up(MouseButton::Left), to);
+}
+
+/// A cell of `seam` on a `width`x`height` frame of `app`, half way along.
+fn seam_of(app: &App, (width, height): (u16, u16), seam: Seam) -> (u16, u16) {
+    let (rect, _) = drawn(app, width, height)
+        .0
+        .regions()
+        .find(|(_, target)| matches!(target, Target::Seam { seam: of, .. } if *of == seam))
+        .unwrap_or_else(|| panic!("no {seam:?} seam"));
+    (rect.x + rect.width / 2, rect.y + rect.height / 2)
+}
+
+/// Objects, Scratch and Results at 120x40 before any seam is moved.
+const SPLIT: [(u16, u16); 3] = [(0, 1), (36, 1), (36, 16)];
+
+#[test]
+fn dragging_each_seam_moves_the_borders_either_side_of_it() {
+    let mut app = idle();
+    assert_eq!(corners(&frame(120, 40, &app)), SPLIT);
+    drag(&mut app, WIDE, Seam::Objects, (50, 10));
+    assert_eq!(corners(&frame(120, 40, &app)), [(0, 1), (50, 1), (50, 16)]);
+    drag(&mut app, WIDE, Seam::Scratch, (80, 25));
+    let terminal = frame(120, 40, &app);
+    assert_eq!(corners(&terminal), [(0, 1), (50, 1), (50, 26)]);
+    assert!(line(&terminal, 25).ends_with(&format!("╰{}╯", "─".repeat(68))));
+    assert_eq!(app.shell.focus, Focus::Objects, "a drag focuses nothing");
+}
+
+#[test]
+fn every_pane_keeps_its_least_however_far_a_seam_goes_and_whatever_the_size() {
+    for (width, height) in [SMALL, (200, 60)] {
+        let size = (width, height);
+        let mut app = idle();
+        drag(&mut app, size, Seam::Objects, (0, 5));
+        drag(&mut app, size, Seam::Scratch, (30, 0));
+        assert_eq!(
+            corners(&frame(width, height, &app)),
+            [(0, 1), (20, 1), (20, 4)],
+            "Objects 20 wide and Scratch 3 high at {width}x{height}"
+        );
+        drag(&mut app, size, Seam::Objects, (width - 1, 5));
+        drag(&mut app, size, Seam::Scratch, (50, height - 1));
+        let right = width - 20;
+        assert_eq!(
+            corners(&frame(width, height, &app)),
+            [(0, 1), (right, 1), (right, height - 4)],
+            "the right column 20 wide and Results 3 high at {width}x{height}"
+        );
+    }
+    // A split made on a big screen still holds on a small one.
+    let mut app = idle();
+    let big = (200, 60);
+    drag(&mut app, big, Seam::Objects, (199, 5));
+    drag(&mut app, big, Seam::Scratch, (190, 59));
+    assert_eq!(corners(&frame(60, 15, &app)), [(0, 1), (40, 1), (40, 11)]);
+}
+
+#[test]
+fn a_double_click_on_a_seam_puts_the_split_back() {
+    let mut app = idle();
+    drag(&mut app, WIDE, Seam::Objects, (80, 10));
+    drag(&mut app, WIDE, Seam::Scratch, (100, 30));
+    for seam in [Seam::Objects, Seam::Scratch] {
+        let (x, y) = seam_of(&app, WIDE, seam);
+        double_click(&mut app, x, y);
+    }
+    assert_eq!(app.shell.split, Split::default());
+    assert_eq!(corners(&frame(120, 40, &app)), SPLIT);
+}
+
+#[test]
+fn a_seam_pressed_and_let_go_does_nothing_and_focuses_neither_side() {
+    let mut app = idle();
+    let before = app.clone();
+    for seam in [Seam::Objects, Seam::Scratch] {
+        let (x, y) = seam_of(&app, WIDE, seam);
+        click(&mut app, x, y);
+    }
+    assert_eq!(settled(app), settled(before));
+}
+
+#[test]
+fn the_seams_are_under_the_scrollbars_and_the_title_buttons() {
+    let app = scrolled();
+    let hits = hits(&app);
+    let at = |x, y| hits.at(Position::new(x, y)).map(|(_, target)| target);
+    for y in 2..38 {
+        assert!(
+            matches!(
+                at(35, y),
+                Some(Target::Thumb { .. } | Target::Button { .. })
+            ),
+            "Objects' right border is its scrollbar at row {y}"
+        );
+    }
+    let objects = |y| {
+        matches!(
+            at(36, y),
+            Some(Target::Seam {
+                seam: Seam::Objects,
+                ..
+            })
+        )
+    };
+    assert!((1..15).chain(16..39).all(objects));
+    let scratch = |x| {
+        matches!(
+            at(x, 15),
+            Some(Target::Seam {
+                seam: Seam::Scratch,
+                ..
+            })
+        )
+    };
+    assert!((36..120).all(scratch), "the corner is the one across");
+    let (x, y) = place(&app, "Export");
+    assert!(matches!(at(x, y), Some(Target::Button { .. })));
+    assert_eq!(y, 16, "on Results' top border, the row under the seam");
+}
+
+#[test]
+fn a_seam_is_lit_under_the_pointer_and_while_it_is_held() {
+    let theme = Theme::new(false);
+    let lit = theme.hover.patch(theme.accent);
+    let mut app = idle();
+    app.shell.mouse.pointer = Some(Position::new(36, 25));
+    let terminal = frame(120, 40, &app);
+    assert!(
+        (1..39).all(|y| painted(&terminal, 36, y) == lit),
+        "the whole seam"
+    );
+    assert_ne!(painted(&terminal, 35, 25), lit);
+
+    // Held and dragged past where it stops: the pointer is over Objects and
+    // the seam it is holding is the one lit.
+    mouse_on(
+        &mut app,
+        WIDE,
+        MouseEventKind::Down(MouseButton::Left),
+        (36, 25),
+    );
+    mouse_on(
+        &mut app,
+        WIDE,
+        MouseEventKind::Drag(MouseButton::Left),
+        (2, 25),
+    );
+    let terminal = frame(120, 40, &app);
+    assert!((1..39).all(|y| painted(&terminal, 20, y) == lit));
+    assert_ne!(painted(&terminal, 2, 25), lit);
+    mouse_on(
+        &mut app,
+        WIDE,
+        MouseEventKind::Up(MouseButton::Left),
+        (2, 25),
+    );
+    assert_ne!(painted(&frame(120, 40, &app), 20, 25), lit, "let go");
 }
