@@ -60,14 +60,9 @@ fn the_cursor_is_the_one_reversed_cell_and_only_while_the_pad_has_the_focus() {
         app.tabs[0].scratch.handle(key("Right"));
     }
     // The text starts after `1 `, so the cursor's cell is three in.
-    // `painted` reads the cell back with the foreground it was left with,
-    // which for text nobody styled is the terminal's own.
-    let plain = Style::new().fg(Color::Reset);
+    let plain = Style::new();
     let terminal = frame(120, 40, &app);
-    assert_eq!(
-        painted(&terminal, LEFT + 2 + 2 + 3, 2),
-        theme.cursor.fg(Color::Reset)
-    );
+    assert_eq!(painted(&terminal, LEFT + 2 + 2 + 3, 2), theme.cursor);
     assert_eq!(painted(&terminal, LEFT + 2 + 2 + 2, 2), plain);
 
     app.shell.focus = Focus::Objects;

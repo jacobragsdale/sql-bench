@@ -4,7 +4,6 @@ use super::*;
 use crate::app::tests::object;
 use crate::app::{KEYS, Tab};
 use crate::db::catalog::{CatalogAnswer, CatalogRequest, DbObject, ObjectKind};
-use ratatui::style::Color;
 
 /// The key column of the help for `focus`: the widest key it lists, and two
 /// spaces after it.
@@ -231,9 +230,7 @@ fn the_finder_lists_the_matches_with_their_kind_and_tab_and_marks_the_chosen_one
             line(&terminal, y)
         );
     }
-    // A cell's colour is the reset colour where the style names none, and
-    // the cursor is a modifier alone.
-    let chosen = Theme::new(false).cursor.fg(Color::Reset);
+    let chosen = Theme::new(false).cursor;
     let row = line(&terminal, at + 1);
     let x = row
         .find("dbo")

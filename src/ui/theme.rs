@@ -2,8 +2,9 @@
 //!
 //! This is the only module that names a [`Color`]: everything else asks for
 //! `accent` or `error` and gets whatever this run's theme says that is. With
-//! `NO_COLOR` set every one of them is plain, so the same screens render on a
-//! terminal that was asked for no colour at all.
+//! `NO_COLOR` set every one of them is plain but the cursor and the
+//! selection, which are reversed and underlined, so the same screens render
+//! on a terminal that was asked for no colour at all.
 
 use ratatui::style::{Color, Modifier, Style};
 
@@ -19,7 +20,8 @@ pub struct Theme {
     pub error: Style,
     pub ok: Style,
     /// The cell the scratch pad's cursor is on. A `TestBackend` has no
-    /// terminal cursor, so this is what makes it visible — and assertable.
+    /// terminal cursor, so this is what makes it visible — and assertable —
+    /// and it stays reversed without colour.
     pub cursor: Style,
     /// What a selection is painted with: the pad's text, and the grid's
     /// range of cells.
@@ -40,19 +42,32 @@ impl Theme {
 
     #[must_use]
     pub fn new(no_color: bool) -> Self {
+        // NO_COLOR asks for no colour, not for no cursor: the app draws its
+        // own, so without these two nothing would say where it is.
+        let cursor = Style::new().add_modifier(Modifier::REVERSED);
         if no_color {
-            return Self::default();
+            return Self {
+                cursor,
+                selection: Style::new().add_modifier(Modifier::UNDERLINED),
+                ..Self::default()
+            };
         }
         Self {
             accent: Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-            dim: Style::new().fg(Color::DarkGray),
-            border: Style::new().fg(Color::DarkGray),
+            // Faint rather than dark grey, which is the background itself on
+            // a Solarized-style palette.
+            dim: Style::new().add_modifier(Modifier::DIM),
+            border: Style::new().add_modifier(Modifier::DIM),
             error: Style::new().fg(Color::Red),
             ok: Style::new().fg(Color::Green),
-            cursor: Style::new().add_modifier(Modifier::REVERSED),
+            cursor,
             selection: Style::new().bg(Color::Cyan).fg(Color::Black),
             flagged: Style::new().bg(Color::Red).fg(Color::Black),
-            hover: Style::new().bg(Color::DarkGray).fg(Color::White),
+            // Lit at full strength, even where it lights a faint title.
+            hover: Style::new()
+                .bg(Color::DarkGray)
+                .fg(Color::White)
+                .remove_modifier(Modifier::DIM),
         }
     }
 }
