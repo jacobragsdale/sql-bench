@@ -41,6 +41,7 @@ fn an_empty_client_directory_says_what_to_set() {
             client_lib_dir: None,
         },
         connections: Vec::new(),
+        path: PathBuf::new(),
     };
 
     let failure = Connection::open(&ledger(), &config).expect_err("the directory is empty");
@@ -60,6 +61,7 @@ fn an_empty_client_directory_says_what_to_set() {
             client_lib_dir: Some(PathBuf::from("/nowhere/at/all")),
         },
         connections: Vec::new(),
+        path: PathBuf::new(),
     };
     assert_eq!(
         Connection::open(&ledger(), &named).expect_err("still no client"),

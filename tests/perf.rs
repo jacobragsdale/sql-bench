@@ -47,8 +47,11 @@ const SIZE: (u16, u16) = (120, 40);
 /// The committed two-connection config, which is what a run of the real
 /// thing starts from. Nothing here connects.
 fn config() -> Config {
-    config::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("config.local.toml"))
-        .expect("the committed config.local.toml")
+    config::load(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("config.local.toml"),
+        true,
+    )
+    .expect("the committed config.local.toml")
 }
 
 fn driver(config: &Config) -> Driver {

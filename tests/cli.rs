@@ -177,3 +177,99 @@ fn two_columns_of_the_same_name_are_two_json_keys() {
         );
     }
 }
+
+#[test]
+fn a_config_file_named_but_missing_is_an_error_not_an_empty_one() {
+    let output = sql_bench(&[
+        "--config",
+        "/nonexistent/sql-bench.toml",
+        "query",
+        "--conn",
+        "x",
+        "select 1",
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr(&output).starts_with("error: reading /nonexistent/sql-bench.toml: "),
+        "{}",
+        stderr(&output)
+    );
+
+    let directory = tempfile::tempdir().unwrap();
+    let empty = directory.path().join("empty.toml");
+    std::fs::write(&empty, "").unwrap();
+    let output = sql_bench(&[
+        "--config",
+        empty.to_str().unwrap(),
+        "query",
+        "--conn",
+        "x",
+        "select 1",
+    ]);
+    assert_eq!(
+        stderr(&output).trim(),
+        format!(
+            "unknown connection 'x'; no connections configured (read {})",
+            empty.display()
+        )
+    );
+}
+
+#[test]
+fn a_query_runs_each_statement_the_pad_would_split() {
+    if std::env::var_os("SQL_BENCH_TEST_DBS").is_none() {
+        eprintln!("skipped: set SQL_BENCH_TEST_DBS=1 with the containers up");
+        return;
+    }
+    for (conn, sql) in [
+        ("local-oracle", "select 1 a from dual; select 2 b from dual"),
+        ("local-mssql", "select 1 a\ngo\nselect 2 b"),
+    ] {
+        let output = sql_bench(&["query", "--conn", conn, "--format", "csv", sql]);
+        assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).to_lowercase(),
+            "a\n1\n\nb\n2\n",
+            "{conn}"
+        );
+        assert!(
+            stderr(&output).starts_with("2 rows in "),
+            "{}",
+            stderr(&output)
+        );
+    }
+    let output = sql_bench(&[
+        "query",
+        "--conn",
+        "local-oracle",
+        "select 1 from dual; select from",
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr(&output).starts_with("statement 2: "),
+        "{}",
+        stderr(&output)
+    );
+    assert!(output.stdout.is_empty(), "nothing of the first is printed");
+}
+
+#[test]
+fn a_source_takes_quoted_names_and_starts_at_its_first_line() {
+    if std::env::var_os("SQL_BENCH_TEST_DBS").is_none() {
+        eprintln!("skipped: set SQL_BENCH_TEST_DBS=1 with the containers up");
+        return;
+    }
+    let output = sql_bench(&[
+        "source",
+        "--conn",
+        "local-mssql",
+        "[bench].[sp_customer_orders]",
+    ]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.to_lowercase().starts_with("create"),
+        "{}",
+        &stdout[..stdout.len().min(80)]
+    );
+}

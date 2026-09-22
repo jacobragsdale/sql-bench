@@ -368,6 +368,7 @@ mod tests {
                 client_lib_dir: client_lib_dir.map(PathBuf::from),
             },
             connections: Vec::new(),
+            path: PathBuf::new(),
         }
     }
 

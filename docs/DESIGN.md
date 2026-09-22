@@ -86,8 +86,10 @@ Adding one is a ticket's decision, never a convenience.
 ## Configuration and startup
 
 `--config PATH`, else `$SQL_BENCH_CONFIG`, else
-`~/.config/sql-bench/config.toml`. A missing file is an empty configuration
-and not an error. [README.md](../README.md#configuration) explains every key;
+`~/.config/sql-bench/config.toml`. A missing default file is an empty
+configuration and not an error; a missing file that `--config` or
+`$SQL_BENCH_CONFIG` named is one, and so is a key the file does not know.
+[README.md](../README.md#configuration) explains every key;
 [config.example.toml](../config.example.toml) is a commented copy of the whole
 of it.
 
