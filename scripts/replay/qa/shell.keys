@@ -18,12 +18,14 @@ key Esc
 expect-not ╭ Help
 
 # The Scratch pad's keys are more than a 60x15 screen holds, so the overlay
-# scrolls: the last of them is one PageDown away at every size, and a list
-# clipped instead of scrolled fails here.
+# scrolls: the last of them is two PageDowns away at every size (the second
+# one stops at the end on a taller screen), and a list clipped instead of
+# scrolled fails here.
 key Tab
 key ?
 expect ╭ Help · Scratch
 expect Ctrl-R        run the statement
+key PageDown
 key PageDown
 expect Ctrl-Q        quit
 key Esc
