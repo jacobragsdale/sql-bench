@@ -637,6 +637,11 @@ impl App {
     }
 
     fn key(&mut self, key: KeyEvent) -> Vec<Action> {
+        // A menu is only ever open on its own, and it is what the keys were
+        // aimed at, so it takes every one — Esc before anything else Esc does.
+        if self.shell.mouse.menu.is_some() {
+            return self.menu_key(key);
+        }
         // An open prompt is being typed into, so it takes every key before
         // anything else can claim one — `?` and `q` included.
         if self.shell.prompt.is_some() {

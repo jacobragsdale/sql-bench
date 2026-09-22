@@ -45,3 +45,11 @@ expect ╭ Results ─
 expect ○ disconnected
 # Nothing above typed into the pad — the overlay's scroll keys least of all.
 expect-not [modified]
+
+# A right-click in a pane opens that pane's menu, whole at every size: it
+# turns up or left where it would run off the screen. Esc closes it.
+right-click on Results ─
+expect inspect the cell        Enter
+expect next result set             ]
+key Esc
+expect-not inspect the cell

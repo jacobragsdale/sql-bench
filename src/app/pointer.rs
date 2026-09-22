@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 
-use super::{Action, App, Focus};
+use super::{Action, App, Focus, key_named, keys_for};
 
 /// How close together two clicks on one spot have to be to count as a
 /// double-click: the common desktop default.
@@ -20,6 +20,36 @@ pub const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
 /// How far one notch of the wheel scrolls.
 const WHEEL: isize = 3;
+
+/// What a right-click offers in each pane: rows of [`KEYS`](super::KEYS),
+/// named the way it names them, so a menu can do nothing a key cannot.
+pub const MENU: [(Focus, &[&str]); 3] = [
+    (Focus::Objects, &["Enter", "s", "i", "y", "r", "/", "Space"]),
+    (
+        Focus::Results,
+        &["Enter", "y", "Y", "o", "e", "m", "[", "]"],
+    ),
+    (
+        Focus::Scratch,
+        &["Ctrl-R", "F5", "Ctrl-C", "Ctrl-Z", "Ctrl-E"],
+    ),
+];
+
+/// `pane`'s menu, each entry its key and what the key does there. Read
+/// through [`keys_for`], because [`KEYS`](super::KEYS) has an Enter and a
+/// `y` for more than one pane.
+#[must_use]
+pub fn menu(pane: Focus) -> Vec<(&'static str, &'static str)> {
+    MENU.iter()
+        .filter(|(of, _)| *of == pane)
+        .flat_map(|(_, names)| names.iter())
+        .filter_map(|name| {
+            keys_for(pane)
+                .find(|(key, ..)| key == name)
+                .map(|(key, _, does)| (*key, *does))
+        })
+        .collect()
+}
 
 /// What was painted in a region of the frame. Indexes and never references,
 /// so a frame's targets outlive the borrow of the app it was drawn from.
@@ -68,9 +98,11 @@ pub enum Target {
     /// A border between panes, dividing `area`: dragging it moves the
     /// split, and a double-click puts it back.
     Seam { seam: Seam, area: Rect },
+    /// Entry `n` of the open context menu.
+    MenuItem(usize),
     /// The text of the export prompt, starting at the region's left edge.
     PromptText,
-    /// The body of the open help or inspector, whichever is on top.
+    /// The body of the open help, inspector or menu, whichever is on top.
     Overlay,
     /// The whole frame, pushed under an overlay so that a click beside it
     /// closes it rather than reaching the pane underneath.
@@ -84,7 +116,11 @@ impl Target {
     pub const fn hovers(self) -> bool {
         matches!(
             self,
-            Self::Tab(_) | Self::Button { .. } | Self::Thumb { .. } | Self::Seam { .. }
+            Self::Tab(_)
+                | Self::Button { .. }
+                | Self::Thumb { .. }
+                | Self::Seam { .. }
+                | Self::MenuItem(_)
         )
     }
 }
@@ -254,6 +290,17 @@ pub struct Mouse {
     pub pointer: Option<Position>,
     press: Option<Press>,
     last: Option<Click>,
+    /// The context menu a right-click opened, while it is open.
+    pub menu: Option<Menu>,
+}
+
+/// An open context menu: whose actions it offers, the cell it was opened
+/// from, and the entry Enter would pick.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Menu {
+    pub pane: Focus,
+    pub at: Position,
+    pub item: usize,
 }
 
 /// A button that went down and has not come up yet.
@@ -316,8 +363,6 @@ impl App {
         self.shell.mouse.pointer = Some(position);
         let spot = hits.spot(position);
         match mouse.kind {
-            // A right-click does what a left click does; the menu it will
-            // open after that has not been built yet.
             MouseEventKind::Down(button @ (MouseButton::Left | MouseButton::Right)) => {
                 self.shell.mouse.press = spot.map(|spot| Press {
                     spot,
@@ -331,6 +376,7 @@ impl App {
                         region,
                         position,
                         mouse.modifiers.contains(KeyModifiers::SHIFT),
+                        button == MouseButton::Right,
                     );
                 }
                 Vec::new()
@@ -366,10 +412,13 @@ impl App {
                 Some(press)
                     if press.button == button && !press.left && spot == Some(press.spot) =>
                 {
-                    let double = self.shell.mouse.clicked(press.spot, now);
                     // The column into the region, which only the prompt's
                     // text reads: a spot is a target and a row, no more.
                     let column = hits.at(position).map_or(0, |(rect, _)| position.x - rect.x);
+                    if button == MouseButton::Right {
+                        return self.right_click(press.spot, column, position);
+                    }
+                    let double = self.shell.mouse.clicked(press.spot, now);
                     self.click(press.spot, column, double)
                 }
                 _ => Vec::new(),
@@ -441,10 +490,13 @@ impl App {
                     prompt.place(usize::from(column));
                 }
             }
-            // The way Esc goes: the prompt, then the help, then the
-            // inspector, so a click beside one closes only the one on top.
+            Target::MenuItem(item) => return self.pick(item),
+            // The way Esc goes: the menu, the prompt, then the help, then
+            // the inspector, so a click beside one closes only the one on top.
             Target::Outside => {
-                if self.shell.prompt.is_some() {
+                if self.shell.mouse.menu.is_some() {
+                    self.shell.mouse.menu = None;
+                } else if self.shell.prompt.is_some() {
                     self.shell.prompt = None;
                 } else if self.shell.help {
                     self.close_help();
@@ -458,6 +510,79 @@ impl App {
             // A thumb or a seam is for dragging, and pressed and let go is
             // nothing.
             Target::Tab(_) | Target::Overlay | Target::Thumb { .. } | Target::Seam { .. } => {}
+        }
+        Vec::new()
+    }
+
+    /// A right-click on a row, a cell, a header or the pad selects what is
+    /// under it — only selects: the glyph, the sort and the double-click are
+    /// all entries of the menu — then opens that pane's menu at the pointer.
+    /// Anywhere else in a pane opens the menu and moves nothing, and on
+    /// anything that is not a pane it is a left click.
+    fn right_click(&mut self, spot: Spot, column: u16, at: Position) -> Vec<Action> {
+        if let Target::Pane(Focus::Objects) | Target::Tree { .. } = spot.target {
+            self.end_filter_typing();
+        }
+        let row = usize::from(spot.row);
+        let tab = self.tabs.get_mut(self.shell.active_tab);
+        let pane = match (spot.target, tab) {
+            (Target::Tree { top }, Some(tab)) => {
+                tab.objects.click(top, row);
+                Focus::Objects
+            }
+            (Target::Cells { column, top, left }, Some(tab)) => {
+                tab.results.click(top + row, column, (top, left));
+                Focus::Results
+            }
+            (Target::Header { column, left }, Some(tab)) => {
+                tab.results.click_header(column, left);
+                Focus::Results
+            }
+            // The cursor went where the button went down, or stayed in the
+            // selection it went down in.
+            (Target::Pad { .. }, _) => Focus::Scratch,
+            (Target::Source { .. }, _) => Focus::Results,
+            (Target::Pane(pane), _) => pane,
+            _ => return self.click(spot, column, false),
+        };
+        self.shell.focus = pane;
+        self.shell.mouse.menu = Some(Menu { pane, at, item: 0 });
+        Vec::new()
+    }
+
+    /// Entry `item` of the open menu: the menu closed, its pane focused, and
+    /// its key pressed, so picking it is exactly the key.
+    fn pick(&mut self, item: usize) -> Vec<Action> {
+        let Some(open) = self.shell.mouse.menu.take() else {
+            return Vec::new();
+        };
+        let Some(key) = menu(open.pane)
+            .get(item)
+            .and_then(|(name, _)| key_named(name))
+        else {
+            return Vec::new();
+        };
+        self.shell.focus = open.pane;
+        self.key(key)
+    }
+
+    /// A key while the menu is open, which takes every one: the arrows and
+    /// j and k move the highlight, Enter picks it, and any other key closes
+    /// the menu and goes no further — Esc as it should, and a letter because
+    /// it was aimed at a menu that was in the way.
+    pub(super) fn menu_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        let Some(open) = self.shell.mouse.menu.as_mut() else {
+            return Vec::new();
+        };
+        let last = menu(open.pane).len().saturating_sub(1);
+        match key.code {
+            KeyCode::Down | KeyCode::Char('j') => open.item = (open.item + 1).min(last),
+            KeyCode::Up | KeyCode::Char('k') => open.item = open.item.saturating_sub(1),
+            KeyCode::Enter => {
+                let item = open.item;
+                return self.pick(item);
+            }
+            _ => self.shell.mouse.menu = None,
         }
         Vec::new()
     }
@@ -500,7 +625,15 @@ impl App {
     /// `position`, from the window the frame drew so the view stays put.
     /// Above or below the pad is the line just past its edge, so a drag out
     /// of it scrolls a line each time it moves; left of the text is column 0.
-    fn pad_point(&mut self, (rect, target): (Rect, Target), position: Position, extend: bool) {
+    /// With `keep`, a point inside the selection leaves it be, so a
+    /// right-click on it can still copy it.
+    fn pad_point(
+        &mut self,
+        (rect, target): (Rect, Target),
+        position: Position,
+        extend: bool,
+        keep: bool,
+    ) {
         let (Target::Pad { top, left, gutter }, Some(tab)) =
             (target, self.tabs.get_mut(self.shell.active_tab))
         else {
@@ -516,6 +649,14 @@ impl App {
         let x = usize::from(position.x.saturating_sub(rect.x));
         let column = if x < gutter { 0 } else { left + x - gutter };
         tab.scratch.show_from(top, left);
+        if keep
+            && tab
+                .scratch
+                .selection()
+                .is_some_and(|(from, to)| (from..to).contains(&(line, column)))
+        {
+            return;
+        }
         tab.scratch.place((line, column), extend);
     }
 
@@ -532,7 +673,7 @@ impl App {
             .regions()
             .find(|(_, target)| matches!(target, Target::Pad { .. }))
         {
-            self.pad_point(region, position, true);
+            self.pad_point(region, position, true, false);
         }
         Vec::new()
     }
@@ -689,6 +830,28 @@ mod tests {
         );
         assert_eq!(hits.spot(Position::new(20, 0)), None, "past the right edge");
         assert_eq!(hits.0.len(), 3, "an empty region is never pushed");
+    }
+
+    #[test]
+    fn every_menu_entry_is_a_key_of_its_pane() {
+        for pane in [Focus::Objects, Focus::Results, Focus::Scratch] {
+            let (_, names) = MENU
+                .iter()
+                .find(|(of, _)| *of == pane)
+                .unwrap_or_else(|| panic!("no menu for {pane:?}"));
+            for name in *names {
+                assert!(
+                    keys_for(pane).any(|(key, ..)| key == name) && key_named(name).is_some(),
+                    "{name} is not a key of {pane:?}"
+                );
+            }
+            assert_eq!(menu(pane).len(), names.len());
+        }
+        assert_eq!(
+            menu(Focus::Objects)[0],
+            ("Enter", "select from it"),
+            "not Results' Enter"
+        );
     }
 
     #[test]

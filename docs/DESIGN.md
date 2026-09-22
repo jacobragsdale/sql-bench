@@ -328,7 +328,9 @@ how the app still sees no terminal and reads no clock.
   takes a press back.
 - A double-click is a second click on the same target and row within 400 ms.
   It uses both clicks up, so a third is a single again.
-- A right-click does what a left click does.
+- A right-click on a tree row, a grid cell or header, an object's source or
+  the pad selects what is under it, then opens that pane's context menu (see
+  Menus). Anywhere else it does what a left click does.
 - The wheel scrolls what is under the pointer, by 3, and never moves the
   focus: the help, the inspector, the tree, the grid, an object's source
   and the pad.
@@ -422,6 +424,42 @@ Objects first ends typing the filter, the way Enter does, so a button's
 key is not typed into it. `every_button_drawn_is_exactly_its_key_and_does_something`
 in `src/ui/tests/mouse.rs` clicks every button in a table of states and
 presses its key on a copy, and the two apps have to come out the same.
+
+### Menus
+
+A right-click in a pane selects without acting — the row, the cell, the
+header's column, the pad's cursor, but not the glyph's Space, the header's
+`o` or a double-click, which are entries of the menu — and then opens
+`shell.mouse.menu` at the pointer. In the pad a right-click inside the
+selection keeps it, so the menu's Ctrl-C copies it. On a pane's border or an
+empty pane it opens the menu and moves nothing; on a tab, the footer, a
+button or an overlay it is a left click and opens none.
+
+`pointer::MENU` names the entries as rows of `KEYS`: Objects Enter, s, i, y,
+r, /, Space; Results Enter, y, Y, o, e, m, [, ]; Scratch Ctrl-R, F5, Ctrl-C,
+Ctrl-Z, Ctrl-E. Their labels are read through `keys_for(pane)`, because
+`KEYS` has an Enter and a `y` for more than one pane, and a test checks every
+name is a key of its pane. Each entry is what it does on the left and its key
+on the right. The box opens right and down from the pointer, or left and up
+from it where that would run off the frame, clamped to it at every size down
+to 60x15. It pushes `Outside`, its body, then a `Target::MenuItem(n)` per
+entry, and is drawn after everything else; the entry Enter would pick is
+painted like the pad's cursor, and the pointer lights the one it rests on.
+
+Picking an entry, by a click or by Enter, closes the menu, focuses its pane
+and runs `App::key` with its key, so it is exactly the key:
+`picking_each_entry_is_exactly_its_key` checks a click, `j`s and Enter, and
+the key itself come out the same in a table of states. An entry whose key
+has nothing to act on in the current state stays in the menu and does what
+the key does, which is nothing or a footer message; the "does something"
+half of the check is made only in the state where every key has work.
+
+While the menu is open it takes every key, ahead of the prompt, the help and
+Esc's other meanings: Up, Down, `j` and `k` move the highlight, Enter picks,
+and any other key closes the menu and goes no further, Esc included. A click
+beside it closes it and reaches nothing. The help, the inspector and the
+prompt only open from a key or a click, which the menu takes, so none of
+them is ever open under it.
 
 ### The pad
 
