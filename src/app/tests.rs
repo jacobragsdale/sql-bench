@@ -1986,6 +1986,7 @@ fn run_all_keeps_every_statements_sets_and_says_what_they_did() {
                 connect_ms: 0,
                 first_row_ms: 0,
                 total_ms: 1,
+                reset: false,
             },
         });
     };

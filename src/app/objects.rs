@@ -917,11 +917,12 @@ impl Objects {
         (0..self.nodes.len()).filter(|index| keep[*index]).collect()
     }
 
-    /// The first row of a window `height` high, so the cursor is on it.
+    /// The first row of a window `height` high over the [`Self::visible`]
+    /// rows, so the cursor is on it. The rows are the caller's, who drew
+    /// them, because working them out is a walk of the whole tree.
     #[must_use]
-    pub fn window(&self, height: usize) -> usize {
+    pub fn window(&self, visible: &[usize], height: usize) -> usize {
         let height = height.max(1);
-        let visible = self.visible();
         let at = visible.iter().position(|index| *index == self.cursor);
         let at = at.unwrap_or(0);
         self.scroll

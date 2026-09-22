@@ -11,6 +11,7 @@ use std::ops::Range;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use unicode_width::UnicodeWidthChar;
 
 use crate::config::Kind;
 
@@ -145,10 +146,11 @@ impl Scratch {
 
     /// Whatever came back from `$EDITOR`, or any other whole-pad replacement.
     pub fn set_text(&mut self, text: &str) {
-        if text == self.text() {
+        let lines = split_lines(text);
+        if lines == self.lines {
             return;
         }
-        self.lines = split_lines(text);
+        self.lines = lines;
         self.selection = None;
         self.undo = None;
         self.burst = false;
@@ -228,11 +230,23 @@ impl Scratch {
     /// Where a pane `height` rows by `width` columns starts showing the pad:
     /// where it last did, moved only as far as it takes to put the cursor on
     /// it, and never so far down that rows are left empty under the last
-    /// line.
+    /// line. The line is a line and the column a terminal column, because a
+    /// CJK character is two of them.
     #[must_use]
     pub fn window(&self, height: usize, width: usize) -> (usize, usize) {
         let (height, width) = (height.max(1), width.max(1));
         let (line, column) = self.cursor;
+        let mut characters = self.lines[line].chars();
+        // Past the end of the line a column is a blank, one terminal column.
+        let (mut at, mut counted) = (0, 0);
+        for character in characters.by_ref().take(column) {
+            at += char_width(character);
+            counted += 1;
+        }
+        at += column - counted;
+        let under = characters
+            .next()
+            .map_or(1, |character| char_width(character).max(1));
         (
             self.scroll
                 .0
@@ -241,9 +255,23 @@ impl Scratch {
                 .min(self.lines.len().saturating_sub(height)),
             self.scroll
                 .1
-                .min(column)
-                .max((column + 1).saturating_sub(width)),
+                .min(at)
+                .max((at + under).saturating_sub(width)),
         )
+    }
+
+    /// The character of `line` drawn over terminal column `cell`, or the end
+    /// of the line when it is past it: where a click there puts the cursor.
+    #[must_use]
+    pub fn column_at(&self, line: usize, cell: usize) -> usize {
+        let text = &self.lines[line.min(self.lines.len() - 1)];
+        let mut drawn = 0;
+        text.chars()
+            .position(|character| {
+                drawn += char_width(character);
+                drawn > cell
+            })
+            .unwrap_or_else(|| text.chars().count() + cell.saturating_sub(drawn))
     }
 
     /// Show the pad from this line and column, the way a frame just did or a
@@ -393,15 +421,7 @@ impl Scratch {
     /// Bracketed paste: the whole block at the cursor, or over the
     /// selection, line breaks kept.
     pub fn paste(&mut self, text: &str) -> Outcome {
-        let mut cleaned = String::with_capacity(text.len());
-        for character in text.replace("\r\n", "\n").chars() {
-            match character {
-                '\n' => cleaned.push('\n'),
-                '\t' => cleaned.push_str(INDENT),
-                character if character.is_control() => {}
-                character => cleaned.push(character),
-            }
-        }
+        let cleaned = cleaned(text);
         if cleaned.is_empty() {
             return Outcome::Unchanged;
         }
@@ -803,9 +823,26 @@ impl Scratch {
     }
 }
 
+/// Text from outside — a paste, the editor, the file a pad was kept in — as
+/// the pad holds it: a tab is [`INDENT`] and the other control characters
+/// go, because the terminal would draw none of them and the cursor would be
+/// a column off for each.
+fn cleaned(text: &str) -> String {
+    let mut cleaned = String::with_capacity(text.len());
+    for character in text.replace("\r\n", "\n").chars() {
+        match character {
+            '\n' => cleaned.push('\n'),
+            '\t' => cleaned.push_str(INDENT),
+            character if character.is_control() => {}
+            character => cleaned.push(character),
+        }
+    }
+    cleaned
+}
+
 /// A file's text as lines, always at least one.
 fn split_lines(text: &str) -> Vec<String> {
-    let text = text.replace("\r\n", "\n");
+    let text = cleaned(text);
     let text = text.strip_suffix('\n').unwrap_or(&text);
     let lines: Vec<String> = text.split('\n').map(str::to_owned).collect();
     if lines.is_empty() {
@@ -813,6 +850,12 @@ fn split_lines(text: &str) -> Vec<String> {
     } else {
         lines
     }
+}
+
+/// How many terminal columns a character of the pad is drawn in.
+#[must_use]
+pub fn char_width(character: char) -> usize {
+    UnicodeWidthChar::width(character).unwrap_or(0)
 }
 
 /// Characters `from..to` of a line, `to` past the end meaning the rest.
@@ -1342,6 +1385,14 @@ mod tests {
         assert!(
             !same.modified(),
             "an editor that saved nothing changed nothing"
+        );
+
+        let mut tabbed = pad();
+        tabbed.set_text("begin\r\n\tnull;\u{7}\r\nend;\n");
+        assert_eq!(
+            tabbed.lines(),
+            ["begin", "  null;", "end;"],
+            "a tab is the pad's indent and a bell is nothing, as in a paste"
         );
     }
 

@@ -989,18 +989,14 @@ fn header_width(column: &Column) -> usize {
 }
 
 /// What a cell reads as in the grid. It differs from [`Cell::display`] in
-/// the three ways a grid cares about: a NULL says so, a blob is its first
-/// bytes rather than all of them, and a newline is one glyph wide.
+/// the two ways a grid cares about: a NULL says so, and a blob is its first
+/// bytes rather than all of them. A newline and the other control characters
+/// are [`cut`]'s to draw, so a long text is never copied to be shown.
 #[must_use]
 pub fn shown(cell: &Cell) -> Cow<'_, str> {
     match cell {
         Cell::Null => Cow::Borrowed("NULL"),
         Cell::Bytes(bytes) => Cow::Owned(short_hex(bytes)),
-        Cell::Text(text) | Cell::DateTime(text) | Cell::Decimal(text)
-            if text.contains(['\n', '\r']) =>
-        {
-            Cow::Owned(text.replace(['\n', '\r'], "⏎"))
-        }
         other => other.display(),
     }
 }
@@ -1130,7 +1126,13 @@ fn wrapped(text: &str, top: usize, count: usize) -> Vec<String> {
                 if lines.len() == count {
                     return lines;
                 }
-                lines.push(characters.by_ref().take(INSPECT_WIDTH).collect());
+                lines.push(
+                    characters
+                        .by_ref()
+                        .take(INSPECT_WIDTH)
+                        .map(crate::export::printable)
+                        .collect(),
+                );
             }
         }
         line += height;
@@ -1524,11 +1526,13 @@ mod tests {
     fn a_cell_reads_the_way_a_grid_can_draw_it() {
         assert_eq!(shown(&Cell::Null), "NULL");
         assert_eq!(shown(&Cell::Int(-12)), "-12");
+        let text = Cell::Text("two\nlines\tand\x1b".to_owned());
         assert_eq!(
-            shown(&Cell::Text("two\nlines".to_owned())),
-            "two⏎lines",
-            "a newline is one glyph wide"
+            cut(&shown(&text), 40),
+            "two⏎lines and␛",
+            "a control character is one glyph wide"
         );
+        assert_eq!(width_of(&shown(&text)), 14, "and measured as the glyph");
         assert_eq!(
             shown(&Cell::Bytes((0..32).collect::<Vec<u8>>())),
             "0x000102030405060708090a0b0c0d0e0f…",

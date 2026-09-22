@@ -6,11 +6,14 @@
 //! returned ten rows or a hundred thousand, which is the budget
 //! `docs/DESIGN.md` sets.
 
+use std::borrow::Cow;
+
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
-use ratatui::text::{Line, Span};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Paragraph, Wrap};
+use unicode_width::UnicodeWidthChar;
 
 use super::theme::Theme;
 use super::{buttons, placeholder, placeholder_button, scrollbar, titled};
@@ -20,12 +23,17 @@ use crate::app::{App, Focus, TabState};
 use crate::db::model::{Cell, Column};
 use crate::export::pad;
 
-/// A pane taller than this gets a second header row with the column types.
+/// A pane taller than this gets a second header row with the column types,
+/// when there are any: a table's column list has none to show.
 /// Shorter than that and the types would cost a fifth of the rows on screen.
 const TYPES_ABOVE: u16 = 8;
 
 /// The gap between two columns, in characters.
 const GAP: usize = 2;
+
+/// How far apart the source view's tab stops are: SQL Server Management
+/// Studio's, which is where most tab-indented procedures were written.
+const TAB: usize = 4;
 
 pub(super) fn render(frame: &mut Frame, app: &App, theme: &Theme, area: Rect, hits: &mut Hits) {
     let focused = app.shell.focus == Focus::Results;
@@ -65,7 +73,7 @@ pub(super) fn render(frame: &mut Frame, app: &App, theme: &Theme, area: Rect, hi
             ..inner
         };
         frame.render_widget(
-            Paragraph::new(Span::styled(message.clone(), theme.error)).wrap(Wrap { trim: false }),
+            Paragraph::new(Text::styled(message.as_str(), theme.error)).wrap(Wrap { trim: false }),
             below,
         );
         return;
@@ -85,7 +93,7 @@ pub(super) fn render(frame: &mut Frame, app: &App, theme: &Theme, area: Rect, hi
     // The driver's own words, wrapped: a complaint is as long as it is.
     if let Some(error) = results.failure() {
         frame.render_widget(
-            Paragraph::new(Span::styled(error.to_string(), theme.error)).wrap(Wrap { trim: false }),
+            Paragraph::new(Text::styled(error.to_string(), theme.error)).wrap(Wrap { trim: false }),
             inner,
         );
         return;
@@ -109,7 +117,11 @@ pub(super) fn render(frame: &mut Frame, app: &App, theme: &Theme, area: Rect, hi
         results,
         theme,
         inner,
-        area.height > TYPES_ABOVE,
+        area.height > TYPES_ABOVE
+            && results
+                .columns()
+                .iter()
+                .any(|column| !column.type_name.is_empty()),
         hits,
     );
     scrollbar(
@@ -168,12 +180,34 @@ fn text_view(
         .map(|(number, text)| {
             Line::from(vec![
                 Span::styled(format!("{:>digits$} ", number + 1), theme.dim),
-                Span::raw(cut(text, width).into_owned()),
+                Span::raw(cut(&expand_tabs(text), width).into_owned()),
             ])
         })
         .collect();
     frame.render_widget(Paragraph::new(lines), area);
     top
+}
+
+/// A line of source with its tabs out to every [`TAB`]th column, which is
+/// where the editor that wrote the procedure put them: a tab left to
+/// [`cut`] would be one space, and an indented body would lose its shape.
+fn expand_tabs(line: &str) -> Cow<'_, str> {
+    if !line.contains('\t') {
+        return Cow::Borrowed(line);
+    }
+    let mut expanded = String::with_capacity(line.len() + TAB);
+    let mut column = 0;
+    for character in line.chars() {
+        if character == '\t' {
+            let spaces = TAB - column % TAB;
+            expanded.extend(std::iter::repeat_n(' ', spaces));
+            column += spaces;
+        } else {
+            expanded.push(character);
+            column += UnicodeWidthChar::width(character).unwrap_or(0);
+        }
+    }
+    Cow::Owned(expanded)
 }
 
 /// The grid, and the row it is drawn from and where its rows are: the

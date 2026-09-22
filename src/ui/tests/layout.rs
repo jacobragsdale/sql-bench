@@ -223,3 +223,19 @@ fn a_long_message_is_cut_rather_than_pushing_the_connection_off_the_footer() {
     assert!(footer.starts_with(" 1 row in 3 ms "), "{footer}");
     assert!(footer.ends_with("○ disconnected"), "{footer}");
 }
+
+#[test]
+fn a_long_error_of_several_lines_is_one_footer_line_and_leaves_the_connection_showing() {
+    let mut app = two_tabs();
+    app.shell.error = Some(format!("column 7:\nPLS-00201 {}", "表".repeat(80)));
+    let terminal = frame(80, 20, &app);
+    let footer = line(&terminal, 19);
+    assert!(
+        footer.starts_with(" column 7: PLS-00201 表"),
+        "the break is a space: {footer}"
+    );
+    assert!(
+        footer.contains("… × ") && footer.ends_with(" ○ disconnected"),
+        "a wide glyph costs two columns of the budget: {footer}"
+    );
+}

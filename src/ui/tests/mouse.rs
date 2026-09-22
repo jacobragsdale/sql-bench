@@ -222,7 +222,7 @@ fn the_pointer_lights_up_a_tab_and_nothing_under_an_overlay() {
     let terminal = frame(120, 40, &app);
     let lit = |terminal: &Terminal<TestBackend>, x: u16| {
         let cell = &terminal.backend().buffer()[(x, 0)];
-        Style::new().fg(cell.fg).bg(cell.bg) == theme.hover
+        Style::new().fg(cell.fg).bg(cell.bg) == seen(theme.hover)
     };
     assert!((18..34).all(|x| lit(&terminal, x)), "the whole label");
     assert!(!lit(&terminal, 17) && !lit(&terminal, 34) && !lit(&terminal, 1));
@@ -775,7 +775,7 @@ fn a_click_on_the_prompt_text_puts_the_cursor_there() {
 
 #[test]
 fn the_pointer_lights_up_a_button_and_nothing_under_an_overlay() {
-    let hover = Theme::new(false).hover;
+    let hover = seen(Theme::new(false).hover);
     let mut app = idle();
     let (x, y) = place(&app, "▶ Run");
     app.shell.mouse.pointer = Some(Position::new(x + 2, y));
@@ -1375,7 +1375,7 @@ fn a_thumb_pressed_and_let_go_does_nothing() {
 
 #[test]
 fn the_pointer_lights_up_the_thumb_it_rests_on() {
-    let hover = Theme::new(false).hover;
+    let hover = seen(Theme::new(false).hover);
     let mut app = deep();
     let thumb = thumb_of(&app, Focus::Results);
     app.shell.mouse.pointer = Some(thumb.as_position());
@@ -1555,7 +1555,7 @@ fn the_seams_are_under_the_scrollbars_and_the_title_buttons() {
 #[test]
 fn a_seam_is_lit_under_the_pointer_and_while_it_is_held() {
     let theme = Theme::new(false);
-    let lit = theme.hover.patch(theme.accent);
+    let lit = seen(theme.hover.patch(theme.accent));
     let mut app = idle();
     app.shell.mouse.pointer = Some(Position::new(36, 25));
     let terminal = frame(120, 40, &app);
@@ -1822,8 +1822,9 @@ fn the_entry_enter_would_pick_is_painted_like_the_cursor_and_the_pointer_lights_
         );
     }
     assert!(
-        (83..118)
-            .all(|x| Style::new().fg(buffer[(x, 31)].fg).bg(buffer[(x, 31)].bg) == theme.hover)
+        (83..118).all(
+            |x| Style::new().fg(buffer[(x, 31)].fg).bg(buffer[(x, 31)].bg) == seen(theme.hover)
+        )
     );
 }
 

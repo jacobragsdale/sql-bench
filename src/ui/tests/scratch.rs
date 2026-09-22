@@ -60,14 +60,9 @@ fn the_cursor_is_the_one_reversed_cell_and_only_while_the_pad_has_the_focus() {
         app.tabs[0].scratch.handle(key("Right"));
     }
     // The text starts after `1 `, so the cursor's cell is three in.
-    // `painted` reads the cell back with the foreground it was left with,
-    // which for text nobody styled is the terminal's own.
-    let plain = Style::new().fg(Color::Reset);
+    let plain = Style::new();
     let terminal = frame(120, 40, &app);
-    assert_eq!(
-        painted(&terminal, LEFT + 2 + 2 + 3, 2),
-        theme.cursor.fg(Color::Reset)
-    );
+    assert_eq!(painted(&terminal, LEFT + 2 + 2 + 3, 2), theme.cursor);
     assert_eq!(painted(&terminal, LEFT + 2 + 2 + 2, 2), plain);
 
     app.shell.focus = Focus::Objects;
@@ -397,4 +392,38 @@ fn the_wheel_scrolls_three_lines_and_pulls_the_cursor_along() {
         "no further than the last line"
     );
     assert_eq!(pad_line(&terminal, 2), row("28 select 28"));
+}
+
+#[test]
+fn a_wide_line_scrolls_by_terminal_columns_and_a_click_lands_on_the_glyph_drawn_there() {
+    // Sixty CJK characters are 120 terminal columns, wider than the pad.
+    let at_end = |text: &str| {
+        let mut app = typed(text);
+        app.tabs[0].scratch.handle(key("End"));
+        let terminal = frame(120, 40, &app);
+        let buffer = terminal.backend().buffer();
+        (LEFT..120).find(|x| {
+            buffer[(*x, 2)]
+                .modifier
+                .contains(ratatui::style::Modifier::REVERSED)
+        })
+    };
+    assert_eq!(
+        at_end(&"表".repeat(60)),
+        at_end(&"x".repeat(200)),
+        "the cursor past the end is on the pane's last column, not off it"
+    );
+
+    // From the left edge: the text starts at column 4 of the pane, and each
+    // glyph is two columns, so column 4 + 2 * 5 is the sixth one's first half
+    // and the column after it the same glyph's second.
+    // A fresh pad each time, so no two clicks make a double click.
+    let clicked = |x: u16| {
+        let mut app = typed(&format!("{}x", "表".repeat(10)));
+        click(&mut app, (LEFT + 4 + x, 2));
+        app.tabs[0].scratch.cursor()
+    };
+    assert_eq!(clicked(10), (0, 5));
+    assert_eq!(clicked(11), (0, 5));
+    assert_eq!(clicked(20), (0, 10), "the x after them");
 }

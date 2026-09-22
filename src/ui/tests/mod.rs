@@ -59,14 +59,26 @@ fn bar(terminal: &Terminal<TestBackend>, tabs: &str) -> String {
 }
 
 /// The colour and weight a cell was painted in, as a [`Style`] to compare
-/// with a theme token. A background is only there if something painted one.
+/// with a theme token. A colour is only there if something painted one.
 fn painted(terminal: &Terminal<TestBackend>, x: u16, y: u16) -> Style {
+    use ratatui::style::Color;
     let cell = &terminal.backend().buffer()[(x, y)];
-    let style = Style::new().fg(cell.fg).add_modifier(cell.modifier);
-    if cell.bg == ratatui::style::Color::Reset {
-        style
-    } else {
-        style.bg(cell.bg)
+    let mut style = Style::new().add_modifier(cell.modifier);
+    if cell.fg != Color::Reset {
+        style = style.fg(cell.fg);
+    }
+    if cell.bg != Color::Reset {
+        style = style.bg(cell.bg);
+    }
+    style
+}
+
+/// A style as [`painted`] reads it back: what it takes away from the style
+/// under it is not a thing a cell can be seen to be.
+fn seen(style: Style) -> Style {
+    Style {
+        sub_modifier: ratatui::style::Modifier::empty(),
+        ..style
     }
 }
 
