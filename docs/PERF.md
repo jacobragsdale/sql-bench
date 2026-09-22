@@ -181,6 +181,23 @@ subcommand for every seeded procedure, function and package. The longest is
 Oracle's `ORDER_PKG` at 20 lines, and the results pane shows 33 at 200x60, so
 nothing in the seed needs scrolling to be read whole.
 
+## Sort (T8.5)
+
+`a_sort_of_a_hundred_thousand_rows_is_inside_the_budget` in `tests/perf.rs`,
+release build, 2026-09-22, at 0782dda, on the machine above: one `o` over the
+100,000 synthetic rows of the `events` shape, median of five, three runs.
+
+| column | what it compares | time | budget |
+|---|---|---|---|
+| `amount` | `Decimal` text, parsed to f64 once a row | 8.0 / 8.4 / 8.5 ms | 100 ms |
+| `note` | text | 10.8 / 10.9 / 11.7 ms | 100 ms |
+
+The keys are worked out once a row before the sort rather than on every
+comparison, so a decimal is parsed 100,000 times and not 1.7 million, and
+the rows themselves are moved once, by the finished permutation. Either
+sort fits inside the 16 ms a key has to reach its frame. A traced run writes
+the same number as a `sort` line with `rows` and `ms`.
+
 ## Budgets (T7.1)
 
 Every budget `docs/DESIGN.md` sets, measured by `scripts/perf.sh` in a
@@ -269,3 +286,35 @@ the scan.
 | customers, top 100 | 50 | 37 | 0 | 0 | 0 | 0 | 166666 |
 | events, 10k cap | 10000 | 39 | 0 | 0 | 7 | 8 | 1333333 |
 | events, 100k cap | 100000 | 38 | 0 | 1 | 77 | 103 | 1225490 |
+
+### 2026-09-22 (0782dda)
+
+| budget | measured | pass |
+|---|---|---|
+| startup to the first frame, no connections < 50 ms | 1 ms | yes |
+| key to frame p95, 10,000 rows on screen < 16 ms | 0.194 ms | yes |
+| draw cost at 100,000 rows over 10,000 (0.072 ms / 0.114 ms) < 1.20 | 0.63 | yes |
+| `select 1` round trip on local-mssql < 5 ms | 0 ms | yes |
+| 1,000,000 row scan at `--max-rows 100000` on local-mssql < 8 s | 94 ms | yes |
+| `select 1` round trip on local-oracle < 5 ms | 0 ms | yes |
+| 1,000,000 row scan at `--max-rows 100000` on local-oracle < 8 s | 78 ms | yes |
+
+20 runs, 5 for the 100k scans.
+
+**local-mssql**
+
+| query | rows | connect | first_row p50 | first_row p95 | total p50 | total p95 | rows/s |
+|---|---|---|---|---|---|---|---|
+| select 1 | 1 | 5 | 0 | 0 | 0 | 0 | 20000 |
+| customers, top 100 | 50 | 5 | 0 | 0 | 0 | 0 | 1000000 |
+| events, 10k cap | 10000 | 5 | 4 | 4 | 13 | 14 | 787401 |
+| events, 100k cap | 100000 | 4 | 5 | 6 | 94 | 106 | 1037344 |
+
+**local-oracle**
+
+| query | rows | connect | first_row p50 | first_row p95 | total p50 | total p95 | rows/s |
+|---|---|---|---|---|---|---|---|
+| select 1 | 1 | 39 | 0 | 0 | 0 | 0 | 20000 |
+| customers, top 100 | 50 | 39 | 0 | 0 | 0 | 0 | 90909 |
+| events, 10k cap | 10000 | 38 | 0 | 0 | 7 | 8 | 1315789 |
+| events, 100k cap | 100000 | 39 | 0 | 2 | 80 | 101 | 1182033 |
