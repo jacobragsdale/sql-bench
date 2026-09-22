@@ -130,6 +130,17 @@ fn a_click_beside_the_help_closes_it_and_reaches_nothing_under_it() {
 }
 
 #[test]
+fn a_click_beside_the_finder_closes_it_and_one_on_it_does_not() {
+    let mut app = two_tabs();
+    app.handle(Event::Key(key("Ctrl-P")));
+    click(&mut app, 60, 20);
+    assert!(app.shell.finder.is_some(), "the middle of it");
+    // Column 0 is beside it, over the Objects pane.
+    assert_eq!(click(&mut app, 0, 10), vec![]);
+    assert!(app.shell.finder.is_none());
+}
+
+#[test]
 fn a_click_inside_the_help_leaves_it_open() {
     let mut app = two_tabs();
     app.handle(Event::Key(key("?")));

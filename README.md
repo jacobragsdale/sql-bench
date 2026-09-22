@@ -155,9 +155,9 @@ Anywhere:
 | `Shift-Tab` | previous pane |
 | `Ctrl-T` | next tab |
 | `?` | help |
+| `Ctrl-P` | find an object |
 | `Esc` | cancel or close help |
 | `Ctrl-Q` | quit |
-| `Ctrl-F` | find an object |
 
 Anywhere but the scratch pad, which types them instead:
 
@@ -237,6 +237,17 @@ Results:
 | `Y` | copy the row |
 | `e` | export the result set |
 | `o` | sort by the column |
+
+`Ctrl-P` opens the finder over everything: type part of a name and every
+object of every connected tab whose name answers it is listed, best first,
+across all of them at once — `cust` finds `customers`, `sp_customer_orders`
+and `V_CUSTOMER_TOTALS` on the Oracle tab in one list, and `bench.ord` or
+`cust ord` narrows it further. The arrows, Ctrl-N and Ctrl-P move down the
+list, Enter switches to the object's tab, opens the tree on it and fetches
+its source (or a table's columns) into the results pane, focused so it
+scrolls at once; Esc closes it.
+Every connection is indexed as soon as it is up, so nothing waits on the
+server while you type.
 
 The scratch pad is one pad per connection, kept in
 `~/.local/state/sql-bench/scratch/<connection>.sql` and written half a second

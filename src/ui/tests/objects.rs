@@ -125,17 +125,17 @@ fn a_closed_branch_the_filter_found_something_in_is_drawn_open() {
     let mut app = browsing();
     app.shell.focus = Focus::Objects;
     app.handle(Event::Key(key("/")));
-    app.catalog_started(0, &CatalogRequest::AllObjects);
+    app.catalog_started(0, &CatalogRequest::Index);
     let screen = text(&frame(120, 40, &app));
     assert!(screen.contains("╭ Objects / … ─"), "{screen}");
     app.apply(RuntimeEvent::Catalog {
         tab: 0,
-        request: CatalogRequest::AllObjects,
-        result: Ok(CatalogAnswer::Objects(vec![object(
-            "bench",
-            "sp_customer_orders",
-            ObjectKind::Procedure,
-        )])),
+        request: CatalogRequest::Index,
+        result: Ok(CatalogAnswer::Index(vec![
+            object("dbo", "customers", ObjectKind::Table),
+            object("dbo", "orders", ObjectKind::Table),
+            object("bench", "sp_customer_orders", ObjectKind::Procedure),
+        ])),
     });
     for spec in ["c", "u", "s", "t"] {
         app.handle(Event::Key(key(spec)));

@@ -29,11 +29,12 @@ pub(super) fn render(frame: &mut Frame, app: &App, theme: &Theme, area: Rect, hi
     let objects = &tab.objects;
     // Esc cancels a running query before it reaches the filter.
     let clears = !objects.filter().is_empty() && !tab.results.running();
-    // The listing `/` searches can take a moment on a big catalog.
-    let searching = if objects.searching() { " …" } else { "" };
-    let title = match objects.filter() {
-        "" if !objects.filtering() => " Objects ".to_owned(),
-        filter => format!(" Objects /{filter}{searching} "),
+    let title = match (objects.filter(), objects.indexing()) {
+        ("", true) if !objects.filtering() => " Objects · indexing… ".to_owned(),
+        ("", false) if !objects.filtering() => " Objects ".to_owned(),
+        // What `/` searches is still on its way.
+        (filter, true) => format!(" Objects /{filter} … "),
+        (filter, false) => format!(" Objects /{filter} "),
     };
     let block = titled(&title, title_style, border_style);
     let inner = block.inner(area);

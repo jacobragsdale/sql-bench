@@ -231,8 +231,8 @@ because that is where it was just typed.
 schemas, objects by kind, a table's columns, an object's source. It never
 touches table data.
 
-Each question is a `CatalogRequest` — `Schemas`, `Objects { schema, kind }`,
-`Columns { schema, table, .. }`, `Source { schema, name, kind }` — that knows
+Each question is a `CatalogRequest` — `Schemas`, `Index`, `Objects { schema,
+kind }`, `Columns { schema, table, .. }`, `Source { schema, name, kind }` — that knows
 the one statement that answers it (`sql(backend)`) and how to read the rows
 back (`answer(backend, rows)`). That split is what lets the same question be
 asked two ways: the `objects` and `source` subcommands run it blocking, and
@@ -242,16 +242,38 @@ next request rather than opening a second connection.
 
 The tree (`src/app/objects.rs`, `src/ui/objects.rs`) is a flat `Vec<Node>`
 with a depth per row: schemas, the kinds under them, the objects under those,
-a table's columns under that. Nothing is loaded until it is opened — the row
-says `…` while the catalog query runs and `✗ ORA-…` if it would not — and
-what has loaded stays loaded for the session, `r` being the way to ask again.
-The connection's own schema is listed first and opened as soon as the
-connection is up: `dbo` on SQL Server, the user name on Oracle, where every
-catalog name is upper case.
+a table's columns under that. A connection that comes up asks two things in
+a row: the schema list, and then the *index* — every object of every schema
+worth showing, in one `Index` query, kept in the tab's `Objects` for the
+session. The pane's title says `Objects · indexing…` until it lands. Once it
+has, opening a kind fills its branch from the index and asks the server
+nothing; before it has, the branch is asked for on its own the way it always
+was, and the index refills it when it arrives. A table's columns and an
+object's source are still fetched when they are wanted — the row says `…`
+while the catalog query runs and `✗ ORA-…` if it would not — and `r` on a
+kind asks for the index again. The connection's own schema is listed first
+and opened as soon as the connection is up: `dbo` on SQL Server, the user
+name on Oracle, where every catalog name is upper case.
 
-`/` (or `Ctrl-F` from any pane) searches the whole database, not just what is
-open: the first `/` lists every object of every schema in one query (the
-title says `…` until it lands) and fills every branch nobody opened. The pane
+`Ctrl-P` anywhere opens the finder (`src/app/finder.rs`) over the layout: a
+query line and, under it, the objects of *every* connected tab whose name
+answers it, best first — the name itself, then names starting with it, then
+names containing it, then names its letters appear in, in order. A word with
+a dot in it is matched against `schema.name`; several words all have to
+match. The index keeps a lower-cased copy of every name when it lands, so a
+keystroke is one pass over the names and nothing is allocated per object;
+the hits are ranked and cut to the best two hundred, which the title says
+(`Find · 2311 of 48210, first 200`). Enter switches to the object's tab,
+opens the tree down to it and puts what it is made of in the results pane:
+the source of a procedure, a function, a package or a view, the columns of
+a table. The source is fetched then, not kept — it is one catalog query on
+the tab's own connection, the same one `s` runs — and the focus lands on the
+results pane so the source scrolls at once. Esc closes it; Ctrl-Q still
+quits.
+
+`/` searches the whole connection, not just what is open: it fills every
+branch nobody opened from the index (the title says `…` while the index is
+still on its way, and a tab whose index failed asks for it again). The pane
 narrows to the schemas, objects and open columns whose name contains what is
 typed — `schema.name` when it has a dot in it — plus the branches above them,
 and says so in the title: `Objects /cust`. The cursor jumps to the first match
@@ -529,8 +551,12 @@ the README honest.
 `not Scratch` is the interesting column. The pad has to be able to type `c`,
 `q` and `1`, so those keys only act as commands where nothing is being typed,
 and every pane keeps a way out that the pad does not swallow: `Shift-Tab`,
-`Ctrl-T`, `Ctrl-Q` and `?` work everywhere. `Tab` is in the table twice for
-the same reason — next pane outside the pad, two spaces inside it.
+`Ctrl-T`, `Ctrl-P`, `Ctrl-Q` and `?` work everywhere. `Tab` is in the table
+twice for the same reason — next pane outside the pad, two spaces inside it.
+The finder's own keys — the arrows, Ctrl-N and Ctrl-P, the pages, Enter and
+Esc — are not in the table, the way the help overlay's and the inspector's
+are not: an overlay takes the keys of the pane under it and gives them back
+when it closes.
 
 [README.md](../README.md#keys) lists them all, grouped by pane, and has a
 frame of the layout written by a real run.
@@ -790,6 +816,17 @@ it rots without saying so. A replay runs the real loop, the real app and the
 real rendering and writes text, so a frame can be committed, diffed, grepped
 and asserted against — and the README's frame is regenerated by the same
 mechanism rather than redrawn by hand.
+
+**One index per connection, searched in memory.** The obvious finder asks
+the server `where name like '%…%'` on every keystroke, and the obvious tree
+loads a branch at a time; ten databases of ten thousand objects each make
+both of them a wait on every key. An index is one catalog query per
+connection, a hundred thousand `DbObject`s are a few megabytes, and a pass
+over as many lower-cased names is a millisecond — so the finder answers a
+keystroke from memory, the tree opens a branch from memory, and the server
+is asked for the things that are actually big: a table's columns, an
+object's source. The cost is that the index is as old as the connection;
+`r` on a kind asks for it again, and a reconnect always does.
 
 **`?` toggles help everywhere, including the pad.** A key that is only
 sometimes help is a key nobody trusts. `?` is not a character anybody needs

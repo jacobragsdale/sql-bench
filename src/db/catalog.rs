@@ -169,8 +169,9 @@ pub struct ColumnInfo {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CatalogRequest {
     Schemas,
-    /// Every object in every schema, which is what `/` searches.
-    AllObjects,
+    /// Every object in every schema worth showing, in one query: what the
+    /// finder searches and what the tree fills its branches from.
+    Index,
     Objects {
         schema: String,
         kind: ObjectKind,
@@ -192,6 +193,7 @@ pub enum CatalogRequest {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CatalogAnswer {
     Schemas(Vec<String>),
+    Index(Vec<DbObject>),
     Objects(Vec<DbObject>),
     Columns(Vec<ColumnInfo>),
     Source(String),
@@ -203,7 +205,7 @@ impl CatalogRequest {
     pub fn sql(&self, backend: Kind) -> String {
         match self {
             Self::Schemas => schemas_sql(backend),
-            Self::AllObjects => objects_sql(backend, None, None),
+            Self::Index => objects_sql(backend, None, None),
             Self::Objects { schema, kind } => objects_sql(backend, Some(schema), Some(*kind)),
             Self::Columns { schema, table, .. } => columns_sql(backend, schema, table),
             Self::Source {
@@ -219,9 +221,8 @@ impl CatalogRequest {
     pub fn answer(&self, backend: Kind, rows: Vec<Vec<Cell>>) -> Result<CatalogAnswer, DbError> {
         Ok(match self {
             Self::Schemas => CatalogAnswer::Schemas(parse_schemas(&rows)),
-            Self::AllObjects | Self::Objects { .. } => {
-                CatalogAnswer::Objects(parse_objects(backend, rows))
-            }
+            Self::Index => CatalogAnswer::Index(parse_objects(backend, rows)),
+            Self::Objects { .. } => CatalogAnswer::Objects(parse_objects(backend, rows)),
             Self::Columns { .. } => CatalogAnswer::Columns(parse_columns(backend, &rows)),
             Self::Source {
                 schema,

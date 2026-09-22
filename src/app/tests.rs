@@ -436,9 +436,9 @@ fn the_keys_of_a_pane_are_its_own_and_the_ones_that_work_anywhere() {
             "Ctrl-Left",
             "Ctrl-Right",
             "?",
+            "Ctrl-P",
             "Esc",
             "Ctrl-Q",
-            "Ctrl-F",
         ],
         "the pad's own keys, and the ones that are not characters"
     );
@@ -1058,16 +1058,15 @@ fn esc_clears_a_filter_enter_committed() {
 fn the_filter_finds_what_is_under_a_closed_branch_and_leaves_it_on_screen() {
     let mut app = browsing();
     go_to(&mut app.tabs[1].objects, "Procedures");
-    app.shell.focus = Focus::Scratch;
-    // Ctrl-F from anywhere: the pane, the filter, and every object to search.
+    app.shell.focus = Focus::Objects;
+    // No index yet, so `/` asks for the one it searches.
     assert_eq!(
-        press(&mut app, "Ctrl-F"),
+        press(&mut app, "/"),
         vec![Action::LoadObjects {
             tab: 1,
-            request: CatalogRequest::AllObjects
+            request: CatalogRequest::Index
         }]
     );
-    assert_eq!(app.shell.focus, Focus::Objects);
     assert!(app.tabs[1].objects.filtering());
     let everything = vec![
         object("dbo", "customers", ObjectKind::Table),
@@ -1078,8 +1077,8 @@ fn the_filter_finds_what_is_under_a_closed_branch_and_leaves_it_on_screen() {
     ];
     app.apply(RuntimeEvent::Catalog {
         tab: 1,
-        request: CatalogRequest::AllObjects,
-        result: Ok(CatalogAnswer::Objects(everything)),
+        request: CatalogRequest::Index,
+        result: Ok(CatalogAnswer::Index(everything)),
     });
     assert!(!app.tabs[1].objects.busy());
     let under = |app: &App| {
@@ -1349,6 +1348,271 @@ fn a_connection_that_comes_or_goes_empties_the_tree() {
     app.apply(RuntimeEvent::Disconnected { tab: 1 });
     assert!(app.tabs[1].objects.is_empty());
     assert!(!app.busy(), "and nothing is still waited on");
+}
+
+/// A tree with its schemas and its index in, the way a connected tab's is
+/// a moment after the connection came up: `dbo` open on its kinds, nothing
+/// under them yet.
+fn indexed(backend: Kind, schemas: &[&str], objects: Vec<DbObject>) -> Objects {
+    let mut tree = Objects::new(backend, "bench");
+    let schemas = schemas.iter().map(|schema| (*schema).to_owned()).collect();
+    tree.answer(
+        &CatalogRequest::Schemas,
+        &Ok(CatalogAnswer::Schemas(schemas)),
+    );
+    tree.answer(&CatalogRequest::Index, &Ok(CatalogAnswer::Index(objects)));
+    tree
+}
+
+#[test]
+fn with_the_index_in_a_kind_opens_from_it_and_r_asks_for_the_index_again() {
+    let mut tree = indexed(
+        Kind::Mssql,
+        &["dbo", "bench"],
+        vec![
+            object("dbo", "customers", ObjectKind::Table),
+            object("dbo", "v_totals", ObjectKind::View),
+            object("bench", "sp_ship", ObjectKind::Procedure),
+        ],
+    );
+    go_to(&mut tree, "Views");
+    assert_eq!(tree.key(key("l")), objects::Hit::Moved, "nothing to load");
+    assert_eq!(
+        rows(&tree),
+        [
+            "dbo",
+            "  Tables",
+            "  Views",
+            "    v_totals",
+            "  Procedures",
+            "  Functions",
+            "  Sequences",
+            "bench",
+        ]
+    );
+    go_to(&mut tree, "Tables");
+    tree.key(key("l"));
+    assert_eq!(rows(&tree)[2], "    customers");
+
+    // r on a branch from the index asks for the index, and every branch
+    // that came from it refills when the new one lands.
+    go_to(&mut tree, "Views");
+    assert_eq!(
+        tree.key(key("r")),
+        objects::Hit::Load(CatalogRequest::Index)
+    );
+    assert!(!rows(&tree).contains(&"    v_totals".to_owned()));
+    tree.started(&CatalogRequest::Index);
+    assert!(tree.busy());
+    let again = CatalogAnswer::Index(vec![
+        object("dbo", "customers", ObjectKind::Table),
+        object("dbo", "v_recent", ObjectKind::View),
+    ]);
+    tree.answer(&CatalogRequest::Index, &Ok(again));
+    assert!(!tree.busy());
+    assert_eq!(
+        rows(&tree)[2..5],
+        ["    customers", "  Views", "    v_recent"]
+    );
+}
+
+#[test]
+fn before_the_index_a_kind_asks_the_server_and_the_index_refills_it_after() {
+    let mut tree = Objects::new(Kind::Mssql, "bench");
+    let schemas = CatalogAnswer::Schemas(vec!["dbo".to_owned()]);
+    tree.answer(&CatalogRequest::Schemas, &Ok(schemas));
+    go_to(&mut tree, "Views");
+    let request = CatalogRequest::Objects {
+        schema: "dbo".to_owned(),
+        kind: ObjectKind::View,
+    };
+    assert_eq!(tree.key(key("l")), objects::Hit::Load(request.clone()));
+    tree.started(&request);
+    let listing = CatalogAnswer::Objects(vec![object("dbo", "v_old", ObjectKind::View)]);
+    tree.answer(&request, &Ok(listing));
+    assert!(rows(&tree).contains(&"    v_old".to_owned()));
+    let index = CatalogAnswer::Index(vec![object("dbo", "v_new", ObjectKind::View)]);
+    tree.answer(&CatalogRequest::Index, &Ok(index));
+    assert!(!rows(&tree).contains(&"    v_old".to_owned()));
+    assert!(rows(&tree).contains(&"    v_new".to_owned()));
+}
+
+#[test]
+fn reveal_opens_the_branches_down_to_the_object_and_drops_the_filter() {
+    let mut tree = indexed(
+        Kind::Mssql,
+        &["dbo", "bench"],
+        vec![
+            object("dbo", "customers", ObjectKind::Table),
+            object("bench", "orders", ObjectKind::Table),
+            object("bench", "sp_ship", ObjectKind::Procedure),
+        ],
+    );
+    tree.key(key("/"));
+    tree.key(key("z"));
+    assert_eq!(
+        rows(&tree),
+        Vec::<String>::new(),
+        "the filter hides everything"
+    );
+
+    assert!(tree.reveal(&object("bench", "sp_ship", ObjectKind::Procedure)));
+    assert_eq!(tree.filter(), "");
+    assert_eq!(tree.nodes()[tree.cursor()].item.name(), "sp_ship");
+    assert_eq!(
+        rows(&tree)[6..],
+        [
+            "bench",
+            "  Tables",
+            "  Views",
+            "  Procedures",
+            "    sp_ship",
+            "  Functions",
+            "  Sequences"
+        ]
+    );
+
+    // No such schema, or a schema whose branch would have to ask the
+    // server: nowhere to put the cursor.
+    assert!(!tree.reveal(&object("sales", "sp_ship", ObjectKind::Procedure)));
+    let mut bare = Objects::new(Kind::Mssql, "bench");
+    let schemas = CatalogAnswer::Schemas(vec!["dbo".to_owned()]);
+    bare.answer(&CatalogRequest::Schemas, &Ok(schemas));
+    assert!(!bare.reveal(&object("dbo", "customers", ObjectKind::Table)));
+    assert!(
+        !bare.busy(),
+        "a reveal that could not open a branch left nothing loading"
+    );
+}
+
+/// Two tabs indexed, so Ctrl-P has two connections' worth to find.
+fn two_indexed() -> App {
+    let mut app = two_tabs();
+    app.tabs[0].objects = indexed(
+        Kind::Mssql,
+        &["dbo", "bench"],
+        vec![
+            object("bench", "customers", ObjectKind::Table),
+            object("bench", "sp_customer_orders", ObjectKind::Procedure),
+        ],
+    );
+    app.tabs[1].objects = indexed(
+        Kind::Oracle,
+        &["BENCH"],
+        vec![object("BENCH", "ORDER_PKG", ObjectKind::Package)],
+    );
+    app
+}
+
+#[test]
+fn ctrl_p_opens_the_finder_which_takes_every_key_and_enter_goes_to_the_object() {
+    let mut app = two_indexed();
+    app.shell.focus = Focus::Scratch;
+    assert_eq!(press(&mut app, "Ctrl-P"), vec![]);
+    assert!(app.shell.finder.is_some());
+    // `q` and `?` are letters of a name here, not commands.
+    assert_eq!(press(&mut app, "q"), vec![]);
+    assert_eq!(press(&mut app, "?"), vec![]);
+    assert!(!app.shell.should_quit && !app.shell.help);
+    assert_eq!(
+        app.shell
+            .finder
+            .as_ref()
+            .map(|finder| finder.query.text.as_str()),
+        Some("q?")
+    );
+    press(&mut app, "Ctrl-U");
+    for character in "order_pkg".chars() {
+        press(&mut app, &character.to_string());
+    }
+    assert_eq!(
+        press(&mut app, "Enter"),
+        vec![Action::LoadObjects {
+            tab: 1,
+            request: CatalogRequest::Source {
+                schema: "BENCH".to_owned(),
+                name: "ORDER_PKG".to_owned(),
+                kind: ObjectKind::Package,
+            },
+        }]
+    );
+    assert!(app.shell.finder.is_none());
+    assert_eq!(app.shell.active_tab, 1);
+    assert_eq!(
+        app.shell.focus,
+        Focus::Results,
+        "the source is what was asked for, so its pane has the keys"
+    );
+    let tree = &app.tabs[1].objects;
+    assert_eq!(tree.nodes()[tree.cursor()].item.name(), "ORDER_PKG");
+
+    // A table opens on its columns instead, in the results pane.
+    press(&mut app, "Ctrl-P");
+    for character in "customers".chars() {
+        press(&mut app, &character.to_string());
+    }
+    assert_eq!(
+        press(&mut app, "Enter"),
+        vec![Action::LoadObjects {
+            tab: 0,
+            request: CatalogRequest::Columns {
+                schema: "bench".to_owned(),
+                table: "customers".to_owned(),
+                show: true,
+            },
+        }]
+    );
+    assert_eq!(app.shell.active_tab, 0);
+
+    // Esc closes it; Ctrl-Q is still the way out of the app.
+    press(&mut app, "Ctrl-P");
+    assert_eq!(press(&mut app, "Esc"), vec![]);
+    assert!(app.shell.finder.is_none() && !app.shell.should_quit);
+    press(&mut app, "Ctrl-P");
+    assert_eq!(press(&mut app, "Ctrl-Q"), vec![Action::Quit]);
+}
+
+#[test]
+fn the_index_is_waited_on_like_any_load_and_an_open_finder_sees_it_land() {
+    let mut app = two_tabs();
+    app.tabs[0].objects.answer(
+        &CatalogRequest::Schemas,
+        &Ok(CatalogAnswer::Schemas(vec!["dbo".to_owned()])),
+    );
+    press(&mut app, "Ctrl-P");
+    press(&mut app, "c");
+    assert!(
+        app.shell
+            .finder
+            .as_ref()
+            .is_some_and(|finder| finder.matches().is_empty())
+    );
+
+    app.catalog_started(0, &CatalogRequest::Index);
+    assert!(app.busy(), "the index is a load the replay waits out");
+    app.apply(RuntimeEvent::Catalog {
+        tab: 0,
+        request: CatalogRequest::Index,
+        result: Ok(CatalogAnswer::Index(vec![object(
+            "dbo",
+            "customers",
+            ObjectKind::Table,
+        )])),
+    });
+    assert!(!app.busy());
+    let finder = app.shell.finder.as_ref().expect("still open");
+    assert_eq!(
+        finder.matches().len(),
+        1,
+        "the query was kept and run again"
+    );
+    assert_eq!(finder.query.text, "c");
+
+    // A disconnect takes that tab's objects out from under it.
+    app.apply(RuntimeEvent::Disconnected { tab: 0 });
+    let finder = app.shell.finder.as_ref().expect("still open");
+    assert!(finder.matches().is_empty());
+    assert_eq!(finder.indexed(), 0);
 }
 
 /// The README's key tables and [`KEYS`] are one list.

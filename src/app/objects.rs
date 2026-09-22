@@ -14,6 +14,7 @@ use std::collections::BTreeMap;
 
 use crossterm::event::{KeyCode, KeyEvent};
 
+use super::finder::Index;
 use crate::config::Kind;
 use crate::db::catalog::{CatalogAnswer, CatalogRequest, ColumnInfo, DbObject, ObjectKind};
 use crate::db::model::DbError;
@@ -154,11 +155,15 @@ pub struct Objects {
     filter: String,
     /// Whether `/` is still being typed into.
     filtering: bool,
-    /// Whether the schema list itself is on its way, which is one of the two
-    /// loads with no row of their own to say so.
+    /// Whether the schema list itself is on its way, which — with the index
+    /// — is a load with no row of its own to say so.
     loading_schemas: bool,
-    /// Whether the other one is: every object, for `/` to search.
-    searching: bool,
+    /// Every object the connection holds, once the index has come back:
+    /// what `Ctrl-P` searches, and what a kind's branch fills from without
+    /// asking the server again.
+    index: Option<Index>,
+    /// The index is on its way; the pane's title says so.
+    indexing: bool,
     /// Where the window starts; the pane's height is known only to the
     /// renderer, so this is a hint [`Objects::window`] clamps.
     scroll: usize,
@@ -181,7 +186,8 @@ impl Objects {
             filter: String::new(),
             filtering: false,
             loading_schemas: false,
-            searching: false,
+            index: None,
+            indexing: false,
             scroll: 0,
         }
     }
@@ -220,32 +226,38 @@ impl Objects {
         self.filtering
     }
 
-    /// Whether `/` is still fetching the objects it searches.
-    #[must_use]
-    pub const fn searching(&self) -> bool {
-        self.searching
-    }
-
     /// Whether a catalog query this tree asked for is still running, which
     /// is what a replay's `wait busy` waits out.
     #[must_use]
     pub fn busy(&self) -> bool {
-        self.loading_schemas || self.searching || self.nodes.iter().any(|node| node.loading)
+        self.loading_schemas || self.indexing || self.nodes.iter().any(|node| node.loading)
+    }
+
+    /// Every object of the connection, once the index has come back.
+    #[must_use]
+    pub const fn index(&self) -> Option<&Index> {
+        self.index.as_ref()
+    }
+
+    /// Whether the index is still on its way.
+    #[must_use]
+    pub const fn indexing(&self) -> bool {
+        self.indexing
     }
 
     /// A load is on its way: the row says so until the answer arrives, and
-    /// the schema list — which has no row — says so through the tree.
+    /// the schema list and the index — which have no row — say so through
+    /// the tree.
     pub fn started(&mut self, request: &CatalogRequest) {
-        match self.find(request) {
-            Some(index) => {
-                self.nodes[index].loading = true;
-                self.nodes[index].error = None;
+        match request {
+            CatalogRequest::Schemas => self.loading_schemas = true,
+            CatalogRequest::Index => self.indexing = true,
+            _ => {
+                if let Some(index) = self.find(request) {
+                    self.nodes[index].loading = true;
+                    self.nodes[index].error = None;
+                }
             }
-            None => match request {
-                CatalogRequest::Schemas => self.loading_schemas = true,
-                CatalogRequest::AllObjects => self.searching = true,
-                _ => {}
-            },
         }
     }
 
@@ -254,7 +266,7 @@ impl Objects {
     pub fn answer(&mut self, request: &CatalogRequest, result: &Result<CatalogAnswer, DbError>) {
         match request {
             CatalogRequest::Schemas => self.loading_schemas = false,
-            CatalogRequest::AllObjects => self.searching = false,
+            CatalogRequest::Index => self.indexing = false,
             _ => {}
         }
         let index = self.find(request);
@@ -273,9 +285,7 @@ impl Objects {
         };
         match (answer, index) {
             (CatalogAnswer::Schemas(schemas), _) => self.fill_schemas(schemas),
-            (CatalogAnswer::Objects(objects), None) if *request == CatalogRequest::AllObjects => {
-                self.fill_all(objects);
-            }
+            (CatalogAnswer::Index(objects), _) => self.fill_index(objects),
             (CatalogAnswer::Objects(objects), Some(index)) => {
                 let depth = self.nodes[index].depth + 1;
                 let children = objects
@@ -316,10 +326,97 @@ impl Objects {
         }
     }
 
-    /// Every branch nobody has opened yet, filled from one listing of the
-    /// whole database, so `/` finds what is under a closed branch too. What
-    /// is already loaded is kept: it may have columns open under it.
-    fn fill_all(&mut self, objects: &[DbObject]) {
+    /// The index landed: keep it, and refill every kind branch that was
+    /// opened before it came, so a branch loaded from the server and one
+    /// loaded from the index never disagree.
+    fn fill_index(&mut self, objects: &[DbObject]) {
+        self.index = Some(Index::new(objects));
+        // A refill changes how many rows there are, so the end is read anew.
+        let mut at = 0;
+        while at < self.nodes.len() {
+            if matches!(self.nodes[at].item, Item::Kind { .. }) && self.nodes[at].loaded {
+                self.fill_kind(at);
+            }
+            at += 1;
+        }
+        // A filter typed before it came is waiting for it.
+        if self.filtering || !self.filter.is_empty() {
+            self.fill_all();
+        }
+    }
+
+    /// A kind's objects from the index, under its row.
+    fn fill_kind(&mut self, at: usize) {
+        let (Item::Kind { schema, kind }, Some(index)) = (&self.nodes[at].item, &self.index) else {
+            return;
+        };
+        let depth = self.nodes[at].depth + 1;
+        let children = index
+            .objects()
+            .iter()
+            .filter(|object| object.kind == *kind && object.schema == *schema)
+            .map(|object| Node::new(Item::Object(object.clone()), depth))
+            .collect();
+        self.fill(at, children);
+    }
+
+    /// Put the cursor on `object`, opening the branches down to it and
+    /// dropping the filter that would hide it. `false` when there is no row
+    /// for it: no schema of that name, or a kind branch that would have to
+    /// ask the server, which is what an object that is not in the index
+    /// looks like.
+    pub fn reveal(&mut self, object: &DbObject) -> bool {
+        let Some(schema) = self
+            .nodes
+            .iter()
+            .position(|node| matches!(&node.item, Item::Schema(name) if *name == object.schema))
+        else {
+            return false;
+        };
+        if !self.nodes[schema].expanded {
+            self.open(schema);
+        }
+        let Some(kind) = (schema + 1..self.subtree_end(schema)).find(
+            |at| matches!(&self.nodes[*at].item, Item::Kind { kind, .. } if *kind == object.kind),
+        ) else {
+            return false;
+        };
+        if !self.nodes[kind].expanded && self.open(kind) != Hit::Moved {
+            self.nodes[kind].expanded = false;
+            return false;
+        }
+        let Some(row) = (kind + 1..self.subtree_end(kind)).find(|at| {
+            self.nodes[*at]
+                .item
+                .object()
+                .is_some_and(|found| found.name == object.name)
+        }) else {
+            return false;
+        };
+        self.filter.clear();
+        self.filtering = false;
+        self.cursor = row;
+        if let Some(at) = self.visible().iter().position(|index| *index == row) {
+            self.scroll_to(at);
+        }
+        true
+    }
+
+    /// Every branch nobody has opened yet, filled from the index, so `/`
+    /// finds what is under a closed branch too. What is already loaded is
+    /// kept: it may have columns open under it.
+    fn fill_all(&mut self) {
+        let whole = self
+            .nodes
+            .iter()
+            .all(|node| node.loaded || !matches!(node.item, Item::Schema(_) | Item::Kind { .. }));
+        if whole {
+            return;
+        }
+        let Some(index) = self.index.take() else {
+            return;
+        };
+        let objects = index.objects();
         let mut by_kind: BTreeMap<(&str, ObjectKind), Vec<&DbObject>> = BTreeMap::new();
         for object in objects {
             by_kind
@@ -368,6 +465,7 @@ impl Objects {
             }
         }
         self.nodes = nodes;
+        self.index = Some(index);
         if !self.filter.is_empty() {
             self.seek(0);
         }
@@ -406,18 +504,19 @@ impl Objects {
         }
     }
 
-    /// `/`: start typing a filter, and fetch every object for it to search
-    /// unless the whole tree is here already.
+    /// `/`: start typing a filter over every object of the connection,
+    /// which the index has. One still on its way fills the tree when it
+    /// lands; one that failed is asked for again.
     pub fn search(&mut self) -> Hit {
         self.filtering = true;
-        let whole = self
-            .nodes
-            .iter()
-            .all(|node| node.loaded || !matches!(node.item, Item::Schema(_) | Item::Kind { .. }));
-        if whole || self.searching || self.nodes.is_empty() {
+        if self.index.is_some() {
+            self.fill_all();
             return Hit::Moved;
         }
-        Hit::Load(CatalogRequest::AllObjects)
+        if self.indexing || self.nodes.is_empty() {
+            return Hit::Moved;
+        }
+        Hit::Load(CatalogRequest::Index)
     }
 
     /// The keys `/` takes for itself while it is being typed into.
@@ -581,6 +680,12 @@ impl Objects {
             self.fill(index, children);
             return Hit::Moved;
         }
+        // A kind's objects are in the index once it is here, so the server
+        // is only asked before that.
+        if self.index.is_some() && matches!(self.nodes[index].item, Item::Kind { .. }) {
+            self.fill_kind(index);
+            return Hit::Moved;
+        }
         match self.request(index) {
             Some(request) => Hit::Load(request),
             None => Hit::Moved,
@@ -655,6 +760,13 @@ impl Objects {
             self.fill(cursor, Vec::new());
             self.nodes[cursor].loaded = false;
             return self.open(cursor);
+        }
+        // A kind branch came from the index, so it is the index that is
+        // asked for again; the branch refills when it lands.
+        if self.index.is_some() && matches!(node.item, Item::Kind { .. }) {
+            self.fill(cursor, Vec::new());
+            self.nodes[cursor].expanded = true;
+            return Hit::Load(CatalogRequest::Index);
         }
         match self.request(cursor) {
             Some(request) => {

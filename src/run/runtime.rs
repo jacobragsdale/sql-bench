@@ -225,8 +225,11 @@ impl Runtime {
             app.apply(event);
             dirty = true;
             if connected {
-                // The tree is empty until something asks: this is the ask.
+                // The tree is empty until something asks: this is the ask —
+                // and the index behind it is what Ctrl-P searches and what
+                // every branch fills from without asking again.
                 self.load(app, tab, CatalogRequest::Schemas);
+                self.load(app, tab, CatalogRequest::Index);
             }
             if let Some(request) = self
                 .tabs

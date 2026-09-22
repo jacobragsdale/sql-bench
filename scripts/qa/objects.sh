@@ -428,32 +428,32 @@ END;
 EXIT
 SQL
 
-# The trace's own clock: the last frame before the catalog query that brought
-# the rows back and the first one after it — the key that opened the branch
-# to the branch on the screen.
-expand_ms() { # trace rows
-    awk -F'\t' -v want="rows=$2" '
-        $2 == "query" { for (i = 3; i <= NF; i++) if ($i == want) seen = 1; next }
-        $2 == "frame" { if (!seen) before = $1; else if (!after) after = $1 }
-        END { if (seen && after) print after - before; else print "?" }
+# A branch opens from the index without asking the server, so what a schema
+# of a thousand tables costs is the index: the last catalog query of the run,
+# every object of the connection in one, and its `total_ms`.
+index_ms() { # trace
+    awk -F'\t' '
+        $2 == "query" { for (i = 3; i <= NF; i++) if ($i ~ /^total_ms=/) { ms = $i; sub(/^total_ms=/, "", ms) } }
+        END { print (ms == "" ? "?" : ms) }
     ' "$1"
 }
 
-# Every draw after that query is a draw of the loaded branch, which is what
-# scrolling through a thousand rows costs.
-draws() { # trace rows -> p50 p95 max n
-    awk -F'\t' -v want="rows=$2" '
-        $2 == "query" { for (i = 3; i <= NF; i++) if ($i == want) seen = 1; next }
-        seen && $2 == "frame" { sub(/^draw_ms=/, "", $3); print $3 }
+# Every draw after the index is a draw of the tree it filled, which is what
+# opening the branch and scrolling through a thousand rows costs.
+draws() { # trace -> p50 p95 max n
+    awk -F'\t' '
+        $2 == "query" { n = 0; delete d; next }
+        $2 == "frame" { sub(/^draw_ms=/, "", $3); d[++n] = $3 }
+        END { for (i = 1; i <= n; i++) print d[i] }
     ' "$1" | sort -g |
         awk '{ a[NR] = $1 }
              END { if (NR == 0) { print "? ? ? 0"; exit }
                    printf "%s %s %s %d\n", a[int((NR + 1) / 2)], a[int((NR * 95 + 99) / 100)], a[NR], NR }'
 }
 
-# thousand <label> <tab key> <keys that open the branch> <rows> <last table>
+# thousand <label> <tab key> <keys that open the branch> <last table>
 thousand() {
-    local label=$1 tab=$2 open=$3 rows=$4 last=$5
+    local label=$1 tab=$2 open=$3 last=$4
     local keys=$work/$label-1000.keys key ms p50 p95 max n missing
 
     {
@@ -473,14 +473,14 @@ thousand() {
 
     replay "$label-1000" "$keys" || { bad "$label 1000 tables: the replay did not run"; return; }
 
-    ms=$(expand_ms "$work/$label-1000.trace" "$rows")
+    ms=$(index_ms "$work/$label-1000.trace")
     if [ "$ms" != "?" ] && [ "$ms" -lt 2000 ]; then
-        ok "$label 1000 tables: the branch opened in ${ms} ms (budget 2000)"
+        ok "$label 1000 tables: the index the branch opens from came back in ${ms} ms (budget 2000)"
     else
-        bad "$label 1000 tables: opening took ${ms} ms"
+        bad "$label 1000 tables: the index took ${ms} ms"
     fi
 
-    read -r p50 p95 max n <<<"$(draws "$work/$label-1000.trace" "$rows")"
+    read -r p50 p95 max n <<<"$(draws "$work/$label-1000.trace")"
     if [ "$n" -ge 100 ] && awk -v p="$p95" 'BEGIN { exit !(p < 5) }'; then
         ok "$label 1000 tables: $n draws scrolling, draw_ms p50 $p50 p95 $p95 max $max (budget 5)"
     else
@@ -496,8 +496,8 @@ thousand() {
 
 # SQL Server: qa1000 is the schema after bench and Tables the kind below it.
 # Oracle: BENCH is open already, and Tables is its first kind.
-thousand mssql 1 'G l j l' 1000 t1000
-thousand oracle 2 'g j l' 1007 QA_T1000
+thousand mssql 1 'G l j l' t1000
+thousand oracle 2 'g j l' QA_T1000
 
 ########################################################################
 # Back to the seed.

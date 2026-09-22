@@ -1475,3 +1475,70 @@ epics:
       kept stale text in the cell after a wide glyph (TestBackend does not blank it as a terminal
       does), which made CJK rows unreliable to expect on. The hand check in a real terminal and in
       tmux with mouse on is left to a person.'
+- id: E9
+  title: E9 Object index and finder
+  description: 'Ten databases with thousands of objects each are not browsed a branch at a time: every
+    connection is indexed once, and one key finds any object of any connection as its name is typed.
+
+    '
+  tasks:
+  - id: T9.1
+    tag: dev
+    title: T9.1 Index every connection on connect and find any object from anywhere with Ctrl-P
+    goal: 'A stored procedure''s name typed into the finder shows the procedure at once, whichever
+      connection holds it, and Enter opens the tree on it with its source in the results pane. Expanding
+      a kind in the tree never waits on the server once the index is in.
+
+      '
+    context: 'Depends on E6. The lazily loaded tree asked the server for every branch and `/` filtered
+      only what had been loaded, so nothing could be found without expanding its way to it. The index
+      is one catalog query per connection (`CatalogRequest::Index`, the same SQL the `objects`
+      subcommand runs with no schema and no kind), queued behind the schema list on connect and kept
+      in the tab''s `Objects` for the session.
+
+      '
+    scope:
+      in:
+      - 'src/db/catalog.rs: `CatalogRequest::Index` and `CatalogAnswer::Index`.'
+      - 'src/run/runtime.rs: the index is asked for right after the schemas on every connect.'
+      - 'src/app/objects.rs: the tree keeps the index; a kind''s branch fills from it without a load, `r`
+        on a kind asks for the index again and every branch from it refills when it lands; `reveal`
+        opens the branches down to an object and drops the filter; the title says `Objects · indexing…`
+        while it is on its way; the filter''s ancestor walk is one pass with a stack instead of a walk
+        back per match.'
+      - 'src/app/finder.rs: the finder over every tab''s index. Names are lower-cased once when the index
+        lands. A word is matched against the name, a word with a dot against schema.name, several words
+        all have to match; the name itself ranks first, then a prefix, a substring, a subsequence with
+        the fewest letters between; the best 200 are kept and the title says how many there were. Keys:
+        typing edits the query (the footer prompt''s keys), arrows/Ctrl-N/Ctrl-P/PageUp/PageDown move,
+        Enter goes to the object (its tab, focus on the tree, the source of anything with source or a
+        table''s columns in the results pane), Esc closes, Ctrl-Q still quits.'
+      - 'src/ui/mod.rs: the finder overlay, drawn over everything: `> query` then one row per match —
+        qualified name, kind, tab — the chosen one in the cursor colour.'
+      - 'Tests: rank order and word rules, cap and title; the tree opening from the index, `r` re-indexing,
+        a branch loaded before the index refilled after it; reveal; Ctrl-P taking every key, Enter''s
+        action and tab switch, Esc and Ctrl-Q; the overlay''s rows and cursor; the index landing into an
+        open finder and a disconnect emptying it. A release perf test: a finder keystroke to its frame
+        under the key-to-frame budget over 100,000 indexed objects. A finder section at the end of both
+        object replay scripts.'
+      out:
+      - Searching inside source text; a cache of the index or of source on disk between runs; column
+        names in the index.
+    acceptance:
+    - Ctrl-P, a few letters of a procedure''s name and Enter show its source, from any pane and any tab.
+    - A kind expands from the index with no catalog query once the index is in.
+    - A finder keystroke reaches its frame inside the 16 ms budget with 100,000 objects indexed.
+    - Both object replay scripts exit 0 against the local databases.
+    verify:
+    - cargo test --all-targets
+    - cargo test --release --test perf -- --ignored a_finder_keystroke
+    - SQL_BENCH_CONFIG=config.local.toml cargo run -- --replay scripts/replay/objects-mssql.keys --size
+      120x40 --frames-dir /tmp/sql-bench-frames
+    - SQL_BENCH_CONFIG=config.local.toml cargo run -- --replay scripts/replay/objects-oracle.keys --size
+      120x40 --frames-dir /tmp/sql-bench-frames
+    verified: true
+    note: 'built as T8.1 on a branch that forked before E8 (mouse) took that number, so its
+      commits (4192ff9, 7206fae, 21aeaaa) say [T8.1]; renumbered when merged. Unit, UI and perf tests green. Verified at the merge, 2026-09-22: both object replays exit 0 against
+      the local databases (finder sections included), the finder perf test p95 inside 16 ms, the
+      finder overlay wired into the mouse hit list (a click beside it closes it), and fill_index''s
+      refill loop fixed to reread the row count it changes.'

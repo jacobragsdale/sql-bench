@@ -15,6 +15,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
+use crate::app::finder::Finder;
 use crate::app::pointer::{Hits, Menu, Seam, Target, menu, thumb};
 use crate::app::prompt::Prompt;
 use crate::app::results::{INSPECT_WIDTH, Inspector, inspect_title};
@@ -125,6 +126,10 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) -> Hits {
     }
     if let Some(open) = app.shell.mouse.menu {
         render_menu(frame, area, open, theme, &mut hits);
+    }
+    // And the finder over everything: it takes every key while it is open.
+    if let Some(finder) = &app.shell.finder {
+        render_finder(frame, area, finder, app, theme, &mut hits);
     }
     hover(frame, app, theme, &hits);
     hits
@@ -564,44 +569,43 @@ fn cut(text: &str, budget: usize) -> String {
 
 const PROMPT: &str = " Export to: ";
 
-/// ` Export to: ` and the path being typed, the cursor painted the way the
-/// scratch pad's is — a `TestBackend` has no terminal cursor, so a prompt
-/// whose cursor were the real one could not be tested at all. Then Enter and
-/// Esc as buttons, while there is room for them.
+/// `label` and the line being typed, the cursor painted the way the scratch
+/// pad's is — a `TestBackend` has no terminal cursor, so a prompt whose
+/// cursor were the real one could not be tested at all.
+fn typed(prompt: &Prompt, label: &str, theme: &Theme) -> Vec<Span<'static>> {
+    let characters: Vec<char> = prompt.text.chars().collect();
+    vec![
+        Span::styled(label.to_owned(), theme.accent),
+        Span::raw(characters.iter().take(prompt.cursor).collect::<String>()),
+        Span::styled(
+            characters
+                .get(prompt.cursor)
+                .copied()
+                .unwrap_or(' ')
+                .to_string(),
+            theme.cursor,
+        ),
+        Span::raw(
+            characters
+                .iter()
+                .skip(prompt.cursor + 1)
+                .collect::<String>(),
+        ),
+    ]
+}
+
+/// ` Export to: ` and the path being typed, then Enter and Esc as buttons,
+/// while there is room for them.
 fn prompt_spans(
     prompt: &Prompt,
     focus: Focus,
     theme: &Theme,
     budget: usize,
 ) -> Vec<(Span<'static>, Option<Target>)> {
-    let characters: Vec<char> = prompt.text.chars().collect();
-    let mut parts = vec![
-        (Span::styled(PROMPT.to_owned(), theme.accent), None),
-        (
-            Span::raw(characters.iter().take(prompt.cursor).collect::<String>()),
-            None,
-        ),
-        (
-            Span::styled(
-                characters
-                    .get(prompt.cursor)
-                    .copied()
-                    .unwrap_or(' ')
-                    .to_string(),
-                theme.cursor,
-            ),
-            None,
-        ),
-        (
-            Span::raw(
-                characters
-                    .iter()
-                    .skip(prompt.cursor + 1)
-                    .collect::<String>(),
-            ),
-            None,
-        ),
-    ];
+    let mut parts: Vec<(Span<'static>, Option<Target>)> = typed(prompt, PROMPT, theme)
+        .into_iter()
+        .map(|span| (span, None))
+        .collect();
     let mut room = budget.saturating_sub(parts.iter().map(|(span, _)| span.width()).sum());
     // Dropped from the left, the way a pane's are: Cancel is the one to keep.
     let mut chips = Vec::new();
@@ -813,6 +817,82 @@ fn open_from(at: u16, size: u16, start: u16, end: u16) -> u16 {
             .saturating_sub(size)
             .clamp(start, end - size)
     }
+}
+
+/// How many match rows the finder shows at most: enough to scan, few enough
+/// that the query line stays near the middle of any supported screen.
+const FINDER_ROWS: u16 = 20;
+
+/// The finder over the layout: the query on the first line, the matches
+/// under it best first, the chosen one in the cursor colour. Each row is the
+/// qualified name, what kind of thing it is and which tab holds it.
+///
+/// ponytail: a click beside it closes it and one on it does nothing; rows
+/// that open what they name on a click would need a target of their own.
+fn render_finder(
+    frame: &mut Frame,
+    area: Rect,
+    finder: &Finder,
+    app: &App,
+    theme: &Theme,
+    hits: &mut Hits,
+) {
+    let width = area.width.saturating_sub(4).min(96);
+    let height = (FINDER_ROWS + 3).min(area.height.saturating_sub(2));
+    let overlay = centered(area, width, height);
+    let showing = usize::from(height.saturating_sub(3));
+    let matches = finder.matches();
+    let top = if finder.cursor >= showing {
+        finder.cursor + 1 - showing
+    } else {
+        0
+    };
+    let inner = usize::from(width.saturating_sub(4));
+    let mut lines = vec![Line::from(typed(&finder.query, "> ", theme))];
+    if matches.is_empty() {
+        let message = if finder.indexed() == 0 {
+            "nothing indexed yet: c connects a tab"
+        } else if finder.query.text.trim().is_empty() {
+            "type a name, or schema.name"
+        } else {
+            "no objects match"
+        };
+        lines.push(placeholder(message, theme));
+    }
+    // The name column is as wide as the widest name showing, so the kinds
+    // and the tabs line up down the list.
+    let name_width = matches
+        .iter()
+        .skip(top)
+        .take(showing)
+        .map(|found| found.object.schema.chars().count() + 1 + found.object.name.chars().count())
+        .max()
+        .unwrap_or(0)
+        .min(inner.saturating_sub(22));
+    for (at, found) in matches.iter().enumerate().skip(top).take(showing) {
+        let qualified = format!("{}.{}", found.object.schema, found.object.name);
+        let name = crate::app::results::cut(&qualified, name_width);
+        let tab = app.tabs.get(found.tab).map_or("", |tab| tab.name.as_str());
+        let text = format!(
+            "{name:<name_width$}  {:<9}  {tab}",
+            found.object.kind.as_str()
+        );
+        lines.push(Line::from(Span::styled(
+            crate::app::results::cut(&text, inner).into_owned(),
+            if at == finder.cursor {
+                theme.cursor
+            } else {
+                Style::default()
+            },
+        )));
+    }
+    frame.render_widget(Clear, overlay);
+    frame.render_widget(
+        Paragraph::new(lines).block(titled(&finder.title(), theme.accent, theme.accent)),
+        overlay,
+    );
+    hits.push(area, Target::Outside);
+    hits.push(overlay, Target::Overlay);
 }
 
 fn titled(title: &str, title_style: Style, border_style: Style) -> Block<'static> {

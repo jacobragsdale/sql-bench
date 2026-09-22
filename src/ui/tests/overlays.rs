@@ -1,7 +1,10 @@
 //! The screens that take the layout's place: help, too small, no config.
 
 use super::*;
-use crate::app::KEYS;
+use crate::app::tests::object;
+use crate::app::{KEYS, Tab};
+use crate::db::catalog::{CatalogAnswer, CatalogRequest, DbObject, ObjectKind};
+use ratatui::style::Color;
 
 /// The key column of the help for `focus`: the widest key it lists, and two
 /// spaces after it.
@@ -159,4 +162,111 @@ fn the_footer_hints_and_the_help_are_the_same_table() {
             }
         }
     }
+}
+
+/// Two tabs with an index each, so the finder has rows from both to draw.
+fn two_indexed() -> App {
+    let mut app = two_tabs();
+    let index = |tab: &mut Tab, objects: Vec<DbObject>| {
+        tab.objects
+            .answer(&CatalogRequest::Index, &Ok(CatalogAnswer::Index(objects)));
+    };
+    index(
+        &mut app.tabs[0],
+        vec![
+            object("dbo", "customers", ObjectKind::Table),
+            object("bench", "sp_customer_orders", ObjectKind::Procedure),
+            object("bench", "orders", ObjectKind::Table),
+        ],
+    );
+    index(
+        &mut app.tabs[1],
+        vec![object("BENCH", "CUSTOMERS", ObjectKind::Table)],
+    );
+    app
+}
+
+#[test]
+fn the_finder_lists_the_matches_with_their_kind_and_tab_and_marks_the_chosen_one() {
+    let mut app = two_indexed();
+    app.handle(Event::Key(key("Ctrl-P")));
+    let screen = text(&frame(120, 40, &app));
+    assert!(screen.contains("╭ Find · 4 objects ─"), "{screen}");
+    assert!(screen.contains("type a name, or schema.name"), "{screen}");
+
+    for character in "cust".chars() {
+        app.handle(Event::Key(key(&character.to_string())));
+    }
+    let terminal = frame(120, 40, &app);
+    let screen = text(&terminal);
+    assert!(screen.contains("╭ Find · 3 of 4 ─"), "{screen}");
+    assert!(screen.contains("> cust"), "{screen}");
+    // The name column is as wide as the widest name showing, so the kinds
+    // and the tabs line up.
+    let width = "bench.sp_customer_orders".len();
+    let rows = [
+        format!("{:<width$}  {:<9}  local-mssql", "dbo.customers", "table"),
+        format!(
+            "{:<width$}  {:<9}  local-oracle",
+            "BENCH.CUSTOMERS", "table"
+        ),
+        format!(
+            "{:<width$}  {:<9}  local-mssql",
+            "bench.sp_customer_orders", "procedure"
+        ),
+    ];
+    let at = (0..40)
+        .find(|y| line(&terminal, *y).contains("> cust"))
+        .expect("the query line");
+    for (offset, row) in rows.iter().enumerate() {
+        let y = at + 1 + offset as u16;
+        assert!(
+            line(&terminal, y).contains(row.trim_end()),
+            "row {y}: {:?}",
+            line(&terminal, y)
+        );
+    }
+    // A cell's colour is the reset colour where the style names none, and
+    // the cursor is a modifier alone.
+    let chosen = Theme::new(false).cursor.fg(Color::Reset);
+    let row = line(&terminal, at + 1);
+    let x = row
+        .find("dbo")
+        .map(|byte| row[..byte].chars().count())
+        .expect("the first row") as u16;
+    assert_eq!(
+        painted(&terminal, x, at + 1),
+        chosen,
+        "the top row is chosen"
+    );
+    assert_ne!(painted(&terminal, x, at + 2), chosen);
+
+    app.handle(Event::Key(key("Down")));
+    let terminal = frame(120, 40, &app);
+    assert_eq!(painted(&terminal, x, at + 2), chosen, "and Down moves it");
+
+    app.handle(Event::Key(key("Esc")));
+    assert!(!text(&frame(120, 40, &app)).contains("╭ Find"));
+}
+
+#[test]
+fn the_finder_says_when_there_is_nothing_indexed_and_when_nothing_matches() {
+    let mut app = two_tabs();
+    app.handle(Event::Key(key("Ctrl-P")));
+    let screen = text(&frame(120, 40, &app));
+    assert!(
+        screen.contains("╭ Find · nothing indexed yet ─"),
+        "{screen}"
+    );
+    assert!(
+        screen.contains("nothing indexed yet: c connects a tab"),
+        "{screen}"
+    );
+
+    let mut app = two_indexed();
+    app.handle(Event::Key(key("Ctrl-P")));
+    app.handle(Event::Key(key("z")));
+    let screen = text(&frame(120, 40, &app));
+    assert!(screen.contains("╭ Find · 0 of 4 ─"), "{screen}");
+    assert!(screen.contains("no objects match"), "{screen}");
 }

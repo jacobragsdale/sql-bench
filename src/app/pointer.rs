@@ -491,10 +491,13 @@ impl App {
                 }
             }
             Target::MenuItem(item) => return self.pick(item),
-            // The way Esc goes: the menu, the prompt, then the help, then
-            // the inspector, so a click beside one closes only the one on top.
+            // The way Esc goes: the finder, the menu, the prompt, then the
+            // help, then the inspector, so a click beside one closes only the
+            // one on top.
             Target::Outside => {
-                if self.shell.mouse.menu.is_some() {
+                if self.shell.finder.is_some() {
+                    self.shell.finder = None;
+                } else if self.shell.mouse.menu.is_some() {
                     self.shell.mouse.menu = None;
                 } else if self.shell.prompt.is_some() {
                     self.shell.prompt = None;

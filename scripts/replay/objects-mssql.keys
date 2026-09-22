@@ -65,4 +65,19 @@ wait busy
 expect Source · bench.sp_customer_orders
 expect PROCEDURE bench.sp_customer_orders
 frame objects-mssql
+
+# Ctrl-P: every object of the connection, found as its name is typed —
+# the index came in with the connection, so nothing is loaded here — and
+# Enter opens the tree on it with its source in the results pane.
+key Ctrl-P
+expect ╭ Find · 
+type mark_ship
+expect bench.sp_mark_shipped
+expect procedure
+key Enter
+expect-not ╭ Find
+wait busy
+expect Source · bench.sp_mark_shipped
+expect PROCEDURE bench.sp_mark_shipped
+frame objects-mssql-found
 key Ctrl-Q
