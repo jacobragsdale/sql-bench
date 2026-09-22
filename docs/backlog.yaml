@@ -1134,3 +1134,281 @@ epics:
     verify:
     - scripts/qa.sh
     - gh run list --repo jacobragsdale/sql-bench --limit 1
+- id: E8
+  title: E8 Mouse first
+  description: |
+    Make sql-bench work like a desktop GUI: every element on screen can be clicked to do what it
+    looks like it does, and the keyboard stays a complete second way in. ticket-tui is the model:
+    a hit list built each frame, a click that fires on release and acts on the pressed target, a
+    wheel that scrolls whatever is under the pointer, and overlays that swallow clicks outside them.
+    The architecture every ticket builds on:
+    1. ui::render(frame, &App, &Theme) -> Hits. Hits is Vec<(Rect, Target)> in paint order, and
+       Hits::at(pos) returns the last region pushed that contains pos. There are no layers: every
+       overlay pushes a full-frame Target::Outside first, so no click reaches the panes under it.
+       The Driver keeps the hits from its last draw (|frame| self.hits = ui::render(..)). No
+       #[must_use] on render or Hits, because CI runs with -D warnings.
+    2. Target, Hits and the gesture state live in src/app/pointer.rs. A Target holds indexes and
+       the window it was drawn with (top, left), never references. The Rect travels with it.
+    3. App::pointer(&mut self, mouse: MouseEvent, now: Instant, hits: &Hits) -> Vec<Action>. The
+       Driver routes Event::Mouse there and every other event to App::handle. now comes from the
+       run layer, the way settle(now) gets it, so the app still reads no clock.
+    4. Gestures: a click fires on Up, on the pressed target, only if the pointer never left the
+       pressed spot. A double-click is a second click on the same target and row within 400 ms.
+       The wheel scrolls the region under the pointer by 3 and does not change focus. A
+       horizontal wheel scrolls grid columns. A right-click does what a left click does, then
+       opens the context menu. A drag selects on pad text, resizes on a seam, scrolls on a thumb,
+       and does nothing anywhere else. A click anywhere in a pane focuses it.
+    5. Target::Button { pane, key } focuses pane, then runs App::key(key). Every button, chip,
+       placeholder, help row, scrollbar track and menu item is one, so every mouse action is a
+       KEYS row. parse_key moves from run/replay.rs into the app as key_named.
+    6. No view jumps. at_row and scroll_to move the scroll hint once the row is PAGE or more
+       below it, so click functions set the hint from the target's (top, left) and set the
+       selection directly. The wheel copies the target's top, moves it by 3, then pulls the
+       selection along so it stays in view (vim's Ctrl-E). Mark it ponytail: truly free
+       scrolling needs viewport heights in the app.
+    7. Terminal: EnableMouseCapture after try_init and in claim_terminal. DisableMouseCapture in
+       release_terminal before ratatui::restore(). A panic unwinds through Restore, so that one
+       place covers it. Down only records the press and marks nothing dirty. A Moved event marks
+       the frame dirty only if hits.spot(old) != hits.spot(new). A mouse event that arrives after
+       another event in the same batch changed the screen is held (Driver.held) for the next turn,
+       so it is resolved against the new frame.
+    8. Hover: the app stores only shell.mouse.pointer. At the end of render, the ui restyles
+       hits.at(pointer) with theme.hover, so what lights up is exactly what can be clicked. All
+       the new mouse state sits in one shell.mouse field, so tests reset it in one line.
+    9. Replay: <where> is "X Y" (0-based, as frames print) or "on <substring>" (the first cell of
+       the text's first occurrence on the current frame, found cell by cell). The verbs are click,
+       double-click, right-click, hover, scroll up|down|left|right, and drag X Y X Y.
+    The full plan, with file and line references, is /home/jacob/.claude/plans/nested-weaving-allen.md.
+  tasks:
+  - id: T8.1
+    tag: dev
+    title: 'T8.1 Pointer plumbing: capture, hit list, gestures, replay verbs'
+    goal: |
+      Mouse capture on, a hit list from every frame, App::pointer with press, release,
+      double-click, wheel and drag dispatch. Clicking a tab selects it, clicking a pane focuses it,
+      and replay scripts can click.
+    context: |
+      Implements points 1 to 9 of the E8 description, which every later ticket extends. Read that
+      description and the plan file first. The call sites of ui::render that change are
+      run/mod.rs:378, ui/tests/mod.rs:27, ui/tests/results.rs:213 and :217, and tests/perf.rs:149.
+      Hits is pub, because tests/perf.rs is outside the crate.
+    scope:
+      in:
+      - src/app/pointer.rs with Target, Hits (at, spot), the shell.mouse state (press, last click, pointer) and App::pointer.
+      - ui::render returns Hits. Tab, pane, help and inspector regions are pushed. Help and inspector push Outside first and an Overlay body.
+      - Clicking a tab selects it. Clicking a pane focuses it. The wheel scrolls help and the inspector. A click outside an overlay closes it and reaches nothing.
+      - 'Run layer: capture on and off at startup, claim_terminal and release_terminal. The Driver keeps hits and routes Event::Mouse to App::pointer with Instant::now(). Down marks nothing dirty; Moved marks it dirty only when the spot changes; a mouse event after a screen-changing event in the same batch is held for the next turn. Update the exhaustion doc comment at run/mod.rs:218-222.'
+      - theme.hover, painted over hits.at(pointer) at the end of render.
+      - 'Replay verbs: click, double-click, right-click, hover, scroll up|down|left|right <where>, and drag X Y X Y. <where> is "X Y" or "on <substring>". Parser tests for each verb and each bad form, and rows in the DESIGN.md Commands table.'
+      - parse_key becomes pub(crate) key_named in the app. Replay and app/tests.rs:115 use it, so there is one key parser.
+      out:
+      - Buttons, chips, tree, grid and pad clicks (T8.2 to T8.4).
+    acceptance:
+    - A run test sends 1,000 Moved events over one cell and gets at most one extra frame. A press without a release draws nothing.
+    - A key that changes the layout, followed by a click in the same batch, resolves the click against the new frame.
+    - With help open, a click on the pane behind it closes the help and leaves focus where it was.
+    - A replay script with `click on <tab name>` switches tabs (asserted with expect on the Objects pane or the footer).
+    - scripts/qa/panic-restore.sh and scripts/qa/stdin-eof.sh also check that \e[?1000l is written before the final \e[?1049l.
+    - One key parser in the crate.
+    verify:
+    - cargo fmt --all -- --check
+    - cargo clippy --all-targets --all-features -- -D warnings
+    - cargo test --all-targets
+    - scripts/qa.sh
+  - id: T8.2
+    tag: dev
+    title: T8.2 Buttons, chips and hover everywhere
+    goal: |
+      Every action a pane offers has a button you can see and click, and every button is exactly
+      its key.
+    context: |
+      Depends on T8.1. A button is Target::Button { pane, key } and clicking it runs App::key. Draw
+      a button only where its key does what the button shows (see scope). App derives PartialEq,
+      which is what makes the parity test cheap.
+    scope:
+      in:
+      - A buttons() helper draws right-aligned chips over a pane's top border, measured with unicode-width. When the title needs the room, chips are dropped from the left. It pushes the Button hits.
+      - 'Scratch: Run (Ctrl-R), All (F5), Editor (Ctrl-E). While a query runs: Stop (Esc).'
+      - 'Results: previous and next set ([ ]) when there is more than one set and no source view; +10k (m) when truncated; Export (e); Cancel (Esc) while running.'
+      - 'Objects: Filter (/), Reload (r), and a clear-filter x (Esc) while a filter is set and no query runs.'
+      - 'Placeholders become buttons: Connect (c), Retry (c), Clear filter (Esc).'
+      - '? Help at the right end of the tab bar.'
+      - 'Footer: every hint that names one key is a chip (not Arrows, 1-9 or Shift-Arrows). The connection state on the right is a c/C toggle owned by the Objects pane. An error gets an x (hidden while a query runs or a filter is set, since Esc would do something else). In the export prompt a click places the cursor (Target::PromptText), and there are Export (Enter) and Cancel (Esc) chips.'
+      - Help gets an x, and each help row is a button that closes the help and then presses its key. The inspector gets an x.
+      - Any click in Objects first ends filter typing, the way Enter does.
+      out:
+      - Context menus (T8.8).
+    acceptance:
+    - 'A table-driven parity test over the idle, running, truncated, multi-set, filtered, failed, source-view and prompt states. For every Button drawn it clones the app, clicks the button on one copy and presses the key on the other, then asserts equal apps (shell.mouse reset), equal actions, and that the click did something (actions not empty, or the app changed).'
+    - Hover paints a button in theme.hover (checked with the painted() style helper). Nothing under an open overlay lights up.
+    - At 60x15 every pane title is still readable. Buttons that do not fit are dropped, not overlapped.
+    verify:
+    - cargo test --all-targets
+    - scripts/qa.sh
+  - id: T8.3
+    tag: dev
+    title: T8.3 Click, double-click and wheel in the tree and the grid
+    goal: |
+      The object tree and the result grid behave like a desktop tree view and data grid.
+    context: |
+      Depends on T8.2. Point 6 of the E8 description is the trap here: click and wheel functions
+      set the scroll hint from the target's window and set the selection directly, never through
+      at_row, at or scroll_to.
+    scope:
+      in:
+      - 'Objects: a click moves the cursor to the row; a click on the glyph toggles it (which may load); a double-click is Enter; the wheel scrolls.'
+      - 'Results: a click selects the cell; a double-click opens the inspector; a header click selects the column; the wheel scrolls rows; the horizontal wheel (and Shift+wheel) scrolls columns; the source view scrolls with the wheel.'
+      - Public click and wheel functions on Objects and Results that take the drawn window.
+      - Cells and Header targets carry left, so clicking a column that is only partly visible does not shift the view.
+      out:
+      - Sorting (T8.5).
+    acceptance:
+    - On a 500-row filled() grid at 120x40 with rows 31 to 50 showing, clicking row 50 leaves the view where it was (whole-line asserts).
+    - Clicking a partly visible column does not shift the view.
+    - Double-clicking a table in the tree drops its select into the pad, and double-clicking a procedure shows its source, the same as Enter.
+    - Tests use the horizontal wheel, not Shift+wheel, which terminals keep for themselves.
+    verify:
+    - cargo test --all-targets
+  - id: T8.4
+    tag: dev
+    title: T8.4 The scratch pad takes the mouse
+    goal: |
+      Click to place the cursor, drag to select, double-click a word, and scroll with the wheel,
+      as in any editor.
+    context: |
+      Depends on T8.2 (may run alongside T8.3). The pad works its view out from the cursor alone
+      (scratch.rs:220 ponytail), so a click would move the view. Give it a stored scroll hint that
+      every cursor change keeps clamped.
+    scope:
+      in:
+      - A stored scroll hint in Scratch. window() uses it, clamped so the cursor is in view, and every cursor change keeps it clamped. Retire the ponytail at scratch.rs:220.
+      - A click places the cursor (the column clamped to the line; a click in the gutter goes to column 0).
+      - A drag selects, anchored at the press. Shift+click extends the selection. A double-click selects the word.
+      - The wheel scrolls 3 lines and pulls the cursor along. It is based on the drawn window, not on PAGE, which is taller than the pad at 80x24.
+      - Reuse move_to(to, extend).
+      out:
+      - Triple-click, block selection.
+    acceptance:
+    - Clicking the first visible line of a scrolled pad does not move the view (whole-line asserts).
+    - A drag from one line to another selects the text between, and Ctrl-C copies exactly that.
+    - A double-click on a word selects the word.
+    verify:
+    - cargo test --all-targets
+  - id: T8.5
+    tag: dev
+    title: T8.5 Sort the grid by a column
+    goal: |
+      Click a header, or press o, to sort the fetched rows by that column: ascending, descending,
+      then the original order.
+    context: |
+      Depends on T8.3. rows is a pub Vec<Vec<Cell>>. start() clears the sets on a new run and on m,
+      so a sort stored per Set resets by itself. Export and y/Y read rows(), so they get the order
+      shown for free.
+    scope:
+      in:
+      - The key o in Results, "sort by the column", added to KEYS and to the README's Results table (the README key test fails otherwise).
+      - A header click selects the column, then presses o.
+      - Stable in-place sort with an original-order permutation kept in the Set. The arrow (up or down) replaces the header's last character.
+      - Nulls last. Numbers compare as numbers, including Decimal(String) parsed to f64. Everything else compares as text.
+      - Refused, with a status message, while the query is running.
+      - A sort trace line with rows and ms.
+      out:
+      - Server-side ORDER BY, multi-column sort.
+    acceptance:
+    - A 3-state cycle test on mixed numbers, decimals, text and nulls.
+    - The 100,000-row sort time is measured and written to docs/PERF.md.
+    verify:
+    - cargo test --all-targets
+    - scripts/perf.sh
+  - id: T8.6
+    tag: dev
+    title: T8.6 Scrollbars
+    goal: |
+      The tree, the grid, the pad and the source view show where you are, and can be scrolled by
+      their scrollbar.
+    context: |
+      Depends on T8.4 and T8.5. One pure thumb function for both painting and dragging, so what is
+      drawn is what is hit.
+    scope:
+      in:
+      - thumb(offset, content, viewport, track) -> Range<u16>, painted over the pane's right border only when there is more content than fits.
+      - Clicking the track above or below the thumb is a PageUp or PageDown Button for that pane.
+      - Dragging the thumb sets the offset in proportion and pulls the selection along.
+      out:
+      - A horizontal scrollbar.
+    acceptance:
+    - Thumb position tests for the top, middle and bottom of the content.
+    - Dragging the thumb to the bottom shows the last row.
+    - A track click equals PageDown (parity test).
+    verify:
+    - cargo test --all-targets
+  - id: T8.7
+    tag: dev
+    title: T8.7 Drag the borders between panes
+    goal: |
+      Resize Objects against the right column, and Scratch against Results, by dragging the border
+      between them.
+    context: |
+      Depends on T8.6. The layout at ui/mod.rs:73-76 uses fixed 30% and 40%. Objects' right border
+      carries its scrollbar, so the vertical seam is the left border of the right-hand panes.
+    scope:
+      in:
+      - shell.split (objects 30, scratch 40, as percentages) with a hand-written Default. The layout reads it.
+      - Seam targets on the right panes' left border and on Scratch's bottom border. Results' title buttons are pushed later, so they stay clickable.
+      - A drag is clamped to Objects >= 20 columns, the right column >= 20, and Scratch and Results >= 3 rows each. The seam is painted in accent while hovered or dragged. A double-click resets it.
+      - Session only, marked ponytail.
+      out:
+      - Saving the split between runs.
+    acceptance:
+    - Dragging each seam moves the pane borders (checked with corners()).
+    - The clamps hold at 60x15.
+    - Double-clicking a seam restores 30/40.
+    verify:
+    - cargo test --all-targets
+  - id: T8.8
+    tag: dev
+    title: T8.8 Right-click context menus
+    goal: |
+      Right-click a tree row, a grid cell or the pad for a menu of that pane's actions.
+    context: |
+      Depends on T8.7. The menu is built from KEYS, so it cannot drift from the keys. Look labels up
+      through keys_for(pane), because KEYS repeats Enter, y and others across panes.
+    scope:
+      in:
+      - 'A MENU table naming KEYS rows. Objects: Enter, s, i, y, r, /, Space. Results: Enter, y, Y, o, e, m, [, ]. Scratch: Ctrl-R, F5, Ctrl-C, Ctrl-Z, Ctrl-E.'
+      - A right-click first selects what is under the pointer (in the pad, a right-click inside the selection keeps it), then opens shell.mouse.menu at the pointer, flipped or clamped to stay on screen.
+      - Each entry shows the action on the left and its key on the right. Items are MenuItem targets. The menu pushes Outside first.
+      - While open, the menu takes every key. Up/Down/j/k move, Enter picks, Esc closes.
+      out:
+      - A key that opens the menu.
+    acceptance:
+    - A test checks that every MENU row is a KEYS row for its pane.
+    - A test checks that picking each item equals pressing its key (the T8.2 parity pattern).
+    - A right-click near the bottom-right corner keeps the menu on screen.
+    verify:
+    - cargo test --all-targets
+  - id: T8.9
+    tag: qa
+    title: 'T8.9 QA: mouse verification, docs and budgets'
+    goal: |
+      Every gesture is proven headlessly and by hand, documented, and within budget.
+    context: |
+      Depends on every other E8 ticket.
+    scope:
+      in:
+      - scripts/replay/qa/mouse.keys uses every gesture against the local databases. It is added to the qa.sh CASES at 120x40 and 80x24.
+      - README gets a mouse-first opening line and a Mouse table headed "| Gesture | Does |" (not "| Key | Does |"), plus a note that Shift+drag uses the terminal's own selection.
+      - DESIGN.md gets a Mouse section, and its Terminal restore section is updated.
+      - perf.sh is rerun and the PERF.md budgets block updated. Draw cost stays flat against rows fetched.
+      - A fresh-clone check, as in T7.3.
+      - A hand check in a real terminal and inside tmux with mouse on. Ctrl-E hands the terminal to $EDITOR with capture off and takes it back with capture on.
+      - Every E8 ticket's acceptance is reviewed and marked verified with a note.
+      out:
+      - OSC 22 pointer shapes.
+    acceptance:
+    - qa.sh passes, including mouse.keys at both sizes.
+    - perf.sh passes all budgets.
+    - 'Every E8 task has verified: true.'
+    verify:
+    - scripts/qa.sh
+    - scripts/perf.sh
