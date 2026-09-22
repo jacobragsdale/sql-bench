@@ -21,7 +21,8 @@ pub struct Theme {
     /// The cell the scratch pad's cursor is on. A `TestBackend` has no
     /// terminal cursor, so this is what makes it visible — and assertable.
     pub cursor: Style,
-    /// What a Shift-arrow selection is painted with.
+    /// What a selection is painted with: the pad's text, and the grid's
+    /// range of cells.
     pub selection: Style,
     /// The lines of the statement a driver said no to, until the next edit.
     pub flagged: Style,

@@ -27,7 +27,7 @@ pub const MENU: [(Focus, &[&str]); 3] = [
     (Focus::Objects, &["Enter", "s", "i", "y", "r", "/", "Space"]),
     (
         Focus::Results,
-        &["Enter", "y", "Y", "o", "e", "m", "[", "]"],
+        &["Enter", "y", "Y", "v", "o", "e", "m", "[", "]"],
     ),
     (
         Focus::Scratch,
@@ -371,15 +371,40 @@ impl App {
                 });
                 // The cursor goes down with the button, so a drag has an
                 // anchor to select from.
-                if let Some(region @ (_, Target::Pad { .. })) = hits.at(position) {
-                    self.pad_point(
-                        region,
-                        position,
-                        mouse.modifiers.contains(KeyModifiers::SHIFT),
-                        button == MouseButton::Right,
-                    );
+                let shift = mouse.modifiers.contains(KeyModifiers::SHIFT);
+                match (hits.at(position), spot) {
+                    (Some(region @ (_, Target::Pad { .. })), _) => {
+                        self.pad_point(region, position, shift, button == MouseButton::Right);
+                    }
+                    // Shift-click on a cell is done on the way down, and the
+                    // release is no click to undo it.
+                    (
+                        _,
+                        Some(
+                            spot @ Spot {
+                                target: Target::Cells { column, top, left },
+                                ..
+                            },
+                        ),
+                    ) if shift && button == MouseButton::Left => {
+                        self.shell.mouse.press = None;
+                        self.shell.focus = Focus::Results;
+                        if let Some(tab) = self.tabs.get_mut(self.shell.active_tab) {
+                            tab.results
+                                .extend(top + usize::from(spot.row), column, (top, left));
+                        }
+                    }
+                    _ => {}
                 }
                 Vec::new()
+            }
+            MouseEventKind::Drag(MouseButton::Left)
+                if self.shell.mouse.press.is_some_and(|press| {
+                    press.button == MouseButton::Left
+                        && matches!(press.spot.target, Target::Cells { .. })
+                }) =>
+            {
+                self.cells_drag(spot)
             }
             MouseEventKind::Drag(MouseButton::Left)
                 if self.shell.mouse.press.is_some_and(|press| {
@@ -400,8 +425,8 @@ impl App {
             MouseEventKind::Drag(MouseButton::Left) if self.shell.mouse.seam().is_some() => {
                 self.seam_drag(position)
             }
-            // A drag off anything but the pad's text, a thumb or a seam does
-            // nothing.
+            // A drag off anything but the pad's text, the grid's cells, a
+            // thumb or a seam does nothing.
             MouseEventKind::Drag(_) | MouseEventKind::Moved => {
                 if let Some(press) = self.shell.mouse.press.as_mut() {
                     press.left |= spot != Some(press.spot);
@@ -533,8 +558,11 @@ impl App {
                 tab.objects.click(top, row);
                 Focus::Objects
             }
+            // Inside the range it stays, so the menu's copy copies it.
             (Target::Cells { column, top, left }, Some(tab)) => {
-                tab.results.click(top + row, column, (top, left));
+                if !tab.results.in_selection(top + row, column) {
+                    tab.results.click(top + row, column, (top, left));
+                }
                 Focus::Results
             }
             (Target::Header { column, left }, Some(tab)) => {
@@ -677,6 +705,40 @@ impl App {
             .find(|(_, target)| matches!(target, Target::Pad { .. }))
         {
             self.pad_point(region, position, true, false);
+        }
+        Vec::new()
+    }
+
+    /// A press on a cell dragged: the range from the cell it went down on to
+    /// the one under the pointer.
+    ///
+    /// ponytail: off the grid the range stays where it last was, with no
+    /// scrolling to follow the pointer past an edge; the keys extend it
+    /// further, and a drag past the edge could step the window the way the
+    /// pad's does if anyone wants that.
+    fn cells_drag(&mut self, spot: Option<Spot>) -> Vec<Action> {
+        let Some(press) = self.shell.mouse.press.as_mut() else {
+            return Vec::new();
+        };
+        press.left = true;
+        let Target::Cells {
+            column: from,
+            top: from_top,
+            ..
+        } = press.spot.target
+        else {
+            return Vec::new();
+        };
+        let from = (from_top + usize::from(press.spot.row), from);
+        self.shell.focus = Focus::Results;
+        if let Some(Spot {
+            target: Target::Cells { column, top, left },
+            row,
+        }) = spot
+            && let Some(tab) = self.tabs.get_mut(self.shell.active_tab)
+        {
+            tab.results
+                .drag(from, (top + usize::from(row), column), (top, left));
         }
         Vec::new()
     }

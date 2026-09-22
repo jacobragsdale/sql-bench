@@ -12,14 +12,14 @@
 
 use std::borrow::Cow;
 use std::cmp::Ordering;
-use std::ops::Range;
+use std::ops::{Range, RangeInclusive};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::db::catalog::ColumnInfo;
 use crate::db::model::{Cell, Column, DbError, QueryEvent};
-use crate::export::width as width_of;
+use crate::export::{tsv_row, width as width_of};
 
 /// The widest a column is drawn, however long its values are. A column of
 /// 2 kB payloads would otherwise push every other column off the screen.
@@ -44,9 +44,9 @@ pub enum Hit {
     MoreRows,
     /// Enter: open the whole of the selected cell.
     Inspect,
-    /// `y`: the selected cell, as text.
+    /// `y` or Ctrl-C: the range, or the cell under the cursor.
     CopyCell,
-    /// `Y`: the whole row, tab-separated.
+    /// `Y`: the rows the range spans, whole, under their column names.
     CopyRow,
     /// `e`: ask where to write the result set.
     Export,
@@ -218,6 +218,11 @@ pub struct Results {
     pub status: Status,
     /// The cell cursor: (row, column) of the set on screen.
     selected: (usize, usize),
+    /// The other corner of the range selected, the cursor being this one.
+    anchor: Option<(usize, usize)>,
+    /// `v` is on: every move extends the range, rather than only a shifted
+    /// arrow.
+    visual: bool,
     /// Where the window starts. The pane's height is not known here, so this
     /// is a hint [`Results::window`] clamps against the real one.
     scroll: (usize, usize),
@@ -255,6 +260,7 @@ impl Results {
         self.rows_affected = None;
         self.source = None;
         self.label = None;
+        self.clear_selection();
         if !keep_view {
             self.selected = (0, 0);
             self.scroll = (0, 0);
@@ -299,6 +305,7 @@ impl Results {
                 // The newest set is the one on screen: a statement's last
                 // result is what a person asked the statement for.
                 self.shown = self.sets.len() - 1;
+                self.clear_selection();
             }
             QueryEvent::Rows(batch) => self.keep(batch),
             QueryEvent::RowsAffected(rows) => {
@@ -362,14 +369,38 @@ impl Results {
     }
 
     /// One key of the results pane.
+    ///
+    /// A move extends the range when it is a shifted arrow or `v` is on, and
+    /// any other move drops it: the range is the rectangle between where it
+    /// started and the cursor.
     pub fn key(&mut self, key: KeyEvent) -> Hit {
         if self.source.is_some() {
             return self.source_key(key);
         }
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        let arrow = matches!(
+            key.code,
+            KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right
+        );
+        let moves = arrow
+            || matches!(
+                key.code,
+                KeyCode::Char('j' | 'k' | 'h' | 'l' | 'g' | 'G' | '0' | '$')
+                    | KeyCode::PageUp
+                    | KeyCode::PageDown
+            )
+            || (control && matches!(key.code, KeyCode::Char('d' | 'D' | 'u' | 'U')));
+        if moves {
+            if self.visual || (arrow && key.modifiers.contains(KeyModifiers::SHIFT)) {
+                self.anchor.get_or_insert(self.selected);
+            } else {
+                self.anchor = None;
+            }
+        }
         #[allow(clippy::cast_possible_wrap)]
         let page = PAGE as isize;
         match key.code {
+            KeyCode::Char('c' | 'C') if control => Hit::CopyCell,
             KeyCode::Char('d' | 'D') if control => self.by_rows(page / 2),
             KeyCode::Char('u' | 'U') if control => self.by_rows(-page / 2),
             KeyCode::Char('j') | KeyCode::Down => self.by_rows(1),
@@ -390,8 +421,103 @@ impl Results {
             KeyCode::Char('Y') => Hit::CopyRow,
             KeyCode::Char('e') => Hit::Export,
             KeyCode::Char('o') => Hit::Sort,
+            KeyCode::Char('v') => {
+                self.visual = !self.visual;
+                self.anchor = self.visual.then_some(self.selected);
+                Hit::Moved
+            }
             _ => Hit::Ignored,
         }
+    }
+
+    /// The range drops, and `v` with it. Whether there was one, so Esc
+    /// knows it had something to do.
+    pub fn clear_selection(&mut self) -> bool {
+        self.visual = false;
+        self.anchor.take().is_some()
+    }
+
+    /// The rows and the columns of the range, clamped to the set on screen.
+    /// [`None`] without one.
+    #[must_use]
+    pub fn selection(&self) -> Option<(RangeInclusive<usize>, RangeInclusive<usize>)> {
+        let (row, column) = self.anchor?;
+        let last_row = self.rows().len().checked_sub(1)?;
+        let last_column = self.columns().len().checked_sub(1)?;
+        let (to_row, to_column) = self.selected;
+        let rows = row.min(to_row).min(last_row)..=row.max(to_row).min(last_row);
+        let columns =
+            column.min(to_column).min(last_column)..=column.max(to_column).min(last_column);
+        Some((rows, columns))
+    }
+
+    /// Whether (`row`, `column`) is in the range.
+    #[must_use]
+    pub fn in_selection(&self, row: usize, column: usize) -> bool {
+        self.selection()
+            .is_some_and(|(rows, columns)| rows.contains(&row) && columns.contains(&column))
+    }
+
+    /// The range as tab-separated lines, quoted where a value would split a
+    /// cell, and how many cells that is. [`None`] for no range or a range of
+    /// one cell, which `y` copies as it is.
+    #[must_use]
+    pub fn selection_text(&self) -> Option<(String, usize)> {
+        let (rows, columns) = self.selection()?;
+        let count = rows.clone().count() * columns.clone().count();
+        if count < 2 {
+            return None;
+        }
+        let mut text = String::new();
+        for row in &self.rows()[rows] {
+            tsv_row(
+                &mut text,
+                columns
+                    .clone()
+                    .map(|column| row.get(column).map_or(Cow::Borrowed(""), Cell::display)),
+            );
+        }
+        Some((text, count))
+    }
+
+    /// Every column of the rows the range spans — or of the cursor's row —
+    /// under a line of the column names, and how many rows that is.
+    #[must_use]
+    pub fn rows_text(&self) -> Option<(String, usize)> {
+        let rows = match self.selection() {
+            Some((rows, _)) => rows,
+            None if self.selected.0 < self.rows().len() => self.selected.0..=self.selected.0,
+            None => return None,
+        };
+        let mut text = String::new();
+        tsv_row(
+            &mut text,
+            self.columns().iter().map(|column| column.name.as_str()),
+        );
+        let width = self.columns().len();
+        let count = rows.clone().count();
+        for row in &self.rows()[rows] {
+            tsv_row(
+                &mut text,
+                (0..width).map(|column| row.get(column).map_or(Cow::Borrowed(""), Cell::display)),
+            );
+        }
+        Some((text, count))
+    }
+
+    /// Press on a cell at `from` and drag to `to`, in a window drawn from
+    /// `(top, left)`: the range between them, the cursor at `to`.
+    pub fn drag(&mut self, from: (usize, usize), to: (usize, usize), window: (usize, usize)) {
+        if self.click(to.0, to.1, window) {
+            self.anchor = Some(from);
+        }
+    }
+
+    /// Shift-click: the range from the cursor, or from where one already
+    /// started, to the cell clicked.
+    pub fn extend(&mut self, row: usize, column: usize, window: (usize, usize)) {
+        let from = self.anchor.unwrap_or(self.selected);
+        self.drag(from, (row, column), window);
     }
 
     fn by_rows(&mut self, delta: isize) -> Hit {
@@ -433,6 +559,7 @@ impl Results {
         if row >= self.rows().len() || column >= self.columns().len() {
             return false;
         }
+        self.clear_selection();
         self.selected = (row, column);
         self.scroll = (top, left);
         true
@@ -500,6 +627,7 @@ impl Results {
     /// the rows came in. The cursor keeps its row number, not its row. How
     /// many rows were put in order.
     pub fn sort(&mut self) -> usize {
+        self.clear_selection();
         let column = self.selected.1;
         let Some(set) = self.sets.get_mut(self.shown) else {
             return 0;
@@ -523,6 +651,7 @@ impl Results {
         }
         let count = self.sets.len();
         self.shown = (self.shown + count).saturating_add_signed(delta) % count;
+        self.clear_selection();
         self.selected = (0, 0);
         self.scroll = (0, 0);
         Hit::Moved
@@ -569,21 +698,6 @@ impl Results {
     #[must_use]
     pub fn column(&self) -> Option<&Column> {
         self.columns().get(self.selected.1)
-    }
-
-    /// The row the cursor is on, tab-separated — which is what a spreadsheet
-    /// pastes into columns. A NULL is nothing, the way an export writes it.
-    #[must_use]
-    pub fn row_text(&self) -> Option<String> {
-        let row = self.rows().get(self.selected.0)?;
-        let mut text = String::new();
-        for (index, cell) in row.iter().enumerate() {
-            if index > 0 {
-                text.push('\t');
-            }
-            text.push_str(&cell.display());
-        }
-        Some(text)
     }
 
     #[must_use]
@@ -648,6 +762,18 @@ impl Results {
         if let Some(source) = &self.source {
             return format!("Source · {} · {} lines", source.title, source.lines.len());
         }
+        let title = self.run_title();
+        match self.selection() {
+            Some((rows, columns)) => format!(
+                "{title} · {}×{} selected",
+                grouped(rows.count()),
+                grouped(columns.count())
+            ),
+            None => title,
+        }
+    }
+
+    fn run_title(&self) -> String {
         let set = if self.sets.len() > 1 {
             format!(" · set {}/{}", self.shown(), self.sets.len())
         } else {
@@ -798,6 +924,7 @@ impl Results {
             KeyCode::PageUp => by(source.scroll, -page),
             KeyCode::Char('g') => 0,
             KeyCode::Char('G') => last,
+            KeyCode::Char('c' | 'C') if control => return Hit::CopyCell,
             KeyCode::Char('y') => return Hit::CopyCell,
             KeyCode::Char('Y') => return Hit::CopyRow,
             _ => return Hit::Ignored,
@@ -1205,6 +1332,129 @@ mod tests {
         assert!(left > 0, "a narrow window scrolls sideways: {left}");
         results.key(key("0"));
         assert_eq!(results.window(20, 20).1, 0);
+    }
+
+    #[test]
+    fn shift_arrows_select_a_rectangle_and_a_plain_move_drops_it() {
+        let mut results = filled(10, 5);
+        results.key(key("j"));
+        results.key(key("l"));
+        assert_eq!(results.selection(), None);
+        for spec in ["Shift-Down", "Shift-Down", "Shift-Right"] {
+            results.key(key(spec));
+        }
+        assert_eq!(results.selection(), Some((1..=3, 1..=2)));
+        assert_eq!(results.title(), "Results · 10 rows · 42 ms · 3×2 selected");
+        // Back past where it started turns the rectangle round the anchor.
+        for spec in [
+            "Shift-Up",
+            "Shift-Up",
+            "Shift-Up",
+            "Shift-Left",
+            "Shift-Left",
+        ] {
+            results.key(key(spec));
+        }
+        assert_eq!(results.selection(), Some((0..=1, 0..=1)));
+        results.key(key("Down"));
+        assert_eq!(results.selection(), None, "an unshifted arrow");
+        results.key(key("Shift-Down"));
+        results.key(key("j"));
+        assert_eq!(results.selection(), None, "and `j` the same");
+    }
+
+    #[test]
+    fn v_makes_every_move_extend_until_it_is_pressed_again() {
+        let mut results = filled(10, 5);
+        results.key(key("j"));
+        results.key(key("l"));
+        results.key(key("v"));
+        assert_eq!(
+            results.selection(),
+            Some((1..=1, 1..=1)),
+            "the cursor alone"
+        );
+        results.key(key("G"));
+        assert_eq!(
+            results.selection(),
+            Some((1..=9, 1..=1)),
+            "`v G`: the column down"
+        );
+        results.key(key("v"));
+        assert_eq!(results.selection(), None, "`v` again ends it");
+
+        results.key(key("v"));
+        results.key(key("$"));
+        assert_eq!(
+            results.selection(),
+            Some((9..=9, 1..=4)),
+            "`v $`: the row on"
+        );
+        results.key(key("k"));
+        results.key(key("h"));
+        assert_eq!(results.selection(), Some((8..=9, 1..=3)), "hjkl extend too");
+        assert!(results.clear_selection());
+        assert!(!results.clear_selection(), "nothing left to clear");
+        results.key(key("j"));
+        assert_eq!(results.selection(), None, "and `v` went with it");
+    }
+
+    #[test]
+    fn a_sort_another_set_or_a_new_run_drops_the_range() {
+        let mut results = filled(10, 5);
+        results.key(key("v"));
+        results.key(key("j"));
+        assert!(results.selection().is_some());
+        results.sort();
+        assert_eq!(results.selection(), None, "sorted");
+
+        results.key(key("v"));
+        results.key(key("j"));
+        results.apply(columns(&[("second", "int")]));
+        assert_eq!(results.selection(), None, "a new set on screen");
+
+        let mut results = filled(10, 5);
+        results.key(key("v"));
+        results.key(key("j"));
+        results.start(Instant::now(), 0, 1, true);
+        assert_eq!(results.selection(), None, "`m` ran it again");
+    }
+
+    #[test]
+    fn a_range_copies_as_tab_separated_lines_quoted_where_a_value_would_split() {
+        let mut results = started();
+        results.apply(columns(&[("a", "int"), ("b", "text"), ("c", "text")]));
+        results.apply(Rows(vec![
+            vec![
+                Cell::Int(1),
+                Cell::Text("tab\there".to_owned()),
+                Cell::Text("x".to_owned()),
+            ],
+            vec![
+                Cell::Int(2),
+                Cell::Null,
+                Cell::Text("say \"hi\"".to_owned()),
+            ],
+        ]));
+        results.key(key("Shift-Down"));
+        results.key(key("Shift-Right"));
+        assert_eq!(
+            results.selection_text(),
+            Some(("1\t\"tab\there\"\n2\t\n".to_owned(), 4)),
+            "a NULL is nothing and a tab inside a value is quoted"
+        );
+        assert_eq!(
+            results.rows_text(),
+            Some((
+                "a\tb\tc\n1\t\"tab\there\"\tx\n2\t\t\"say \"\"hi\"\"\"\n".to_owned(),
+                2
+            )),
+            "every column of both rows, under the names"
+        );
+        results.key(key("Up"));
+        assert_eq!(results.selection_text(), None, "no range is the cell's own");
+        results.key(key("v"));
+        assert_eq!(results.selection_text(), None, "and so is a range of one");
     }
 
     #[test]

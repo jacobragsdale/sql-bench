@@ -599,8 +599,10 @@ fn y_copies_the_cell_and_shift_y_the_row_with_a_null_as_nothing() {
 
     assert_eq!(
         press(&mut app, "Y"),
-        vec![Action::Copy(format!("20\t{cell}\t\tc3r20"))],
-        "tab-separated, and the NULL column is empty"
+        vec![Action::Copy(format!(
+            "column_0\tcolumn_1\tcolumn_2\tcolumn_3\n20\t{cell}\t\tc3r20\n"
+        ))],
+        "the names, then the row tab-separated, and the NULL column is empty"
     );
     assert_eq!(app.shell.status, "copied 1 row");
 
@@ -610,6 +612,85 @@ fn y_copies_the_cell_and_shift_y_the_row_with_a_null_as_nothing() {
     assert_eq!(press(&mut app, "Y"), vec![]);
     assert_eq!(press(&mut app, "Enter"), vec![]);
     assert!(app.shell.inspector.is_none(), "nothing to inspect");
+}
+
+#[test]
+fn y_copies_a_range_as_tab_separated_lines_and_ends_it() {
+    let mut app = ready(Focus::Results);
+    // Row 20, columns 1 and 2: the long text and the NULL, two rows down.
+    press(&mut app, "v");
+    press(&mut app, "j");
+    press(&mut app, "l");
+    assert!(app.tabs[1].results.selection().is_some());
+    assert_eq!(
+        press(&mut app, "y"),
+        vec![Action::Copy(
+            "row 20 of a value far too long for one column\t\n\
+             row 21 of a value far too long for one column\t\n"
+                .to_owned()
+        )]
+    );
+    assert_eq!(app.shell.status, "copied 4 cells");
+    assert_eq!(app.tabs[1].results.selection(), None, "`y` ends the range");
+    press(&mut app, "j");
+    assert_eq!(app.tabs[1].results.selection(), None, "and `v` with it");
+
+    // Ctrl-C is the same key, and Shift-arrows the same range.
+    press(&mut app, "Shift-Up");
+    press(&mut app, "Shift-Left");
+    let by_y = {
+        let mut other = app.clone();
+        press(&mut other, "y")
+    };
+    assert_eq!(press(&mut app, "Ctrl-C"), by_y);
+    assert_eq!(app.shell.status, "copied 4 cells");
+}
+
+#[test]
+fn shift_y_copies_the_rows_a_range_spans_under_the_column_names() {
+    let mut app = ready(Focus::Results);
+    press(&mut app, "v");
+    press(&mut app, "j");
+    press(&mut app, "j");
+    let long = |row: usize| format!("row {row} of a value far too long for one column");
+    assert_eq!(
+        press(&mut app, "Y"),
+        vec![Action::Copy(format!(
+            "column_0\tcolumn_1\tcolumn_2\tcolumn_3\n\
+             20\t{}\t\tc3r20\n21\t{}\t\tc3r21\n22\t{}\t\tc3r22\n",
+            long(20),
+            long(21),
+            long(22)
+        ))]
+    );
+    assert_eq!(app.shell.status, "copied 3 rows");
+    assert_eq!(app.tabs[1].results.selection(), None);
+}
+
+#[test]
+fn esc_drops_the_range_after_a_running_query_and_before_the_error() {
+    let mut app = ready(Focus::Results);
+    press(&mut app, "Shift-Down");
+    assert_eq!(press(&mut app, "Esc"), vec![]);
+    assert_eq!(app.tabs[1].results.selection(), None);
+    assert_eq!(app.shell.error.as_deref(), Some("boom"), "not yet");
+    press(&mut app, "Esc");
+    assert_eq!(app.shell.error, None);
+
+    // A running query is what Esc cancels first, range or not.
+    let results = &mut app.tabs[1].results;
+    results.start(Instant::now(), 0, 1, false);
+    results.apply(QueryEvent::Columns(vec![Column {
+        name: "id".to_owned(),
+        type_name: "int".to_owned(),
+    }]));
+    results.apply(QueryEvent::Rows(vec![
+        vec![Cell::Int(1)],
+        vec![Cell::Int(2)],
+    ]));
+    press(&mut app, "Shift-Down");
+    assert_eq!(press(&mut app, "Esc"), vec![Action::Cancel(1)]);
+    assert!(app.tabs[1].results.selection().is_some(), "the next Esc's");
 }
 
 /// A grid of eight rows, `id` naming each, with every kind of value `o`

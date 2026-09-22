@@ -147,6 +147,39 @@ fn the_cell_cursor_is_reversed_and_a_null_is_dim() {
 }
 
 #[test]
+fn a_range_is_painted_as_one_block_with_the_cursor_still_on_it() {
+    let mut app = showing(filled(5, 4));
+    let theme = Theme::new(false);
+    for spec in ["Shift-Down", "Shift-Right"] {
+        app.handle(Event::Key(key(spec)));
+    }
+    let terminal = frame(120, 40, &app);
+    let (x, y) = pane(&terminal);
+    assert!(
+        text(&terminal).contains("╭ Results · 5 rows · 42 ms · 2×2 selected "),
+        "the title says how big it is"
+    );
+    // Rows 0 and 1 of column_0 (eight wide), the gap, and column_1.
+    let selection = theme.selection;
+    for (column, row, style) in [
+        (x, y + 2, selection),
+        (x + 7, y + 2, selection),
+        (x + 8, y + 2, selection),
+        (x + 10, y + 2, selection),
+        (x + 49, y + 2, selection),
+        (x + 10, y + 3, as_painted(theme.cursor)),
+        (x + 50, y + 2, as_painted(Style::default())),
+        (x, y + 4, as_painted(Style::default())),
+    ] {
+        assert_eq!(painted(&terminal, column, row), style, "({column}, {row})");
+    }
+
+    app.handle(Event::Key(key("Esc")));
+    let terminal = frame(120, 40, &app);
+    assert_eq!(painted(&terminal, x, y + 2), as_painted(Style::default()));
+}
+
+#[test]
 fn the_sorted_column_trades_its_last_character_for_an_arrow() {
     let mut results = Results::default();
     results.start(Instant::now(), 0, 1, false);

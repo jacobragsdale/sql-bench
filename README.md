@@ -233,10 +233,23 @@ Results:
 | `]` | next result set |
 | `m` | 10,000 more rows |
 | `Enter` | inspect the cell |
-| `y` | copy the cell |
-| `Y` | copy the row |
+| `v` | select a range |
+| `Shift-Arrows` | select a range |
+| `y` | copy the cell or selection |
+| `Ctrl-C` | copy the selection |
+| `Y` | copy the rows with headers |
 | `e` | export the result set |
 | `o` | sort by the column |
+
+A range of cells is the rectangle between where it started and the cursor.
+Shift-arrows start and grow one, and any unshifted move drops it; `v` starts
+one that every movement key grows — `v G` is the column from the cursor down,
+`v $` the rest of the row — and `v` or Esc ends it. Dragging over cells and
+Shift-clicking a cell select one too. `y` (or Ctrl-C) copies the range as
+tab-separated lines, a value with a tab, a line break or a quote in it quoted
+the way CSV quotes, so it pastes into a spreadsheet one value per cell; `Y`
+copies every column of the rows it spans under a line of column names. A copy
+ends the range.
 
 `Ctrl-P` opens the finder over everything: type part of a name and every
 object of every connected tab whose name answers it is listed, best first,

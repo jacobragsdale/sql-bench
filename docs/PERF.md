@@ -231,6 +231,21 @@ fills one tab's tree with its 50,000 objects and types the same name.
 Unlike the finder it lower-cases every row on every pass; that fits well
 inside the budget, and a lowered copy per node is the fix if it stops to.
 
+## Copying a range
+
+`a_copy_of_ten_thousand_rows_by_twenty_columns_is_inside_the_key_budget` in
+`tests/perf.rs`, release build, 2026-09-22, on the development machine: `v G
+$` over 10,000 synthetic rows of 20 columns — integers, NULLs, decimals and
+text — then one `y`, median of five, three runs.
+
+| | time | budget |
+|---|---|---|
+| `y` over 200,000 cells, to tab-separated text | 2.29 / 2.29 / 2.38 ms | 16 ms |
+
+It is one pass that writes each value once, quoting only the ones with a
+tab, a line break or a quote in them. Painting the range costs nothing
+extra: a cell of the window checks two ranges, so a draw stays the window's.
+
 ## Budgets (T7.1)
 
 Every budget `docs/DESIGN.md` sets, measured by `scripts/perf.sh` in a

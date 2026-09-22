@@ -15,4 +15,16 @@ wait busy
 expect Zoë Bauer
 expect ╭ Results ·
 frame run-mssql
+
+# A range of the grid, copied: out of the pad (Tab is two spaces there),
+# `v` and two moves make it two rows by two columns, and `y` ends it.
+key Shift-Tab
+key Shift-Tab
+key v
+key j
+key l
+expect · 2×2 selected
+key y
+expect copied 4 cells
+expect-not selected
 key Ctrl-Q
