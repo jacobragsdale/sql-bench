@@ -334,6 +334,81 @@ impl Results {
         Hit::Moved
     }
 
+    /// A click on cell (`row`, `column`) of a window drawn from `(top,
+    /// left)`. The window is set to what was drawn rather than worked out by
+    /// `at_row`, whose page rule would move a view whose bottom row was
+    /// clicked, or from a column hint that `h` and `l` leave behind the
+    /// view. Whether there was a cell there.
+    ///
+    /// ponytail: the first `j` after a click ten or more rows below `top`
+    /// still moves the view once, by `at_row`'s page rule. A real page
+    /// height in the app would end that.
+    pub fn click(&mut self, row: usize, column: usize, (top, left): (usize, usize)) -> bool {
+        if row >= self.rows().len() || column >= self.columns().len() {
+            return false;
+        }
+        self.selected = (row, column);
+        self.scroll = (top, left);
+        true
+    }
+
+    /// A click on a column's header, drawn with `left` at the left edge:
+    /// the column is selected and the rows stay where they are.
+    pub fn click_header(&mut self, column: usize, left: usize) {
+        if column < self.columns().len() {
+            self.selected.1 = column;
+            self.scroll.1 = left;
+        }
+    }
+
+    /// The wheel over a window `height` rows high drawn from `top`: the
+    /// window moves by `by` and the cursor comes along only as far as it
+    /// has to, to stay on it.
+    ///
+    /// ponytail: the cursor is pulled along because the window is a hint
+    /// clamped round it; scrolling it off the screen needs the pane's height
+    /// in the app.
+    pub fn wheel(&mut self, top: usize, by: isize, height: usize) {
+        let count = self.rows().len();
+        let top = top
+            .saturating_add_signed(by)
+            .min(count.saturating_sub(height));
+        self.scroll.0 = top;
+        self.selected.0 = self
+            .selected
+            .0
+            .clamp(top, top + height.max(1) - 1)
+            .min(count.saturating_sub(1));
+    }
+
+    /// The sideways wheel over columns drawn from `left`: one column a
+    /// notch.
+    ///
+    /// ponytail: going left, the selection moves to the new left edge even
+    /// when it would still have fitted, because how many columns fit is the
+    /// renderer's to know. The pane's width in the app would let it stay.
+    pub fn wheel_columns(&mut self, left: usize, by: isize) {
+        let left = left
+            .saturating_add_signed(by)
+            .min(self.columns().len().saturating_sub(1));
+        self.scroll.1 = left;
+        self.selected.1 = if by < 0 {
+            self.selected.1.min(left)
+        } else {
+            self.selected.1.max(left)
+        };
+    }
+
+    /// The wheel over an object's source drawn from `top`, `height` lines
+    /// high.
+    pub fn wheel_source(&mut self, top: usize, by: isize, height: usize) {
+        if let Some(source) = self.source.as_mut() {
+            source.scroll = top
+                .saturating_add_signed(by)
+                .min(source.lines.len().saturating_sub(height));
+        }
+    }
+
     /// `[` and `]`, wrapping round the way Ctrl-T wraps round the tabs.
     fn switch_set(&mut self, delta: isize) -> Hit {
         if self.sets.len() < 2 {

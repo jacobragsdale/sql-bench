@@ -29,8 +29,9 @@ expect bench.customers columns
 expect email
 expect nvarchar(100)
 
-# Enter: a hundred rows of it in the pad, on a line of its own.
-key Enter
+# Enter, or a double-click on its name: a hundred rows of it in the pad, on
+# a line of its own.
+double-click on customers
 expect select top 100 * from bench.customers
 key Shift-Tab
 

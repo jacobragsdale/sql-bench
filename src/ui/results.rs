@@ -14,7 +14,7 @@ use ratatui::widgets::{Paragraph, Wrap};
 
 use super::theme::Theme;
 use super::{buttons, placeholder, placeholder_button, titled};
-use crate::app::pointer::Hits;
+use crate::app::pointer::{Hits, Target};
 use crate::app::results::{Results, Source, Status, cut, grouped_u64, shown};
 use crate::app::{App, Focus, TabState};
 use crate::db::model::{Cell, Column};
@@ -72,7 +72,7 @@ pub(super) fn render(frame: &mut Frame, app: &App, theme: &Theme, area: Rect, hi
     }
     // `s` on a procedure: the text that made it, read only.
     if let Some(source) = results.source() {
-        text_view(frame, source, theme, inner);
+        text_view(frame, source, theme, inner, hits);
         return;
     }
     // The driver's own words, wrapped: a complaint is as long as it is.
@@ -98,7 +98,14 @@ pub(super) fn render(frame: &mut Frame, app: &App, theme: &Theme, area: Rect, hi
         frame.render_widget(Paragraph::new(lines), inner);
         return;
     }
-    grid(frame, results, theme, inner, area.height > TYPES_ABOVE);
+    grid(
+        frame,
+        results,
+        theme,
+        inner,
+        area.height > TYPES_ABOVE,
+        hits,
+    );
 }
 
 /// The title's buttons, each only where its key does what it says: `[`, `]`,
@@ -124,9 +131,10 @@ fn chips(results: &Results) -> Vec<(&'static str, &'static str)> {
 
 /// An object's source: a line number gutter and the lines that fit, which is
 /// every line the pane costs however long the package is.
-fn text_view(frame: &mut Frame, source: &Source, theme: &Theme, area: Rect) {
+fn text_view(frame: &mut Frame, source: &Source, theme: &Theme, area: Rect, hits: &mut Hits) {
     let height = usize::from(area.height);
     let top = source.scroll.min(source.lines.len().saturating_sub(height));
+    hits.push(area, Target::Source { top });
     let digits = source.lines.len().to_string().len();
     let width = usize::from(area.width).saturating_sub(digits + 1);
     let lines: Vec<Line> = source
@@ -145,7 +153,14 @@ fn text_view(frame: &mut Frame, source: &Source, theme: &Theme, area: Rect) {
     frame.render_widget(Paragraph::new(lines), area);
 }
 
-fn grid(frame: &mut Frame, results: &Results, theme: &Theme, area: Rect, types: bool) {
+fn grid(
+    frame: &mut Frame,
+    results: &Results,
+    theme: &Theme,
+    area: Rect,
+    types: bool,
+    hits: &mut Hits,
+) {
     let summary = results.summary();
     let width = usize::from(area.width);
     let header = 1 + usize::from(types);
@@ -157,6 +172,16 @@ fn grid(frame: &mut Frame, results: &Results, theme: &Theme, area: Rect, types: 
     let widths = results.widths();
     let showing = fitting(widths, left, width);
     let (selected_row, selected_column) = results.selected();
+    targets(
+        hits,
+        area,
+        (&showing, widths),
+        (
+            header,
+            visible.min(results.rows().len().saturating_sub(top)),
+        ),
+        (top, left),
+    );
 
     let mut lines = Vec::with_capacity(header + visible + 1);
     lines.push(head(columns, widths, &showing, theme.accent, |column| {
@@ -196,6 +221,38 @@ fn grid(frame: &mut Frame, results: &Results, theme: &Theme, area: Rect, types: 
         lines.push(Line::from(Span::styled(summary, theme.dim)));
     }
     frame.render_widget(Paragraph::new(lines), area);
+}
+
+/// Where each column showing was drawn: its header, and its rows as far as
+/// there are any. A column's region runs on over the gap after it, and the
+/// last one's to the edge, so a click or the wheel anywhere across a row
+/// lands on a column.
+fn targets(
+    hits: &mut Hits,
+    area: Rect,
+    (showing, widths): (&[usize], &[usize]),
+    (header, rows): (usize, usize),
+    (top, left): (usize, usize),
+) {
+    let header = u16::try_from(header).unwrap_or(u16::MAX);
+    let rows = u16::try_from(rows).unwrap_or(u16::MAX);
+    let mut x = area.x;
+    for (index, column) in showing.iter().copied().enumerate() {
+        let end = if index + 1 == showing.len() {
+            area.right()
+        } else {
+            x.saturating_add(u16::try_from(widths[column] + GAP).unwrap_or(u16::MAX))
+        };
+        let across = Rect::new(x, area.y, end.saturating_sub(x), header).intersection(area);
+        hits.push(across, Target::Header { column, left });
+        let body = Rect {
+            y: area.y.saturating_add(header),
+            height: rows,
+            ..across
+        };
+        hits.push(body.intersection(area), Target::Cells { column, top, left });
+        x = end;
+    }
 }
 
 /// One header row: the same columns, padded the same way.

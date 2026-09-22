@@ -12,7 +12,7 @@ use ratatui::widgets::Paragraph;
 use super::theme::Theme;
 use super::{buttons, placeholder, placeholder_button, titled};
 use crate::app::objects::{INDENT, Objects};
-use crate::app::pointer::Hits;
+use crate::app::pointer::{Hits, Target};
 use crate::app::{App, Focus};
 
 pub(super) fn render(frame: &mut Frame, app: &App, theme: &Theme, area: Rect, hits: &mut Hits) {
@@ -89,6 +89,11 @@ pub(super) fn render(frame: &mut Frame, app: &App, theme: &Theme, area: Rect, hi
         .take(height)
         .map(|index| row(objects, index, theme, width))
         .collect();
+    let rows = Rect {
+        height: u16::try_from(lines.len()).unwrap_or(u16::MAX),
+        ..inner
+    };
+    hits.push(rows, Target::Tree { top });
     frame.render_widget(Paragraph::new(lines), inner);
 }
 

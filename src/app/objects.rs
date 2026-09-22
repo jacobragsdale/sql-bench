@@ -661,6 +661,55 @@ impl Objects {
             .min(visible.len().saturating_sub(height))
     }
 
+    /// A click on the `row`th row of a window drawn from `top`: the cursor
+    /// goes there and the window stays drawn from `top`, which is set here
+    /// and not worked out by `scroll_to`, whose page rule would move a view
+    /// whose bottom row was clicked. Whether there was a row there.
+    ///
+    /// ponytail: the first `j` after a click ten or more rows below `top`
+    /// still moves the view once, by `scroll_to`'s page rule. A real page
+    /// height in the app would end that.
+    pub fn click(&mut self, top: usize, row: usize) -> bool {
+        let Some(index) = self.visible().get(top + row).copied() else {
+            return false;
+        };
+        self.cursor = index;
+        self.scroll = top;
+        true
+    }
+
+    /// Whether `column` of the cursor's row is its `▸` or `▾`.
+    #[must_use]
+    pub fn on_glyph(&self, column: usize) -> bool {
+        self.nodes.get(self.cursor).is_some_and(|node| {
+            let at = node.depth * INDENT;
+            node.item.parent() && (at..at + 2).contains(&column)
+        })
+    }
+
+    /// The wheel over a window `height` rows high drawn from `top`: the
+    /// window moves by `by` and the cursor comes along only as far as it
+    /// has to, to stay on it.
+    ///
+    /// ponytail: the cursor is pulled along because the window is a hint
+    /// clamped round it; scrolling it off the screen needs the pane's height
+    /// in the app.
+    pub fn wheel(&mut self, top: usize, by: isize, height: usize) {
+        let visible = self.visible();
+        let top = top
+            .saturating_add_signed(by)
+            .min(visible.len().saturating_sub(height));
+        let at = visible
+            .iter()
+            .position(|index| *index == self.cursor)
+            .unwrap_or(0)
+            .clamp(top, top + height.max(1) - 1);
+        if let Some(index) = visible.get(at) {
+            self.cursor = *index;
+        }
+        self.scroll = top;
+    }
+
     fn by(&mut self, delta: isize) -> Hit {
         let visible = self.visible();
         if visible.is_empty() {

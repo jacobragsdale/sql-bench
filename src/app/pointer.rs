@@ -32,6 +32,21 @@ pub enum Target {
     /// focuses `pane` and presses `key`, so a button can do nothing a key
     /// cannot.
     Button { pane: Focus, key: KeyEvent },
+    /// The rows of the object tree, the first of them `top` in the rows
+    /// showing.
+    Tree { top: usize },
+    /// One column of the grid's rows, drawn from row `top` with column
+    /// `left` at the pane's left edge. A click sets the window from these
+    /// rather than from the stored hint, so the view stays where it was.
+    Cells {
+        column: usize,
+        top: usize,
+        left: usize,
+    },
+    /// A column's header, drawn with column `left` at the pane's left edge.
+    Header { column: usize, left: usize },
+    /// An object's source, drawn from line `top`.
+    Source { top: usize },
     /// The text of the export prompt, starting at the region's left edge.
     PromptText,
     /// The body of the open help or inspector, whichever is on top.
@@ -179,22 +194,24 @@ impl App {
                     // The column into the region, which only the prompt's
                     // text reads: a spot is a target and a row, no more.
                     let column = hits.at(position).map_or(0, |(rect, _)| position.x - rect.x);
-                    self.click(press.spot.target, column, double)
+                    self.click(press.spot, column, double)
                 }
                 _ => Vec::new(),
             },
-            MouseEventKind::ScrollDown => self.wheel(spot, WHEEL),
-            MouseEventKind::ScrollUp => self.wheel(spot, -WHEEL),
+            MouseEventKind::ScrollDown
+            | MouseEventKind::ScrollUp
+            | MouseEventKind::ScrollLeft
+            | MouseEventKind::ScrollRight => self.wheel(mouse, hits.at(position)),
             _ => Vec::new(),
         }
     }
 
-    /// A click, acted on the target that was pressed.
-    ///
-    /// Nothing drawn yet means anything different on a second click, so
-    /// `_double` is only passed on; tree rows and grid cells will read it.
-    fn click(&mut self, target: Target, column: u16, _double: bool) -> Vec<Action> {
+    /// A click, acted on the target that was pressed: `column` cells into
+    /// its region, on the row of it the spot says.
+    fn click(&mut self, spot: Spot, column: u16, double: bool) -> Vec<Action> {
+        let target = spot.target;
         if let Target::Pane(Focus::Objects)
+        | Target::Tree { .. }
         | Target::Button {
             pane: Focus::Objects,
             ..
@@ -202,7 +219,25 @@ impl App {
         {
             self.end_filter_typing();
         }
+        let row = usize::from(spot.row);
         match target {
+            Target::Tree { top } => return self.click_tree(top, row, column, double),
+            Target::Cells { column, top, left } => {
+                self.shell.focus = Focus::Results;
+                let Some(tab) = self.tabs.get_mut(self.shell.active_tab) else {
+                    return Vec::new();
+                };
+                if tab.results.click(top + row, column, (top, left)) && double {
+                    return self.results_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+                }
+            }
+            Target::Header { column, left } => {
+                self.shell.focus = Focus::Results;
+                if let Some(tab) = self.tabs.get_mut(self.shell.active_tab) {
+                    tab.results.click_header(column, left);
+                }
+            }
+            Target::Source { .. } => self.shell.focus = Focus::Results,
             Target::Tab(index) if index < self.tabs.len() => self.shell.active_tab = index,
             Target::Pane(focus) => self.shell.focus = focus,
             Target::Button { pane, key } => {
@@ -237,6 +272,28 @@ impl App {
         Vec::new()
     }
 
+    /// A row of the tree: the cursor goes there, its `▸` or `▾` opens or
+    /// closes it the way Space does, and a second click is Enter. The keys
+    /// are pressed rather than their work copied, so what a load, a select
+    /// or a source asks the run loop for is decided in one place.
+    fn click_tree(&mut self, top: usize, row: usize, column: u16, double: bool) -> Vec<Action> {
+        self.shell.focus = Focus::Objects;
+        let Some(tab) = self.tabs.get_mut(self.shell.active_tab) else {
+            return Vec::new();
+        };
+        if !tab.objects.click(top, row) {
+            return Vec::new();
+        }
+        let code = if tab.objects.on_glyph(usize::from(column)) {
+            KeyCode::Char(' ')
+        } else if double {
+            KeyCode::Enter
+        } else {
+            return Vec::new();
+        };
+        self.objects_key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
     /// A click in Objects is done typing the filter, the way Enter is:
     /// otherwise Reload, or whatever the click would press, is one more
     /// letter of it.
@@ -250,17 +307,40 @@ impl App {
     }
 
     /// The wheel scrolls what is under the pointer and never moves the focus.
-    fn wheel(&mut self, spot: Option<Spot>, by: isize) -> Vec<Action> {
-        // An open overlay's Outside is under everything of its own and over
-        // everything else, so any other target is the overlay: its body, a
-        // row of it or its close button. The help goes over the inspector,
-        // so while it is open it is the one under the pointer.
-        if spot.is_some_and(|spot| spot.target != Target::Outside) {
-            if self.shell.help {
-                self.scroll_help(by);
-            } else if self.shell.inspector.is_some() {
-                self.scroll_inspector(by);
+    /// A sideways wheel, or Shift with the wheel, scrolls the grid's columns
+    /// a column a notch.
+    fn wheel(&mut self, mouse: MouseEvent, under: Option<(Rect, Target)>) -> Vec<Action> {
+        let shift = mouse.modifiers.contains(KeyModifiers::SHIFT);
+        let (by, sideways) = match mouse.kind {
+            MouseEventKind::ScrollDown => (1, shift),
+            MouseEventKind::ScrollUp => (-1, shift),
+            MouseEventKind::ScrollRight => (1, true),
+            _ => (-1, true),
+        };
+        let Some((rect, target)) = under else {
+            return Vec::new();
+        };
+        let height = usize::from(rect.height);
+        let help = self.shell.help;
+        let inspecting = self.shell.inspector.is_some();
+        let Some(tab) = self.tabs.get_mut(self.shell.active_tab) else {
+            return Vec::new();
+        };
+        match (target, sideways) {
+            (Target::Tree { top }, false) => tab.objects.wheel(top, by * WHEEL, height),
+            (Target::Cells { top, .. }, false) => tab.results.wheel(top, by * WHEEL, height),
+            (Target::Cells { left, .. } | Target::Header { left, .. }, true) => {
+                tab.results.wheel_columns(left, by);
             }
+            (Target::Source { top }, false) => tab.results.wheel_source(top, by * WHEEL, height),
+            // An open overlay's Outside is under everything of its own and
+            // over everything else, so any other target is the overlay: its
+            // body, a row of it or its close button. The help goes over the
+            // inspector, so while it is open it is the one under the pointer.
+            (Target::Outside, _) | (_, true) => {}
+            _ if help => self.scroll_help(by * WHEEL),
+            _ if inspecting => self.scroll_inspector(by * WHEEL),
+            _ => {}
         }
         Vec::new()
     }

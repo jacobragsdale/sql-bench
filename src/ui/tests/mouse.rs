@@ -10,6 +10,7 @@ use crate::app::results::{Inspector, Results};
 use crate::app::tests::browsed;
 use crate::app::{Action, RuntimeEvent};
 use crate::config::Kind;
+use crate::db::catalog::{CatalogAnswer, CatalogRequest, ObjectKind};
 use crate::db::model::{Cell, Column, QueryEvent};
 
 /// The hits of one 120x40 frame of `app`.
@@ -19,6 +20,10 @@ fn hits(app: &App) -> Hits {
 
 /// One mouse event at `(x, y)`, against the frame `app` is showing.
 fn mouse(app: &mut App, kind: MouseEventKind, x: u16, y: u16) -> Vec<Action> {
+    mouse_at(app, kind, (x, y), Instant::now())
+}
+
+fn mouse_at(app: &mut App, kind: MouseEventKind, (x, y): (u16, u16), now: Instant) -> Vec<Action> {
     let hits = hits(app);
     let event = MouseEvent {
         kind,
@@ -26,7 +31,7 @@ fn mouse(app: &mut App, kind: MouseEventKind, x: u16, y: u16) -> Vec<Action> {
         row: y,
         modifiers: KeyModifiers::NONE,
     };
-    app.pointer(event, Instant::now(), &hits)
+    app.pointer(event, now, &hits)
 }
 
 fn click(app: &mut App, x: u16, y: u16) -> Vec<Action> {
@@ -731,4 +736,325 @@ fn the_pointer_lights_up_a_button_and_nothing_under_an_overlay() {
         (x..x + 7).all(|x| painted(&terminal, x, y) != hover),
         "the help is over it"
     );
+}
+
+fn click_at(app: &mut App, at: (u16, u16), now: Instant) -> Vec<Action> {
+    mouse_at(app, MouseEventKind::Down(MouseButton::Left), at, now);
+    mouse_at(app, MouseEventKind::Up(MouseButton::Left), at, now)
+}
+
+/// Two clicks at one instant, and what the second one asked for.
+fn double_click(app: &mut App, x: u16, y: u16) -> Vec<Action> {
+    let now = Instant::now();
+    click_at(app, (x, y), now);
+    click_at(app, (x, y), now)
+}
+
+/// Row `y` of a 120x40 frame, where the Objects pane is empty: the right
+/// hand pane's `text`, padded to the inside of it.
+fn right(text: &str) -> String {
+    format!("│{:34}││ {text:<80} │", "")
+}
+
+/// The rows of the grid's pane at 120x40: its two header rows, then the
+/// data from row 19.
+const GRID: std::ops::Range<u16> = 17..38;
+
+fn lines(terminal: &Terminal<TestBackend>, rows: std::ops::Range<u16>) -> Vec<String> {
+    rows.map(|y| line(terminal, y)).collect()
+}
+
+/// A focused grid of 500 rows with rows 31 to 49 showing — all 19 that
+/// fit at 120x40 — and the cursor on the top one.
+fn deep() -> App {
+    let mut app = idle();
+    app.tabs[0].results = crate::app::tests::filled(500, 4);
+    app.shell.focus = Focus::Results;
+    for spec in ["j"; 50].into_iter().chain(["k"; 19]) {
+        app.handle(Event::Key(key(spec)));
+    }
+    app
+}
+
+/// A row of `deep()`'s grid, drawn: the long text cut to its forty columns.
+fn grid_row(row: usize) -> String {
+    let long: String = format!("row {row} of a value far too long for one column")
+        .chars()
+        .take(39)
+        .collect();
+    right(&format!("{row:>8}  {long}…  NULL         c3r{row}"))
+}
+
+#[test]
+fn clicking_the_bottom_row_of_the_grid_leaves_the_view_where_it_was() {
+    let mut app = deep();
+    let before = frame(120, 40, &app);
+    assert_eq!(line(&before, 19), grid_row(31));
+    assert_eq!(line(&before, 37), grid_row(49));
+
+    assert!(click(&mut app, 40, 37).is_empty());
+    assert_eq!(app.tabs[0].results.selected(), (49, 0));
+    let after = frame(120, 40, &app);
+    assert_eq!(lines(&after, GRID), lines(&before, GRID));
+
+    // column_2, eleven rows down.
+    click(&mut app, 95, 30);
+    assert_eq!(app.tabs[0].results.selected(), (42, 2));
+    assert_eq!(lines(&frame(120, 40, &app), GRID), lines(&before, GRID));
+}
+
+#[test]
+fn clicking_a_column_the_cursor_went_past_leaves_the_columns_where_they_were() {
+    let mut app = idle();
+    app.tabs[0].results = crate::app::tests::filled(50, 20);
+    app.shell.focus = Focus::Results;
+    // `l` keeps its column hint at 0 and lets the window work out the rest,
+    // so it is behind what is drawn.
+    for _ in 0..10 {
+        app.handle(Event::Key(key("l")));
+    }
+    let before = frame(120, 40, &app);
+    let header = right("column_5     column_6  column_7     column_8     column_9  column_10");
+    assert_eq!(line(&before, 17), header);
+
+    // column_6, on row 6.
+    click(&mut app, 52, 25);
+    assert_eq!(app.tabs[0].results.selected(), (6, 6));
+    assert_eq!(lines(&frame(120, 40, &app), GRID), lines(&before, GRID));
+
+    // Its header selects the column and leaves the rows be.
+    click(&mut app, 40, 17);
+    assert_eq!(app.tabs[0].results.selected(), (6, 5));
+    assert_eq!(lines(&frame(120, 40, &app), GRID), lines(&before, GRID));
+}
+
+#[test]
+fn a_click_below_the_last_row_selects_nothing() {
+    let mut app = idle();
+    app.tabs[0].results = crate::app::tests::filled(3, 2);
+    app.tabs[0].objects.key(key("k"));
+    click(&mut app, 40, 30);
+    assert_eq!(app.shell.focus, Focus::Results, "it is still the pane");
+    assert_eq!(app.tabs[0].results.selected(), (0, 0));
+    let cursor = app.tabs[0].objects.cursor();
+    click(&mut app, 8, 30);
+    assert_eq!(app.tabs[0].objects.cursor(), cursor);
+}
+
+#[test]
+fn a_double_click_on_a_cell_inspects_it() {
+    let mut app = deep();
+    assert!(double_click(&mut app, 40, 20).is_empty());
+    assert_eq!(app.tabs[0].results.selected(), (32, 0));
+    assert_eq!(app.shell.inspector, Some(Inspector::default()));
+}
+
+#[test]
+fn the_wheel_scrolls_the_grid_and_pulls_the_cursor_along() {
+    let mut app = deep();
+    mouse(&mut app, MouseEventKind::ScrollDown, 40, 25);
+    let terminal = frame(120, 40, &app);
+    assert_eq!(line(&terminal, 19), grid_row(34));
+    assert_eq!(line(&terminal, 37), grid_row(52));
+    assert_eq!(app.tabs[0].results.selected(), (34, 0));
+
+    // At the end the stored hint is past what is drawn, so the wheel starts
+    // from what is drawn or it would scroll into the clamp and not move.
+    app.handle(Event::Key(key("G")));
+    assert_eq!(line(&frame(120, 40, &app), 19), grid_row(481));
+    mouse(&mut app, MouseEventKind::ScrollUp, 40, 25);
+    let terminal = frame(120, 40, &app);
+    assert_eq!(line(&terminal, 19), grid_row(478));
+    assert_eq!(line(&terminal, 37), grid_row(496));
+    assert_eq!(app.tabs[0].results.selected(), (496, 0));
+}
+
+#[test]
+fn the_sideways_wheel_scrolls_the_columns_a_column_a_notch() {
+    let mut app = idle();
+    app.tabs[0].results = crate::app::tests::filled(50, 20);
+    app.shell.focus = Focus::Results;
+    mouse(&mut app, MouseEventKind::ScrollRight, 40, 25);
+    assert_eq!(
+        line(&frame(120, 40, &app), 17),
+        right(&format!(
+            "{:42}{:13}{:10}column_4",
+            "column_1", "column_2", "column_3"
+        ))
+    );
+    assert_eq!(app.tabs[0].results.selected(), (0, 1));
+    mouse(&mut app, MouseEventKind::ScrollLeft, 40, 17);
+    assert_eq!(
+        line(&frame(120, 40, &app), 17),
+        right(&format!(
+            "{:10}{:42}{:13}column_3",
+            "column_0", "column_1", "column_2"
+        ))
+    );
+    assert_eq!(app.tabs[0].results.selected(), (0, 0));
+}
+
+#[test]
+fn the_wheel_scrolls_an_objects_source() {
+    let mut app = idle();
+    let text: Vec<String> = (1..=100).map(|n| format!("line {n}")).collect();
+    app.tabs[0]
+        .results
+        .show_source("dbo.p".to_owned(), &text.join("\n"));
+    mouse(&mut app, MouseEventKind::ScrollDown, 60, 25);
+    mouse(&mut app, MouseEventKind::ScrollDown, 60, 25);
+    assert_eq!(line(&frame(120, 40, &app), 17), right("  7 line 7"));
+    assert_eq!(app.shell.focus, Focus::Objects, "the wheel moves no focus");
+}
+
+#[test]
+fn a_click_on_a_row_of_the_tree_moves_the_cursor_and_on_its_glyph_opens_it() {
+    let mut app = idle();
+    assert!(click(&mut app, 9, 5).is_empty());
+    let objects = &app.tabs[0].objects;
+    assert_eq!(objects.nodes()[objects.cursor()].item.name(), "orders");
+    assert_eq!(
+        line(&frame(120, 40, &app), 5)
+            .chars()
+            .take(36)
+            .collect::<String>(),
+        format!("│     ▸ orders{:21}│", "")
+    );
+
+    // customers' ▸: its columns are loaded.
+    assert_eq!(
+        click(&mut app, 6, 4),
+        vec![Action::LoadObjects {
+            tab: 0,
+            request: CatalogRequest::Columns {
+                schema: "dbo".to_owned(),
+                table: "customers".to_owned(),
+                show: false,
+            },
+        }]
+    );
+    // Tables' ▾ closes it.
+    click(&mut app, 5, 3);
+    let terminal = frame(120, 40, &app);
+    assert_eq!(
+        lines(&terminal, 2..6)
+            .iter()
+            .map(|row| row.chars().take(36).collect::<String>())
+            .collect::<Vec<_>>(),
+        [
+            format!("│ ▾ dbo{:28}│", ""),
+            format!("│   ▸ Tables{:23}│", ""),
+            format!("│   ▸ Views{:24}│", ""),
+            format!("│   ▸ Procedures{:19}│", ""),
+        ]
+    );
+}
+
+#[test]
+fn a_double_click_on_a_table_drops_its_select_into_the_pad_as_enter_does() {
+    let mut app = idle();
+    let mut pressed = app.clone();
+    pressed.shell.focus = Focus::Objects;
+    let by_key: Vec<Action> = ["j", "Enter"]
+        .into_iter()
+        .flat_map(|spec| pressed.handle(Event::Key(key(spec))))
+        .collect();
+    assert_eq!(double_click(&mut app, 9, 5), by_key);
+    assert_eq!(settled(app.clone()), settled(pressed));
+    assert_eq!(app.shell.focus, Focus::Scratch);
+    assert!(
+        line(&frame(120, 40, &app), 2).starts_with(
+            "│ ▾ dbo                            ││ 1 select top 100 * from dbo.orders "
+        ),
+    );
+}
+
+#[test]
+fn a_double_click_on_a_procedure_shows_its_source_as_enter_does() {
+    let mut app = idle();
+    // A branch opens on a double-click, the way Enter opens it.
+    let request = CatalogRequest::Objects {
+        schema: "dbo".to_owned(),
+        kind: ObjectKind::Procedure,
+    };
+    assert_eq!(
+        double_click(&mut app, 9, 7),
+        vec![Action::LoadObjects {
+            tab: 0,
+            request: request.clone(),
+        }]
+    );
+    app.apply(RuntimeEvent::Catalog {
+        tab: 0,
+        request,
+        result: Ok(CatalogAnswer::Objects(vec![crate::app::tests::object(
+            "dbo",
+            "refresh",
+            ObjectKind::Procedure,
+        )])),
+    });
+    let mut pressed = app.clone();
+    pressed.handle(Event::Key(key("j")));
+    let by_key = pressed.handle(Event::Key(key("Enter")));
+    let actions = double_click(&mut app, 9, 8);
+    assert_eq!(actions, by_key);
+    assert_eq!(settled(app.clone()), settled(pressed));
+    let Some(Action::LoadObjects { request, .. }) = actions.into_iter().next() else {
+        panic!("no load");
+    };
+    app.apply(RuntimeEvent::Catalog {
+        tab: 0,
+        request,
+        result: Ok(CatalogAnswer::Source(
+            "create procedure dbo.refresh".to_owned(),
+        )),
+    });
+    assert_eq!(
+        row_with(&app, WIDE, "╭ Source"),
+        format!(
+            "│{:34}│╭ Source · dbo.refresh · 1 lines {}╮",
+            "",
+            "─".repeat(50)
+        )
+    );
+    assert_eq!(
+        line(&frame(120, 40, &app), 17),
+        right("1 create procedure dbo.refresh")
+    );
+}
+
+#[test]
+fn the_wheel_scrolls_the_tree_and_pulls_the_cursor_along() {
+    let mut app = idle();
+    let request = CatalogRequest::Objects {
+        schema: "dbo".to_owned(),
+        kind: ObjectKind::Table,
+    };
+    let tables = (0..60)
+        .map(|n| crate::app::tests::object("dbo", &format!("t{n:03}"), ObjectKind::Table))
+        .collect();
+    app.apply(RuntimeEvent::Catalog {
+        tab: 0,
+        request,
+        result: Ok(CatalogAnswer::Objects(tables)),
+    });
+    let name = |app: &App| {
+        let objects = &app.tabs[0].objects;
+        objects.nodes()[objects.cursor()].item.name()
+    };
+    assert_eq!(name(&app), "Tables");
+    mouse(&mut app, MouseEventKind::ScrollDown, 8, 10);
+    let first = |app: &App| {
+        line(&frame(120, 40, app), 2)
+            .chars()
+            .take(36)
+            .collect::<String>()
+    };
+    assert_eq!(first(&app), format!("│     ▸ t001{:23}│", ""));
+    assert_eq!(name(&app), "t001");
+    mouse(&mut app, MouseEventKind::ScrollUp, 8, 10);
+    mouse(&mut app, MouseEventKind::ScrollUp, 8, 10);
+    assert_eq!(first(&app), format!("│ ▾ dbo{:28}│", ""));
+    assert_eq!(name(&app), "t001", "still showing, so it stays");
+    assert_eq!(app.shell.focus, Focus::Objects);
 }
