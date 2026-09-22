@@ -69,12 +69,19 @@ done
 check "NO_COLOR=1 paints nothing" no_color
 check "the terminal after a panic" scripts/qa/panic-restore.sh "$BIN"
 check "the terminal after stdin ran out" scripts/qa/stdin-eof.sh "$BIN"
+check "mouse bytes through a pty" scripts/qa/mouse-bytes.sh "$BIN"
 check "draw latency" scripts/qa/draw-latency.sh "$BIN" 16
 check "the scratch pad frame and its persistence" scripts/qa/scratch-frame.sh
 
 # Everything below needs the local databases (scripts/db-up.sh) and stops
 # containers along the way, so it runs only when asked for.
 if [ "${SQL_BENCH_TEST_DBS:-}" = 1 ]; then
+    # Every gesture against SQL Server, at both sizes. The pad it types into
+    # is saved, so each run gets a state directory of its own.
+    for size in 120x40 80x24; do
+        check "mouse.keys at $size" env SQL_BENCH_STATE_DIR="$SQL_BENCH_STATE_DIR/mouse-$size" \
+            "$BIN" --replay scripts/replay/qa/mouse.keys --size "$size" --frames-dir "$FRAMES"
+    done
     check "no password leaks" scripts/qa/no-password-leak.sh
     check "max-rows timing" scripts/qa/max-rows-timing.sh
     check "connection lifecycle" scripts/qa/connections.sh
