@@ -21,10 +21,12 @@ fn run() -> Result<ExitCode> {
     // clock the shell started itself is the only one both ends share.
     Trace::from_env().event("start", &[]);
     let cli = Cli::parse();
-    let path = cli.config.clone().unwrap_or_else(config::default_path);
     // Read before anything is dispatched: a config that cannot be read is a
     // clear error now rather than a surprise on the first connection.
-    let config = config::load(&path)?;
+    let config = config::load(
+        &cli.config_path(),
+        cli.config.is_some() || config::named_by_env(),
+    )?;
     match cli.command {
         Some(_) => cli::run(&cli, &config),
         None if cli.replay.is_some() => run::replay(&config, &cli),

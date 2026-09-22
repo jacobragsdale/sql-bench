@@ -19,7 +19,7 @@ fn connect(name: &str) -> Option<Connection> {
         return None;
     }
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config.local.toml");
-    let config = config::load(&path).expect("config.local.toml is readable");
+    let config = config::load(&path, true).expect("config.local.toml is readable");
     let spec = config
         .connection(name)
         .unwrap_or_else(|| panic!("config.local.toml names {name}"))

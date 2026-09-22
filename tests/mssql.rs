@@ -18,7 +18,7 @@ fn local() -> Option<(config::Config, config::Connection)> {
         return None;
     }
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config.local.toml");
-    let config = config::load(&path).expect("config.local.toml is readable");
+    let config = config::load(&path, true).expect("config.local.toml is readable");
     let spec = config
         .connection("local-mssql")
         .expect("config.local.toml names local-mssql")

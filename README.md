@@ -82,7 +82,10 @@ directory findable the system way instead: name it in
 
 `~/.config/sql-bench/config.toml`, or whatever `$SQL_BENCH_CONFIG` names, or
 whatever `--config` names. Copy [config.example.toml](config.example.toml) and
-edit it; a missing file is an empty configuration, not an error.
+edit it. A missing default file is an empty configuration, but a file named by
+`--config` or `$SQL_BENCH_CONFIG` has to exist, and a key the file does not
+know (`pasword`, say) is an error naming its line rather than a setting
+silently ignored.
 
 ```toml
 [oracle]
@@ -298,7 +301,10 @@ sql-bench bench   --conn local-mssql --runs 20 'select 1'
 `--max-rows N` (10,000 by default) stops the fetch and not just the printing,
 `--timeout SECONDS` (30 by default) cancels a query that has not finished, and
 `--full` prints whole cells instead of cutting them at 60 terminal columns. A
-`-` in place of the statement reads it from stdin.
+`-` in place of the statement reads it from stdin. The text is split into
+statements the way the scratch pad's `F5` splits it — at `GO` or `/`, at a
+line ending in `;`, and on Oracle at every `;` outside a block — and each runs
+in turn, its result sets printed one after another.
 
 ```sh
 sql-bench query --conn local-oracle --format json --max-rows 100 --timeout 5 -
@@ -308,8 +314,8 @@ sql-bench query --conn local-oracle --format json --max-rows 100 --timeout 5 -
 narrowed by `--schema`, by `--kind` and by a pattern the name has to contain.
 `source` prints the text of one schema-qualified object, or the columns of one
 if it is a table. `bench` runs a statement `--runs N` times through one
-ordinary connection and prints min/p50/p95/max in milliseconds for connect,
-first row and total, and the rows per second.
+ordinary connection and prints min/p50/p95/max in milliseconds, to a tenth,
+for connect, first row and total, and the rows per second.
 
 An exit code of 1 is the database or the configuration saying no, with the
 server's own message on stderr and nothing at all on stdout.

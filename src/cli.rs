@@ -19,9 +19,10 @@ use std::str::FromStr;
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum, ValueHint};
 
+use crate::app::scratch::Scratch;
 use crate::config::Config;
 use crate::db::catalog::{self, ObjectKind};
 use crate::db::model::{Cell, Column, DbError, QueryEvent, QueryOptions};
@@ -35,33 +36,35 @@ pub struct Cli {
     /// ~/.config/sql-bench/config.toml
     #[arg(long, global = true, value_name = "PATH", value_hint = ValueHint::FilePath)]
     pub config: Option<PathBuf>,
+    // Everything below is the TUI's, so none of it is global: a
+    // subcommand's --help lists only what that subcommand reads.
     /// Drive the real loop with the keys in this file instead of the
     /// keyboard, and exit when they run out
-    #[arg(long, global = true, value_name = "FILE", value_hint = ValueHint::FilePath)]
+    #[arg(long, value_name = "FILE", value_hint = ValueHint::FilePath)]
     pub replay: Option<PathBuf>,
     /// Terminal size a replay pretends to have, like 120x40
-    #[arg(long, global = true, value_name = "COLSxROWS")]
+    #[arg(long, value_name = "COLSxROWS")]
     pub size: Option<Size>,
-    /// Directory a replay writes one text frame per redraw into
-    #[arg(long, global = true, value_name = "DIR", value_hint = ValueHint::DirPath)]
+    /// Directory the replay's `frame` lines write their text frames into
+    #[arg(long, value_name = "DIR", value_hint = ValueHint::DirPath)]
     pub frames_dir: Option<PathBuf>,
     /// Write <name>.styles.txt beside every frame: the colours, run by run
-    #[arg(long, global = true)]
+    #[arg(long)]
     pub frame_styles: bool,
     /// Connect this connection once the first frame is up; repeatable
-    #[arg(long, global = true, value_name = "NAME")]
+    #[arg(long, value_name = "NAME")]
     pub connect: Vec<String>,
     /// Connect every connection in the config at startup
-    #[arg(long, global = true)]
+    #[arg(long)]
     pub connect_all: bool,
     /// Stop a query in the TUI after this many rows; `m` in the grid asks
-    /// for ten thousand more. Not global: `query` and `bench` have their own
-    #[arg(long, value_name = "N", default_value_t = 10_000)]
+    /// for ten thousand more. `query` and `bench` have their own
+    #[arg(long, value_name = "N", default_value_t = 10_000, value_parser = at_least_one())]
     pub max_rows: usize,
     /// Panic this many milliseconds into the loop, so QA can check the
     /// terminal is given back. Debug builds only.
     #[cfg(debug_assertions)]
-    #[arg(long, global = true, value_name = "MS", hide = true)]
+    #[arg(long, value_name = "MS", hide = true)]
     pub panic_after_ms: Option<u64>,
     #[command(subcommand)]
     pub command: Option<Command>,
@@ -78,16 +81,17 @@ pub enum Command {
         /// How to print the rows
         #[arg(long, value_enum, default_value_t = Format::Table)]
         format: Format,
-        /// Stop the fetch after this many rows
-        #[arg(long, value_name = "N", default_value_t = 10_000)]
+        /// Stop each statement's fetch after this many rows
+        #[arg(long, value_name = "N", default_value_t = 10_000, value_parser = at_least_one())]
         max_rows: usize,
         /// Give up and cancel after this many seconds
-        #[arg(long, value_name = "SECONDS", default_value_t = 30)]
+        #[arg(long, value_name = "SECONDS", default_value_t = 30, value_parser = clap::value_parser!(u64).range(1..))]
         timeout: u64,
         /// Print whole cells instead of cutting them at 60 terminal columns
         #[arg(long)]
         full: bool,
-        /// The statement to run, or `-` to read it from stdin
+        /// The statements to run, split as the scratch pad splits them, or
+        /// `-` to read them from stdin
         #[arg(value_name = "SQL")]
         sql: String,
     },
@@ -106,12 +110,14 @@ pub enum Command {
         #[arg(value_name = "PATTERN")]
         pattern: Option<String>,
     },
-    /// Print the source of one object, or the columns of a table
+    /// Print the source of a view, procedure, function or package, or the
+    /// columns of a table; a sequence has no source
     Source {
         /// Connection name from config.toml
         #[arg(long, value_name = "NAME")]
         conn: String,
-        /// Object to print, schema-qualified
+        /// Object to print, schema-qualified; either part may be quoted as
+        /// [name] or "name"
         #[arg(value_name = "OBJECT")]
         object: String,
     },
@@ -124,12 +130,28 @@ pub enum Command {
         #[arg(long, value_name = "N", default_value_t = 20, value_parser = clap::value_parser!(u32).range(1..))]
         runs: u32,
         /// Stop the fetch after this many rows
-        #[arg(long, value_name = "N")]
+        #[arg(long, value_name = "N", value_parser = at_least_one())]
         max_rows: Option<usize>,
         /// The statement to time, or `-` to read it from stdin
         #[arg(value_name = "SQL")]
         sql: String,
     },
+}
+
+impl Cli {
+    /// The config file this run reads: `--config`, else what
+    /// [`crate::config::default_path`] says.
+    #[must_use]
+    pub fn config_path(&self) -> PathBuf {
+        self.config
+            .clone()
+            .unwrap_or_else(crate::config::default_path)
+    }
+}
+
+/// A row cap of zero fetches nothing and then says it was truncated.
+fn at_least_one() -> clap::builder::RangedU64ValueParser<usize> {
+    clap::builder::RangedU64ValueParser::new().range(1..)
 }
 
 impl Command {
@@ -225,21 +247,37 @@ fn query(
     let Some(connection) = open(config, conn) else {
         return Ok(ExitCode::FAILURE);
     };
+    // Split as the pad's F5 splits, so a script with `GO`s, or two Oracle
+    // statements on one line, runs here the way it runs there.
+    let statements = Scratch::new(&sql).statements(connection.kind());
     let options = QueryOptions {
         max_rows: Some(max_rows),
         ..QueryOptions::default()
     };
-    let answer = match collect(&connection, &sql, options, Duration::from_secs(timeout)) {
-        Ok(answer) => answer,
-        Err(DbError::Timeout) => {
-            eprintln!("query timed out after {timeout}s");
-            return Ok(ExitCode::FAILURE);
-        }
-        Err(error) => {
-            eprintln!("{error}");
-            return Ok(ExitCode::FAILURE);
-        }
-    };
+    let deadline = Instant::now() + Duration::from_secs(timeout);
+    let mut answer = Answer::default();
+    for (number, (sql, _)) in statements.iter().enumerate() {
+        let one = match collect(&connection, sql, options, deadline) {
+            Ok(one) => one,
+            Err(DbError::Timeout) => {
+                eprintln!("query timed out after {timeout}s");
+                return Ok(ExitCode::FAILURE);
+            }
+            Err(error) if statements.len() > 1 => {
+                eprintln!("statement {}: {error}", number + 1);
+                return Ok(ExitCode::FAILURE);
+            }
+            Err(error) => {
+                eprintln!("{error}");
+                return Ok(ExitCode::FAILURE);
+            }
+        };
+        answer.sets.extend(one.sets);
+        answer.affected.extend(one.affected);
+        answer.rows += one.rows;
+        answer.truncated |= one.truncated;
+        answer.total += one.total;
+    }
 
     let limit = (!full).then_some(export::CELL_LIMIT);
     match format {
@@ -265,14 +303,18 @@ fn query(
     }
 
     for affected in &answer.affected {
-        eprintln!("{affected} rows affected");
+        eprintln!("{} affected", rows_text(*affected));
     }
     let cap = if answer.truncated {
         format!(" (truncated at {max_rows})")
     } else {
         String::new()
     };
-    eprintln!("{} rows{cap} in {} ms", answer.rows, answer.total_ms);
+    eprintln!(
+        "{}{cap} in {} ms",
+        rows_text(answer.rows as u64),
+        answer.total.as_millis()
+    );
     Ok(ExitCode::SUCCESS)
 }
 
@@ -298,7 +340,7 @@ fn bench(
     };
     // The one connect there is: every later run reuses this connection, which
     // is why the phase has a single sample.
-    let mut connect = vec![millis(connecting)];
+    let mut connect = vec![micros(connecting.elapsed())];
     let options = QueryOptions {
         max_rows,
         ..QueryOptions::default()
@@ -307,11 +349,11 @@ fn bench(
     let mut total = Vec::new();
     let mut rows = 0;
     for _ in 0..runs {
-        match collect(&connection, &sql, options, BENCH_TIMEOUT) {
+        match collect(&connection, &sql, options, Instant::now() + BENCH_TIMEOUT) {
             Ok(answer) => {
                 rows = answer.rows;
-                first_row.push(answer.first_row_ms);
-                total.push(answer.total_ms);
+                first_row.push(micros(answer.first_row));
+                total.push(micros(answer.total));
             }
             Err(error) => {
                 eprintln!("{error}");
@@ -333,26 +375,26 @@ fn bench(
             None
         )
     );
-    // Over the whole run rather than off the median, so a query too fast to
-    // register a millisecond still divides by something.
-    let elapsed: u64 = total.iter().map(|ms| u64::from(*ms)).sum::<u64>().max(1);
-    let per_second = rows as u64 * u64::from(runs) * 1000 / elapsed;
-    println!("{rows} rows, {per_second} rows/s over {runs} runs");
+    // Over the whole run rather than off the median, and in microseconds, so
+    // a query too fast to register a millisecond is still a real rate.
+    let elapsed: u64 = total.iter().sum::<u64>().max(1);
+    let per_second = rows as u64 * u64::from(runs) * 1_000_000 / elapsed;
+    println!(
+        "{}, {per_second} rows/s over {runs} runs",
+        rows_text(rows as u64)
+    );
     Ok(ExitCode::SUCCESS)
 }
 
-/// One row of the phase table. `samples` is sorted in place, which is what
-/// the percentiles want anyway.
-fn phase(name: &str, samples: &mut [u32]) -> Vec<Cell> {
+/// One row of the phase table, in milliseconds to a tenth. `samples` are
+/// microseconds, sorted in place, which is what the percentiles want anyway.
+fn phase(name: &str, samples: &mut [u64]) -> Vec<Cell> {
     samples.sort_unstable();
-    let at = |p| i64::from(percentile(samples, p));
-    vec![
-        Cell::Text(name.to_owned()),
-        Cell::Int(at(0)),
-        Cell::Int(at(50)),
-        Cell::Int(at(95)),
-        Cell::Int(at(100)),
-    ]
+    let at = |p| {
+        let micros = percentile(samples, p);
+        Cell::Decimal(format!("{}.{}", micros / 1000, micros % 1000 / 100))
+    };
+    vec![Cell::Text(name.to_owned()), at(0), at(50), at(95), at(100)]
 }
 
 /// Nearest-rank: the sample at `ceil(p/100 * n)`, counting from one. No
@@ -360,13 +402,22 @@ fn phase(name: &str, samples: &mut [u32]) -> Vec<Cell> {
 /// was actually measured.
 ///
 /// Panics on no samples, which `--runs` will not allow.
-fn percentile(sorted: &[u32], p: u32) -> u32 {
+fn percentile(sorted: &[u64], p: u32) -> u64 {
     let rank = (p as usize * sorted.len()).div_ceil(100).max(1);
     sorted[rank - 1]
 }
 
-fn millis(since: Instant) -> u32 {
-    u32::try_from(since.elapsed().as_millis()).unwrap_or(u32::MAX)
+fn micros(elapsed: Duration) -> u64 {
+    u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX)
+}
+
+/// `1 row`, `2 rows`.
+fn rows_text(count: u64) -> String {
+    if count == 1 {
+        "1 row".to_owned()
+    } else {
+        format!("{count} rows")
+    }
 }
 
 fn print_sets(sets: &[ResultSet], format: impl Fn(&ResultSet) -> String) {
@@ -424,10 +475,11 @@ fn objects(
 }
 
 fn source(config: &Config, conn: &str, object: &str) -> ExitCode {
-    let Some((schema, name)) = object.split_once('.') else {
+    let Some((schema, name)) = object_name(object) else {
         eprintln!("expected SCHEMA.NAME, got {object:?}");
         return ExitCode::FAILURE;
     };
+    let (schema, name) = (schema.as_str(), name.as_str());
     let Some(connection) = open(config, conn) else {
         return ExitCode::FAILURE;
     };
@@ -474,7 +526,7 @@ fn source(config: &Config, conn: &str, object: &str) -> ExitCode {
         })
     } else {
         catalog::object_source(&connection, &object.schema, &object.name, object.kind)
-            .map(|source| format!("{}\n", source.trim_end()))
+            .map(|source| format!("{}\n", source.trim_start_matches(['\r', '\n']).trim_end()))
     };
     match printed {
         Ok(text) => {
@@ -485,6 +537,26 @@ fn source(config: &Config, conn: &str, object: &str) -> ExitCode {
             eprintln!("{error}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// `schema.name`, where either part may be quoted as `[x]` or `"x"` — the
+/// way it was copied out of a script — and so may hold a dot of its own.
+fn object_name(text: &str) -> Option<(String, String)> {
+    let mut parts = vec![String::new()];
+    let mut closing = None;
+    for character in text.chars() {
+        match (closing, character) {
+            (Some(end), _) if character == end => closing = None,
+            (None, '[') => closing = Some(']'),
+            (None, '"') => closing = Some('"'),
+            (None, '.') => parts.push(String::new()),
+            _ => parts.last_mut()?.push(character),
+        }
+    }
+    match <[String; 2]>::try_from(parts) {
+        Ok([schema, name]) if !schema.is_empty() && !name.is_empty() => Some((schema, name)),
+        _ => None,
     }
 }
 
@@ -511,10 +583,17 @@ fn open(config: &Config, name: &str) -> Option<Connection> {
             .iter()
             .map(|connection| connection.name.as_str())
             .collect();
-        eprintln!(
-            "unknown connection '{name}'; configured: {}",
-            configured.join(", ")
-        );
+        if configured.is_empty() {
+            eprintln!(
+                "unknown connection '{name}'; no connections configured (read {})",
+                config.path.display()
+            );
+        } else {
+            eprintln!(
+                "unknown connection '{name}'; configured: {}",
+                configured.join(", ")
+            );
+        }
         return None;
     };
     match db::Connection::open(spec, config) {
@@ -527,70 +606,73 @@ fn open(config: &Config, name: &str) -> Option<Connection> {
 }
 
 /// `-` is the statement on stdin, which is how a file or a heredoc gets in.
+/// Nothing but whitespace is refused here rather than sent: one server
+/// answers it with `0 rows` and the other with an ORA- number.
 fn statement(sql: &str) -> Result<String> {
-    if sql != "-" {
-        return Ok(sql.to_owned());
-    }
     let mut text = String::new();
-    std::io::stdin()
-        .read_to_string(&mut text)
-        .context("reading the statement from stdin")?;
+    if sql == "-" {
+        std::io::stdin()
+            .read_to_string(&mut text)
+            .context("reading the statement from stdin")?;
+    } else {
+        text = sql.to_owned();
+    }
+    if text.trim().is_empty() {
+        bail!("no statement given");
+    }
     Ok(text)
 }
 
 /// One result set: its columns and every row of it.
 type ResultSet = (Vec<Column>, Vec<Vec<Cell>>);
 
-/// Everything one statement said.
+/// Everything one statement said, and how long it took to say it — timed
+/// here rather than taken from the worker's whole milliseconds, so `bench`
+/// can tell a 0.2 ms round trip from a 0.9 ms one.
+#[derive(Default)]
 struct Answer {
     sets: Vec<ResultSet>,
     affected: Vec<u64>,
     rows: usize,
     truncated: bool,
-    first_row_ms: u32,
-    total_ms: u32,
+    /// To the first row, or to the end for a statement that had none.
+    first_row: Duration,
+    total: Duration,
 }
 
-/// Runs the statement and waits for it, cancelling if it takes longer than
-/// `timeout`. Held in memory rather than streamed: the table format needs
+/// Runs the statement and waits for it, cancelling if it is not done by
+/// `deadline`. Held in memory rather than streamed: the table format needs
 /// every row before it knows how wide a column is, and `--max-rows` is what
 /// keeps that honest.
 fn collect(
     connection: &Connection,
     sql: &str,
     options: QueryOptions,
-    timeout: Duration,
+    deadline: Instant,
 ) -> Result<Answer, DbError> {
+    let started = Instant::now();
     let events = connection.query(sql, options);
-    let deadline = Instant::now() + timeout;
-    let mut answer = Answer {
-        sets: Vec::new(),
-        affected: Vec::new(),
-        rows: 0,
-        truncated: false,
-        first_row_ms: 0,
-        total_ms: 0,
-    };
+    let mut answer = Answer::default();
+    let mut first_row = None;
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
         match events.recv_timeout(left) {
             Ok(QueryEvent::Columns(columns)) => answer.sets.push((columns, Vec::new())),
-            Ok(QueryEvent::Rows(batch)) => match answer.sets.last_mut() {
-                Some(set) => set.1.extend(batch),
-                None => answer.sets.push((Vec::new(), batch)),
-            },
+            Ok(QueryEvent::Rows(batch)) => {
+                first_row.get_or_insert_with(|| started.elapsed());
+                match answer.sets.last_mut() {
+                    Some(set) => set.1.extend(batch),
+                    None => answer.sets.push((Vec::new(), batch)),
+                }
+            }
             Ok(QueryEvent::RowsAffected(rows)) => answer.affected.push(rows),
             Ok(QueryEvent::Done {
-                rows,
-                truncated,
-                first_row_ms,
-                total_ms,
-                ..
+                rows, truncated, ..
             }) => {
                 answer.rows = rows;
                 answer.truncated = truncated;
-                answer.first_row_ms = first_row_ms;
-                answer.total_ms = total_ms;
+                answer.total = started.elapsed();
+                answer.first_row = first_row.unwrap_or(answer.total);
                 return Ok(answer);
             }
             Ok(QueryEvent::Error(error)) => return Err(error),
@@ -736,24 +818,88 @@ mod tests {
         assert_eq!(percentile(&five, 95), 50, "ceil(4.75) is the fifth");
         assert_eq!(percentile(&five, 100), 50, "the maximum");
         assert_eq!(percentile(&[7], 95), 7, "one sample is every percentile");
-        let twenty: Vec<u32> = (1..=20).collect();
+        let twenty: Vec<u64> = (1..=20).collect();
         assert_eq!(percentile(&twenty, 50), 10);
         assert_eq!(percentile(&twenty, 95), 19);
     }
 
     #[test]
-    fn a_phase_row_is_the_name_and_its_four_numbers() {
-        let mut samples = [4, 1, 9, 2, 3];
+    fn a_phase_row_is_the_name_and_its_four_numbers_in_milliseconds() {
+        let mut samples = [4_000, 150, 9_990, 2_000, 3_049];
+        let ms = |text: &str| Cell::Decimal(text.to_owned());
         assert_eq!(
             phase("total", &mut samples),
             vec![
                 Cell::Text("total".to_owned()),
-                Cell::Int(1),
-                Cell::Int(3),
-                Cell::Int(9),
-                Cell::Int(9),
-            ]
+                ms("0.1"),
+                ms("3.0"),
+                ms("9.9"),
+                ms("9.9"),
+            ],
+            "microseconds in, tenths of a millisecond out, never rounded up"
         );
+    }
+
+    #[test]
+    fn a_count_of_one_is_a_row() {
+        assert_eq!(rows_text(1), "1 row");
+        assert_eq!(rows_text(0), "0 rows");
+        assert_eq!(rows_text(2), "2 rows");
+    }
+
+    #[test]
+    fn an_object_name_may_quote_either_part() {
+        let pair = |schema: &str, name: &str| Some((schema.to_owned(), name.to_owned()));
+        assert_eq!(object_name("bench.customers"), pair("bench", "customers"));
+        assert_eq!(
+            object_name("[bench].[customers]"),
+            pair("bench", "customers")
+        );
+        assert_eq!(
+            object_name("\"BENCH\".\"Mixed.Case\""),
+            pair("BENCH", "Mixed.Case")
+        );
+        for wrong in ["customers", "a.b.c", ".x", "x.", "[a.b"] {
+            assert_eq!(object_name(wrong), None, "{wrong}");
+        }
+    }
+
+    #[test]
+    fn a_cap_or_a_timeout_of_zero_is_refused_by_the_parser() {
+        for arguments in [
+            ["query", "--max-rows", "0"],
+            ["query", "--timeout", "0"],
+            ["bench", "--max-rows", "0"],
+        ] {
+            let mut line = vec!["sql-bench", arguments[0], "--conn", "x"];
+            line.extend(&arguments[1..]);
+            line.push("select 1");
+            assert!(Cli::try_parse_from(&line).is_err(), "{line:?}");
+        }
+        assert!(Cli::try_parse_from(["sql-bench", "--max-rows", "0"]).is_err());
+    }
+
+    #[test]
+    fn the_tui_flags_are_not_a_subcommands() {
+        assert!(
+            Cli::try_parse_from([
+                "sql-bench",
+                "query",
+                "--conn",
+                "x",
+                "--connect-all",
+                "select 1"
+            ])
+            .is_err(),
+            "--connect-all means nothing to a query"
+        );
+    }
+
+    #[test]
+    fn nothing_but_whitespace_is_not_a_statement() {
+        let failure = statement("  \n\t ").unwrap_err();
+        assert_eq!(failure.to_string(), "no statement given");
+        assert_eq!(statement(" select 1 ").unwrap(), " select 1 ");
     }
 
     #[test]

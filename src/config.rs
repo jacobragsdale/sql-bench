@@ -2,8 +2,11 @@
 //! Instant Client is.
 //!
 //! It lives at `~/.config/sql-bench/config.toml`, or wherever
-//! `$SQL_BENCH_CONFIG` says. A missing file is not an error — it is an
-//! empty configuration, which is what a first run has.
+//! `$SQL_BENCH_CONFIG` or `--config` says. A missing default file is not an
+//! error — it is an empty configuration, which is what a first run has — but
+//! a file somebody named has to be there, or a typo in the name would look
+//! like a file with no connections in it. So does a key the file does not
+//! know: `pasword` is refused, not ignored.
 //!
 //! ```toml
 //! [oracle]
@@ -37,6 +40,9 @@ use serde::Deserialize;
 pub struct Config {
     pub oracle: Oracle,
     pub connections: Vec<Connection>,
+    /// The file this was read from, for a message that has to say where the
+    /// connections were looked for.
+    pub path: PathBuf,
 }
 
 impl Config {
@@ -51,6 +57,7 @@ impl Config {
 
 /// The `[oracle]` table: what the ODPI-C driver needs to find at runtime.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct Oracle {
     /// The Instant Client directory; a leading `~` is your home directory.
     #[serde(default)]
@@ -146,6 +153,7 @@ fn run_password_cmd(command: &str) -> Result<String> {
 /// from [`Connection`] so that a bad `kind` is reported against the
 /// connection's name rather than against a line number.
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct File {
     #[serde(default)]
     oracle: Oracle,
@@ -154,6 +162,7 @@ struct File {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawConnection {
     name: String,
     kind: String,
@@ -225,6 +234,12 @@ pub fn default_path() -> PathBuf {
     )
 }
 
+/// Whether `$SQL_BENCH_CONFIG` names a file — which then has to exist.
+#[must_use]
+pub fn named_by_env() -> bool {
+    std::env::var_os("SQL_BENCH_CONFIG").is_some_and(|path| !path.is_empty())
+}
+
 fn resolve_path(named: Option<OsString>, home: Option<OsString>) -> PathBuf {
     let home = home.map(PathBuf::from);
     match named.filter(|path| !path.is_empty()) {
@@ -246,18 +261,27 @@ fn expand_home(path: &Path, home: Option<&Path>) -> PathBuf {
     }
 }
 
-/// Reads and checks the file. A missing one is an empty configuration;
+/// Reads and checks the file. A missing one is an empty configuration
+/// unless it is `required` — named by `--config` or `$SQL_BENCH_CONFIG`;
 /// anything else wrong names the file, and the connection or the line.
-pub fn load(path: &Path) -> Result<Config> {
-    match std::fs::read_to_string(path) {
+pub fn load(path: &Path, required: bool) -> Result<Config> {
+    let config = match std::fs::read_to_string(path) {
         Ok(source) => parse(
             &source,
             std::env::var_os("HOME").map(PathBuf::from).as_deref(),
         )
-        .with_context(|| path.display().to_string()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
-        Err(error) => Err(error).with_context(|| format!("reading {}", path.display())),
-    }
+        .with_context(|| path.display().to_string())?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && !required => {
+            Config::default()
+        }
+        Err(error) => {
+            return Err(error).with_context(|| format!("reading {}", path.display()));
+        }
+    };
+    Ok(Config {
+        path: path.to_path_buf(),
+        ..config
+    })
 }
 
 fn parse(source: &str, home: Option<&Path>) -> Result<Config> {
@@ -281,6 +305,7 @@ fn parse(source: &str, home: Option<&Path>) -> Result<Config> {
                 .map(|path| expand_home(&path, home)),
         },
         connections,
+        path: PathBuf::new(),
     })
 }
 
@@ -316,10 +341,22 @@ trust_cert = true
     }
 
     #[test]
-    fn a_missing_file_is_an_empty_configuration() {
+    fn a_missing_file_is_an_empty_configuration_unless_it_was_named() {
         let directory = tempfile::tempdir().unwrap();
         let missing = directory.path().join("nothing-here.toml");
-        assert_eq!(load(&missing).unwrap(), Config::default());
+        let config = load(&missing, false).unwrap();
+        assert!(config.connections.is_empty());
+        assert_eq!(config.path, missing, "and it says where it looked");
+        let failure = format!("{:#}", load(&missing, true).unwrap_err());
+        assert!(failure.starts_with("reading "), "{failure}");
+        assert!(failure.contains("nothing-here.toml"), "{failure}");
+    }
+
+    #[test]
+    fn a_key_the_file_does_not_know_is_an_error_not_a_default() {
+        let failure = failure(&LOCAL_MSSQL.replace("password =", "pasword ="));
+        assert!(failure.contains("unknown field `pasword`"), "{failure}");
+        assert!(failure.contains("line 8"), "{failure}");
     }
 
     #[test]
@@ -472,7 +509,7 @@ password_cmd = "pass show bench"
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");
         std::fs::write(&path, "[[connection]]\nname = \"x\"\nkind = mssql\n").unwrap();
-        let failure = format!("{:#}", load(&path).unwrap_err());
+        let failure = format!("{:#}", load(&path, true).unwrap_err());
         assert!(failure.contains("config.toml"), "{failure}");
         assert!(failure.contains("line 3"), "{failure}");
     }
