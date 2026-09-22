@@ -11,6 +11,7 @@
 //! cancel is worse than one with no manual transactions.
 
 use std::ffi::OsString;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -18,7 +19,9 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 use std::time::Instant;
 
-use oracle::sql_type::{Blob, Clob, Nclob, OracleType};
+use oracle::io::SeekInChars;
+use oracle::oci_attr::DefaultLobPrefetchSize;
+use oracle::sql_type::{Blob, Clob, Lob, Nclob, OracleType};
 use oracle::{Connection as Driver, InitParams, SqlValue};
 
 use super::model::{Cell, Column, DbError};
@@ -32,6 +35,12 @@ const CLIENT_DIR_ENV: &str = "SQL_BENCH_ORACLE_CLIENT_DIR";
 /// four gigabytes and a workbench has no business holding one because
 /// somebody typed `select *`; the locator lets us stop reading here.
 const LOB_LIMIT: usize = 1024 * 1024;
+
+/// How much of each LOB rides along with its row, in the LOB's own unit
+/// (characters for a CLOB). A LOB this small costs no round trip of its own:
+/// its size and its data both come from the fetch. Oracle reserves this much
+/// per row of the fetch array, so it stays small.
+const LOB_PREFETCH: u32 = 8 * 1024;
 
 /// Long enough for a container still waking up, short enough that a wrong
 /// host does not look like a hang. Easy Connect Plus carries it, because
@@ -109,6 +118,9 @@ impl Backend {
         let mut driver = Driver::connect(&self.user, &self.password, &self.connect_string)
             .map_err(|why| DbError::Connect(complaint(&why)))?;
         driver.set_autocommit(true);
+        // Only speed rides on this: a client that refuses it still reads
+        // every LOB, a round trip or two slower.
+        let _ = driver.set_oci_attr::<DefaultLobPrefetchSize>(&LOB_PREFETCH);
         self.driver = Some(Arc::new(driver));
         Ok(())
     }
@@ -380,9 +392,25 @@ fn cell(column_type: &OracleType, value: &SqlValue<'_>) -> Result<Cell, DbError>
         | OracleType::TimestampTZ(_)
         | OracleType::TimestampLTZ(_) => Cell::DateTime(get(value)?),
         OracleType::Raw(_) | OracleType::LongRaw => Cell::Bytes(get(value)?),
-        OracleType::CLOB => text(&mut get::<Clob>(value)?)?,
-        OracleType::NCLOB => text(&mut get::<Nclob>(value)?)?,
-        OracleType::BLOB => Cell::Bytes(lob(&mut get::<Blob>(value)?)?.0),
+        OracleType::CLOB => {
+            let mut clob = get::<Clob>(value)?;
+            let size = size(&clob)?;
+            text(lob(&mut clob, size, |clob| {
+                clob.seek_in_chars(SeekFrom::Current(0))
+            })?)
+        }
+        OracleType::NCLOB => {
+            let mut nclob = get::<Nclob>(value)?;
+            let size = size(&nclob)?;
+            text(lob(&mut nclob, size, |nclob| {
+                nclob.seek_in_chars(SeekFrom::Current(0))
+            })?)
+        }
+        OracleType::BLOB => {
+            let mut blob = get::<Blob>(value)?;
+            let size = size(&blob)?;
+            Cell::Bytes(lob(&mut blob, size, Seek::stream_position)?.0)
+        }
         // CHAR, VARCHAR2, NCHAR, NVARCHAR2, LONG, the intervals, ROWID, XML,
         // JSON: the driver's own text, which is the value as the server wrote
         // it rather than a Rust type's idea of it.
@@ -398,8 +426,7 @@ fn get<T: oracle::sql_type::FromSql>(value: &SqlValue<'_>) -> Result<T, DbError>
     })
 }
 
-fn text(reader: &mut impl std::io::Read) -> Result<Cell, DbError> {
-    let (mut bytes, truncated) = lob(reader)?;
+fn text((mut bytes, truncated): (Vec<u8>, bool)) -> Cell {
     if truncated {
         // Cut on a character boundary so the lossy decode below does not
         // invent a replacement character at the end of every long CLOB.
@@ -411,29 +438,44 @@ fn text(reader: &mut impl std::io::Read) -> Result<Cell, DbError> {
     if truncated {
         text.push('…');
     }
-    Ok(Cell::Text(text))
+    Cell::Text(text)
 }
 
 /// At most [`LOB_LIMIT`] bytes of a locator, and whether there were more.
-// ponytail: every LOB costs one more round trip than its data, the read that
-// comes back empty. A short read is not the end: a CLOB read stops at 16,384
-// characters whatever the buffer, so only the empty one is certain. Ask the
-// locator for its size first if a column of small CLOBs over a WAN matters.
-fn lob(reader: &mut impl std::io::Read) -> Result<(Vec<u8>, bool), DbError> {
+/// `at` is how far in the reader is, in the locator's own unit (characters
+/// for a CLOB, which is also what its size counts): stopping at the size
+/// saves the empty read that would otherwise find the end, a round trip per
+/// cell. A short read is no sign of the end, since a CLOB read stops at
+/// 16,384 characters whatever the buffer.
+fn lob<R: Read>(
+    locator: &mut R,
+    size: u64,
+    at: impl Fn(&mut R) -> std::io::Result<u64>,
+) -> Result<(Vec<u8>, bool), DbError> {
+    let broke = |why: std::io::Error| DbError::Query {
+        message: why.to_string(),
+        line: None,
+    };
     let mut bytes = Vec::new();
     let mut chunk = vec![0u8; 64 * 1024];
-    while bytes.len() <= LOB_LIMIT {
-        let read = reader.read(&mut chunk).map_err(|why| DbError::Query {
-            message: why.to_string(),
-            line: None,
-        })?;
+    while bytes.len() <= LOB_LIMIT && at(locator).map_err(broke)? < size {
+        let read = locator.read(&mut chunk).map_err(broke)?;
         if read == 0 {
-            return Ok((bytes, false));
+            break;
         }
         bytes.extend_from_slice(&chunk[..read]);
     }
+    let truncated = bytes.len() > LOB_LIMIT;
     bytes.truncate(LOB_LIMIT);
-    Ok((bytes, true))
+    Ok((bytes, truncated))
+}
+
+/// A LOB's length, which the prefetch brought along with the row.
+fn size(locator: &impl Lob) -> Result<u64, DbError> {
+    locator.size().map_err(|why| DbError::Query {
+        message: complaint(&why),
+        line: None,
+    })
 }
 
 /// What the server said, on the line of the statement it said it about:
@@ -617,16 +659,32 @@ mod tests {
         assert_eq!(line_of(sql, 15), 3);
     }
 
+    /// A LOB read the way a locator is: up to the size it reports.
+    fn read(data: &[u8]) -> (Vec<u8>, bool) {
+        let size = data.len() as u64;
+        lob(&mut std::io::Cursor::new(data), size, Seek::stream_position).unwrap()
+    }
+
+    #[test]
+    fn a_lob_is_read_to_its_size_and_no_further() {
+        // The reader has more than the locator's size: only an empty read
+        // could have found that end, and the size saves making it.
+        let mut reader = std::io::Cursor::new(b"abcdef".to_vec());
+        let read = lob(&mut reader, 3, |_| Ok(3)).unwrap();
+        assert_eq!(read, (Vec::new(), false));
+        assert_eq!(reader.position(), 0, "nothing read past the size");
+    }
+
     #[test]
     fn a_lob_stops_at_the_ceiling_and_says_so() {
         let short = b"short".to_vec();
-        assert_eq!(lob(&mut short.as_slice()).unwrap(), (short.clone(), false));
+        assert_eq!(read(&short), (short.clone(), false));
 
         let exact = vec![b'x'; LOB_LIMIT];
-        assert_eq!(lob(&mut exact.as_slice()).unwrap(), (exact, false));
+        assert_eq!(read(&exact), (exact, false));
 
         let long = vec![b'x'; LOB_LIMIT + 1];
-        let (bytes, truncated) = lob(&mut long.as_slice()).unwrap();
+        let (bytes, truncated) = read(&long);
         assert_eq!(bytes.len(), LOB_LIMIT);
         assert!(truncated);
     }
@@ -635,7 +693,7 @@ mod tests {
     fn a_long_blob_keeps_its_first_mebibyte_whatever_the_bytes_are() {
         // 0xff is never UTF-8: a character-boundary cut would eat all of it.
         let long = vec![0xff; LOB_LIMIT * 2];
-        let (bytes, truncated) = lob(&mut long.as_slice()).unwrap();
+        let (bytes, truncated) = read(&long);
         assert_eq!(bytes.len(), LOB_LIMIT);
         assert!(truncated);
     }
@@ -647,7 +705,7 @@ mod tests {
         let mut source = vec![b'x'; LOB_LIMIT - 1];
         source.extend_from_slice("é".as_bytes());
         source.extend_from_slice(&[b'y'; 10]);
-        let Cell::Text(text) = text(&mut source.as_slice()).unwrap() else {
+        let Cell::Text(text) = text(read(&source)) else {
             panic!("a CLOB is text");
         };
         assert!(text.ends_with('…'));
