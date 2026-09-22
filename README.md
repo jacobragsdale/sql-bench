@@ -154,6 +154,8 @@ Scratch:
 | `Tab` | two spaces |
 | `Home` | line start |
 | `End` | line end |
+| `PageDown` | page down |
+| `PageUp` | page up |
 | `Ctrl-A` | line start |
 | `Ctrl-U` | delete to line start |
 | `Ctrl-K` | delete to line end |

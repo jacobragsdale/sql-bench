@@ -415,6 +415,8 @@ fn the_keys_of_a_pane_are_its_own_and_the_ones_that_work_anywhere() {
             "Tab",
             "Home",
             "End",
+            "PageDown",
+            "PageUp",
             "Ctrl-A",
             "Ctrl-U",
             "Ctrl-K",

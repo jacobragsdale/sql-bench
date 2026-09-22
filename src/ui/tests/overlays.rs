@@ -66,6 +66,8 @@ fn a_help_too_long_for_the_screen_scrolls_instead_of_being_cut_off() {
     assert!(screen.contains(&rows[0]), "{screen}");
     assert!(!screen.contains(rows.last().expect("keys")), "{screen}");
 
+    // Two pages is past the end, which is as far as it goes.
+    app.handle(Event::Key(key("PageDown")));
     app.handle(Event::Key(key("PageDown")));
     let screen = text(&frame(60, 15, &app));
     let top = rows.len() - showing;

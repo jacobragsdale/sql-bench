@@ -49,6 +49,8 @@ pub const KEYS: &[(&str, &str, &str)] = &[
     ("Tab", SCRATCH, "two spaces"),
     ("Home", SCRATCH, "line start"),
     ("End", SCRATCH, "line end"),
+    ("PageDown", SCRATCH, "page down"),
+    ("PageUp", SCRATCH, "page up"),
     ("Ctrl-A", SCRATCH, "line start"),
     ("Ctrl-U", SCRATCH, "delete to line start"),
     ("Ctrl-K", SCRATCH, "delete to line end"),
