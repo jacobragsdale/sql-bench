@@ -404,3 +404,61 @@ fn a_filter_keystroke_reaches_the_frame_inside_the_budget_over_a_hundred_thousan
         "filter key to frame p95 was {p95:?}, and the budget is {KEY_TO_FRAME:?}"
     );
 }
+
+/// `y` over a range of 10,000 rows by 20 columns: 200,000 cells turned into
+/// tab-separated text in one key, which is all of the copy the app does
+/// before the run loop hands it on.
+#[test]
+#[ignore = "a timing: cargo test --release -- --ignored"]
+fn a_copy_of_ten_thousand_rows_by_twenty_columns_is_inside_the_key_budget() {
+    let mut app = App::new(&config());
+    app.shell.focus = Focus::Results;
+    let results = &mut app.tabs.first_mut().expect("a tab").results;
+    results.start(Instant::now(), 0, 1, false);
+    results.apply(QueryEvent::Columns(
+        (0..20)
+            .map(|column| Column {
+                name: format!("column_{column}"),
+                type_name: "nvarchar(64)".to_owned(),
+            })
+            .collect(),
+    ));
+    results.apply(QueryEvent::Rows(
+        (0..10_000)
+            .map(|row| {
+                (0..20)
+                    .map(|column| match column % 4 {
+                        0 => Cell::Int(row),
+                        1 => Cell::Null,
+                        2 => Cell::Decimal(format!("{}.{:02}", row % 10_000, row % 100)),
+                        _ => Cell::Text(format!("note for row {row}, column {column}")),
+                    })
+                    .collect()
+            })
+            .collect(),
+    ));
+    let press = |app: &mut App, code: char| {
+        app.handle(Event::Key(KeyEvent::new(
+            KeyCode::Char(code),
+            KeyModifiers::NONE,
+        )))
+    };
+    for code in ['v', 'G', '$'] {
+        press(&mut app, code);
+    }
+    let mut samples = Vec::new();
+    for _ in 0..5 {
+        let mut copying = app.clone();
+        let at = Instant::now();
+        let actions = press(&mut copying, 'y');
+        samples.push(at.elapsed());
+        assert_eq!(copying.shell.status, "copied 200,000 cells");
+        assert_eq!(actions.len(), 1);
+    }
+    let took = median(samples);
+    eprintln!("y over 10,000 x 20 cells: {took:?}  (budget {KEY_TO_FRAME:?})");
+    assert!(
+        took < KEY_TO_FRAME * MARGIN,
+        "a copy of 10,000 x 20 cells took {took:?}, and the budget is {KEY_TO_FRAME:?}"
+    );
+}

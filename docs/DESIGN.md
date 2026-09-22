@@ -330,10 +330,27 @@ printable ones beside it, and a NULL is the word. j k, the arrows and
 PageUp/PageDown scroll it, which the grid under it does not see; Esc closes
 it, after the help and before a running query.
 
-`y` copies the cell and `Y` the row, tab-separated with a NULL as nothing,
-into the app's clipboard and out to the system's; the footer says `copied 1
-cell`. In the pad Ctrl-C copies the selection, or the statement under the
-cursor when there is none, and Ctrl-X cuts it.
+The grid selects a range of cells: the rectangle between an anchor and the
+cursor, painted in the selection colour and counted in the title, `Results ·
+50 rows · 42 ms · 3×2 selected`. Shift-arrows set the anchor at the cursor
+and grow the range, and an unshifted move drops it; `v` sets it and makes
+every movement key grow the range until `v` again — `v G` is the column from
+the cursor down, `v $` the rest of the row. Dragging over cells selects from
+the cell the button went down on, Shift-click from the anchor or the cursor,
+and a right-click inside the range keeps it for the menu. Esc drops it, after
+cancelling a running query; a sort, `[` or `]`, a new result set, a run or
+`m` drop it too.
+
+`y` or Ctrl-C copies the range as tab-separated lines, or the one cell as it
+is when there is no range; `Y` copies every column of the rows the range
+spans — the cursor's row without one — under a line of column names. A NULL
+is nothing, and a value with a tab, a line break or a quote in it is quoted
+the way `src/export.rs` quotes CSV, so a spreadsheet pastes one value per
+cell. Either goes into the app's clipboard and out to the system's, ends the
+range as `y` ends a visual selection in vim, and the footer says `copied 1
+cell`, `copied 6 cells` or `copied 3 rows`. In the pad Ctrl-C copies the
+selection, or the statement under the cursor when there is none, and Ctrl-X
+cuts it.
 
 Out to the system's is two routes at once, both best effort. OSC 52 is
 written on every copy, because it is the only one that reaches the clipboard
@@ -358,7 +375,9 @@ or the export prompt when one is open, and nowhere while the help, the
 inspector or a menu is. Inside tmux, OSC 52 needs `set -g set-clipboard on`;
 the tool route does not care. A replay never runs a tool: `clipboard <text>`
 sets its fake, and a copy writes the fake, so copy and paste round-trip
-headlessly. `e` opens a one-line prompt in the footer, `Export to: ` prefilled with
+headlessly.
+
+`e` opens a one-line prompt in the footer, `Export to: ` prefilled with
 `~/sql-bench-<connection>-<YYYYmmdd-HHMMSS>.csv`, which takes every key while
 it is open — insert, Backspace, Left, Right, Home, End and Ctrl-U, and Esc to
 give up. Enter writes every fetched row of the set on screen: JSON for a

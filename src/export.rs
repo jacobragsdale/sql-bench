@@ -182,12 +182,27 @@ pub fn csv(columns: &[Column], rows: &[Vec<Cell>]) -> String {
 }
 
 fn csv_row<'a>(out: &mut String, fields: impl Iterator<Item = impl Into<Cow<'a, str>>>) {
+    delimited_row(out, ',', fields);
+}
+
+/// One line of tab-separated fields, quoted the way [`csv`] quotes with the
+/// tab in the comma's place: a spreadsheet reads that back as one cell per
+/// field, a value with a tab or a line break in it included.
+pub fn tsv_row<'a>(out: &mut String, fields: impl Iterator<Item = impl Into<Cow<'a, str>>>) {
+    delimited_row(out, '\t', fields);
+}
+
+fn delimited_row<'a>(
+    out: &mut String,
+    separator: char,
+    fields: impl Iterator<Item = impl Into<Cow<'a, str>>>,
+) {
     for (index, field) in fields.enumerate() {
         if index > 0 {
-            out.push(',');
+            out.push(separator);
         }
         let field: Cow<'a, str> = field.into();
-        if field.contains(['"', ',', '\n', '\r']) {
+        if field.contains(['"', separator, '\n', '\r']) {
             out.push('"');
             for c in field.chars() {
                 if c == '"' {

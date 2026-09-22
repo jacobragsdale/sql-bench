@@ -227,11 +227,24 @@ fn grid(
             &column.type_name
         }));
     }
+    let selection = results.selection();
+    let chosen = |row: usize, column: usize| {
+        selection
+            .as_ref()
+            .is_some_and(|(rows, columns)| rows.contains(&row) && columns.contains(&column))
+    };
     for (number, row) in results.rows().iter().enumerate().skip(top).take(visible) {
         let mut spans = Vec::with_capacity(showing.len() * 2);
         for (index, column) in showing.iter().copied().enumerate() {
             if index > 0 {
-                spans.push(Span::raw(" ".repeat(GAP)));
+                // The gap inside a range is painted too, so it reads as one
+                // block rather than a row of separate cells.
+                let gap = if chosen(number, column) && chosen(number, column - 1) {
+                    theme.selection
+                } else {
+                    Style::default()
+                };
+                spans.push(Span::styled(" ".repeat(GAP), gap));
             }
             let cell = row.get(column);
             let right = matches!(
@@ -240,6 +253,8 @@ fn grid(
             );
             let style = if (number, column) == (selected_row, selected_column) {
                 theme.cursor
+            } else if chosen(number, column) {
+                theme.selection
             } else if matches!(cell, Some(Cell::Null) | None) {
                 theme.dim
             } else {

@@ -925,6 +925,57 @@ fn a_click_below_the_last_row_selects_nothing() {
 }
 
 #[test]
+fn a_drag_over_cells_selects_the_range_and_shift_click_extends_it() {
+    let mut app = deep();
+    let before = frame(120, 40, &app);
+    // Row 32 of column_0, dragged to row 34 of column_2.
+    mouse(&mut app, MouseEventKind::Down(MouseButton::Left), 40, 20);
+    mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), 60, 21);
+    mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), 95, 22);
+    assert!(mouse(&mut app, MouseEventKind::Up(MouseButton::Left), 95, 22).is_empty());
+    let results = &app.tabs[0].results;
+    assert_eq!(results.selection(), Some((32..=34, 0..=2)));
+    assert_eq!(results.selected(), (34, 2), "the cursor is where it ended");
+    assert_eq!(
+        lines(&frame(120, 40, &app), 19..38),
+        lines(&before, 19..38),
+        "the view stayed where it was"
+    );
+
+    // Off the grid it stays the range it was.
+    mouse(&mut app, MouseEventKind::Down(MouseButton::Left), 40, 20);
+    mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), 40, 21);
+    mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), 5, 10);
+    mouse(&mut app, MouseEventKind::Up(MouseButton::Left), 5, 10);
+    assert_eq!(app.tabs[0].results.selection(), Some((32..=33, 0..=0)));
+
+    // Shift-click goes on from where the range started.
+    let hits = hits(&app);
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        let event = MouseEvent {
+            kind,
+            column: 60,
+            row: 25,
+            modifiers: KeyModifiers::SHIFT,
+        };
+        app.pointer(event, Instant::now(), &hits);
+    }
+    assert_eq!(app.tabs[0].results.selection(), Some((32..=37, 0..=1)));
+
+    // A right-click inside it keeps it for the menu's copy; a plain click
+    // anywhere drops it.
+    right_click(&mut app, WIDE, (40, 21));
+    assert_eq!(app.tabs[0].results.selection(), Some((32..=37, 0..=1)));
+    app.handle(Event::Key(key("Esc")));
+    click(&mut app, 40, 21);
+    assert_eq!(app.tabs[0].results.selection(), None);
+    assert_eq!(app.tabs[0].results.selected(), (33, 0));
+}
+
+#[test]
 fn a_double_click_on_a_cell_inspects_it() {
     let mut app = deep();
     assert!(double_click(&mut app, 40, 20).is_empty());
@@ -1625,7 +1676,7 @@ fn picking_each_entry_is_exactly_its_key() {
         }
     }
     assert!(wrong.is_empty(), "{wrong:#?}");
-    assert_eq!(checked, 6 * (7 + 8 + 8));
+    assert_eq!(checked, 6 * (7 + 8 + 9));
 }
 
 #[test]
@@ -1699,17 +1750,18 @@ fn a_right_click_in_the_pads_selection_keeps_it_and_beside_it_moves_the_cursor()
 }
 
 /// The menu for Results, as it is drawn at the right end of a frame.
-const RESULTS_MENU: [&str; 10] = [
-    "╭ Results ──────────────────────╮",
-    "│ inspect the cell        Enter │",
-    "│ copy the cell               y │",
-    "│ copy the row                Y │",
-    "│ sort by the column          o │",
-    "│ export the result set       e │",
-    "│ 10,000 more rows            m │",
-    "│ previous result set         [ │",
-    "│ next result set             ] │",
-    "╰───────────────────────────────╯",
+const RESULTS_MENU: [&str; 11] = [
+    "╭ Results ───────────────────────────╮",
+    "│ inspect the cell             Enter │",
+    "│ copy the cell or selection       y │",
+    "│ copy the rows with headers       Y │",
+    "│ select a range                   v │",
+    "│ sort by the column               o │",
+    "│ export the result set            e │",
+    "│ 10,000 more rows                 m │",
+    "│ previous result set              [ │",
+    "│ next result set                  ] │",
+    "╰────────────────────────────────────╯",
 ];
 
 #[test]
@@ -1721,10 +1773,10 @@ fn a_menu_opened_near_the_bottom_right_corner_stays_on_the_screen() {
     let terminal = frame(120, 40, &app);
     let expected: Vec<String> = RESULTS_MENU
         .iter()
-        .map(|row| format!("│{:34}││{:49}{row}│", "", ""))
+        .map(|row| format!("│{:34}││{:44}{row}│", "", ""))
         .collect();
-    assert_eq!(lines(&terminal, 28..38), expected);
-    assert_eq!(line(&terminal, 27), right(""));
+    assert_eq!(lines(&terminal, 27..38), expected);
+    assert_eq!(line(&terminal, 26), right(""));
 
     // At the smallest size there is not the room below it either, so it
     // goes up from the pointer too, and over the panes' borders.
@@ -1732,18 +1784,19 @@ fn a_menu_opened_near_the_bottom_right_corner_stays_on_the_screen() {
     right_click(&mut app, SMALL, (58, 12));
     let terminal = frame(60, 15, &app);
     assert_eq!(
-        lines(&terminal, 3..13),
+        lines(&terminal, 2..13),
         [
-            "│   ▾ Tables       ││     ╭ Results ──────────────────────╮│",
-            "│     ▸ customers  ││     │ inspect the cell        Enter ││",
-            "│     ▸ orders     │╰─────│ copy the cell               y │╯",
-            "│   ▸ Views        │╭ Resu│ copy the row                Y │╮",
-            "│   ▸ Procedures   ││ noth│ sort by the column          o ││",
-            "│   ▸ Functions    ││     │ export the result set       e ││",
-            "│   ▸ Sequences    ││     │ 10,000 more rows            m ││",
-            "│ ▸ bench          ││     │ previous result set         [ ││",
-            "│                  ││     │ next result set             ] ││",
-            "│                  ││     ╰───────────────────────────────╯│",
+            "│ ▾ dbo            ││╭ Results ───────────────────────────╮│",
+            "│   ▾ Tables       │││ inspect the cell             Enter ││",
+            "│     ▸ customers  │││ copy the cell or selection       y ││",
+            "│     ▸ orders     │╰│ copy the rows with headers       Y │╯",
+            "│   ▸ Views        │╭│ select a range                   v │╮",
+            "│   ▸ Procedures   │││ sort by the column               o ││",
+            "│   ▸ Functions    │││ export the result set            e ││",
+            "│   ▸ Sequences    │││ 10,000 more rows                 m ││",
+            "│ ▸ bench          │││ previous result set              [ ││",
+            "│                  │││ next result set                  ] ││",
+            "│                  ││╰────────────────────────────────────╯│",
         ]
     );
 }
@@ -1754,13 +1807,13 @@ fn the_entry_enter_would_pick_is_painted_like_the_cursor_and_the_pointer_lights_
     let mut app = idle();
     right_click(&mut app, WIDE, (118, 37));
     app.handle(Event::Key(key("j")));
-    app.shell.mouse.pointer = Some(Position::new(100, 32));
+    app.shell.mouse.pointer = Some(Position::new(100, 31));
     let terminal = frame(120, 40, &app);
     let buffer = terminal.backend().buffer();
     // The second entry is highlighted and the fourth is under the pointer.
-    for (y, reversed) in [(29, false), (30, true), (31, false)] {
+    for (y, reversed) in [(28, false), (29, true), (30, false)] {
         assert_eq!(
-            (88..118).all(|x| buffer[(x, y)]
+            (83..118).all(|x| buffer[(x, y)]
                 .modifier
                 .contains(ratatui::style::Modifier::REVERSED)),
             reversed,
@@ -1768,8 +1821,8 @@ fn the_entry_enter_would_pick_is_painted_like_the_cursor_and_the_pointer_lights_
         );
     }
     assert!(
-        (88..118)
-            .all(|x| Style::new().fg(buffer[(x, 32)].fg).bg(buffer[(x, 32)].bg) == theme.hover)
+        (83..118)
+            .all(|x| Style::new().fg(buffer[(x, 31)].fg).bg(buffer[(x, 31)].bg) == theme.hover)
     );
 }
 
@@ -1785,7 +1838,7 @@ fn the_menu_takes_every_key_while_it_is_open() {
     for _ in 0..20 {
         app.handle(Event::Key(key("j")));
     }
-    assert_eq!(item(&app), Some(7), "the last entry is as far as it goes");
+    assert_eq!(item(&app), Some(8), "the last entry is as far as it goes");
     assert!(
         app.handle(Event::Key(key("Esc"))).is_empty(),
         "Esc closed the menu before it cancelled the query"

@@ -32,9 +32,14 @@ fn the_help_lists_the_keys_of_the_focused_pane_and_no_others() {
             let row = format!(" {spec:<width$}{does}");
             let works_here =
                 keys_for(focus).any(|(other, _, other_does)| other == spec && other_does == does);
+            // The whole row up to the border, so `select` is not found in
+            // `select a range`.
+            let listed = screen.lines().any(|line| {
+                line.find(&row)
+                    .is_some_and(|at| line[at + row.len()..].trim_start().starts_with('│'))
+            });
             assert_eq!(
-                screen.contains(&row),
-                works_here,
+                listed, works_here,
                 "{spec} ({place}: {does}) with {focus:?} focused:\n{screen}"
             );
         }

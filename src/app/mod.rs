@@ -83,8 +83,11 @@ pub const KEYS: &[(&str, &str, &str)] = &[
     ("]", RESULTS, "next result set"),
     ("m", RESULTS, "10,000 more rows"),
     ("Enter", RESULTS, "inspect the cell"),
-    ("y", RESULTS, "copy the cell"),
-    ("Y", RESULTS, "copy the row"),
+    ("v", RESULTS, "select a range"),
+    ("Shift-Arrows", RESULTS, "select a range"),
+    ("y", RESULTS, "copy the cell or selection"),
+    ("Ctrl-C", RESULTS, "copy the selection"),
+    ("Y", RESULTS, "copy the rows with headers"),
     ("e", RESULTS, "export the result set"),
     ("o", RESULTS, "sort by the column"),
     ("j", OBJECTS, "down"),
@@ -716,6 +719,13 @@ impl App {
                     self.shell.inspector = None;
                 } else if self.tab().is_some_and(|tab| tab.results.running()) {
                     return vec![Action::Cancel(self.shell.active_tab)];
+                } else if self.shell.focus == Focus::Results
+                    && self
+                        .tabs
+                        .get_mut(self.shell.active_tab)
+                        .is_some_and(|tab| tab.results.clear_selection())
+                {
+                    // The range was all this Esc was for.
                 } else if self.shell.focus == Focus::Objects
                     && self
                         .tab()
@@ -972,14 +982,35 @@ impl App {
                 let text = open.results.source_text().unwrap_or_default();
                 self.copied(text, "the source")
             }
-            Hit::CopyCell => match open.results.cell().map(|cell| cell.display().into_owned()) {
-                Some(text) => self.copied(text, "1 cell"),
-                None => Vec::new(),
-            },
-            Hit::CopyRow => match open.results.row_text() {
-                Some(text) => self.copied(text, "1 row"),
-                None => Vec::new(),
-            },
+            // A copy ends the range, the way `y` ends a visual selection in
+            // vim.
+            Hit::CopyCell => {
+                let copy = match open.results.selection_text() {
+                    Some((text, cells)) => {
+                        Some((text, format!("{} cells", results::grouped(cells))))
+                    }
+                    None => open
+                        .results
+                        .cell()
+                        .map(|cell| (cell.display().into_owned(), "1 cell".to_owned())),
+                };
+                open.results.clear_selection();
+                match copy {
+                    Some((text, what)) => self.copied(text, &what),
+                    None => Vec::new(),
+                }
+            }
+            Hit::CopyRow => {
+                let copy = open.results.rows_text();
+                open.results.clear_selection();
+                match copy {
+                    Some((text, 1)) => self.copied(text, "1 row"),
+                    Some((text, rows)) => {
+                        self.copied(text, &format!("{} rows", results::grouped(rows)))
+                    }
+                    None => Vec::new(),
+                }
+            }
             Hit::Export => {
                 self.shell.prompt = Some(Prompt::new(prompt::export_path(&open.name)));
                 Vec::new()
