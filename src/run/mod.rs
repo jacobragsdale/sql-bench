@@ -15,7 +15,9 @@ pub use replay::replay;
 pub use runtime::{Pending, Runtime, startup_tabs};
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -60,6 +62,22 @@ const SETTLE_POLL: Duration = Duration::from_millis(100);
 /// answer is a few milliseconds away and is drawn as soon as it lands.
 const PASTE_POLL: Duration = Duration::from_millis(10);
 
+/// How long the input thread waits for the terminal before it looks again at
+/// whether the editor wants it, which is how long Ctrl-E can take to start.
+const READ_POLL: Duration = Duration::from_millis(50);
+
+/// The most OSC 52 is asked to carry, encoded. Terminals cap the sequence at
+/// about this (xterm and tmux at 100 000 bytes) and cut or drop a longer one,
+/// and writing megabytes of it to a slow tty would stall the loop besides.
+const OSC52_LIMIT: usize = 100_000;
+
+/// Whether `$EDITOR` has the terminal, and the lock the input thread holds
+/// while it reads it. Without them the thread reads keys meant for the
+/// editor, which gets every other one. One of each per process: there is
+/// one terminal.
+static EDITING: AtomicBool = AtomicBool::new(false);
+static READING: Mutex<()> = Mutex::new(());
+
 /// A turn slower than this is worth a `turn` line in the trace. Anything
 /// faster is the loop working as intended and not worth the write.
 const SLOW_TURN: Duration = Duration::from_millis(30);
@@ -80,6 +98,12 @@ pub trait InputSource {
     /// otherwise a dead terminal under `--connect` spins the loop for ever.
     fn live(&self) -> bool {
         true
+    }
+
+    /// Whether the process was told to end — SIGTERM, or SIGHUP when the
+    /// terminal went — which the loop takes as a quit, pads saved and all.
+    fn terminated(&self) -> bool {
+        false
     }
 }
 
@@ -106,29 +130,116 @@ pub struct TerminalInput {
     events: std::sync::mpsc::Receiver<Event>,
     idle: bool,
     live: bool,
+    terminated: Arc<AtomicBool>,
 }
 
 impl Default for TerminalInput {
     fn default() -> Self {
         let (sender, events) = std::sync::mpsc::channel();
+        let terminated = Arc::new(AtomicBool::new(false));
         if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-            std::thread::spawn(move || {
-                // Ends on a read error, and on the loop hanging up — which
-                // is the app quitting and the receiver going with it.
-                while let Ok(event) = event::read() {
-                    if sender.send(event).is_err() {
-                        break;
-                    }
-                }
-            });
+            std::thread::spawn(move || read_terminal(&sender));
+            watch_signals(Arc::clone(&terminated));
         }
         Self {
             events,
             idle: false,
             live: true,
+            terminated,
         }
     }
 }
+
+/// The input thread. It ends on a read error, and on the loop hanging up —
+/// which is the app quitting and the receiver going with it.
+///
+/// It reads only while it holds [`READING`], a poll at a time, and stands
+/// aside while [`EDITING`] says the editor has the terminal. The flag is
+/// looked at before the lock is taken so that a thread relocking the moment
+/// it lets go cannot keep the editor waiting on it.
+fn read_terminal(sender: &Sender<Event>) {
+    loop {
+        if EDITING.load(Ordering::SeqCst) {
+            std::thread::sleep(READ_POLL);
+            continue;
+        }
+        let reading = READING.lock().unwrap_or_else(PoisonError::into_inner);
+        if EDITING.load(Ordering::SeqCst) {
+            continue;
+        }
+        let event = match event::poll(READ_POLL) {
+            Ok(false) => continue,
+            Ok(true) => event::read(),
+            Err(error) => Err(error),
+        };
+        drop(reading);
+        let Ok(event) = event else {
+            break;
+        };
+        if sender.send(event).is_err() {
+            break;
+        }
+    }
+}
+
+/// The terminal kept from the input thread for as long as this lives.
+struct Editing(#[allow(dead_code)] MutexGuard<'static, ()>);
+
+impl Editing {
+    /// Waits out the read in progress, at most [`READ_POLL`].
+    fn start() -> Self {
+        EDITING.store(true, Ordering::SeqCst);
+        Self(READING.lock().unwrap_or_else(PoisonError::into_inner))
+    }
+}
+
+impl Drop for Editing {
+    // The flag goes before the lock does, so the thread waiting on the lock
+    // finds it down.
+    fn drop(&mut self) {
+        EDITING.store(false, Ordering::SeqCst);
+    }
+}
+
+/// SIGTERM and SIGHUP raise `terminated`, which the loop quits on. A second
+/// one while the loop has still not let go gives the terminal back and ends
+/// the process there, because a person sending it again has stopped waiting.
+///
+/// The signals are caught on a thread of their own with a current-thread
+/// tokio runtime, which is the one signal API already among the
+/// dependencies.
+#[cfg(unix)]
+fn watch_signals(terminated: Arc<AtomicBool>) {
+    use tokio::signal::unix::{SignalKind, signal};
+    let _ = std::thread::Builder::new()
+        .name("signals".to_owned())
+        .spawn(move || {
+            let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                .enable_io()
+                .build()
+            else {
+                return;
+            };
+            runtime.block_on(async {
+                let (Ok(mut term), Ok(mut hup)) = (
+                    signal(SignalKind::terminate()),
+                    signal(SignalKind::hangup()),
+                ) else {
+                    return;
+                };
+                loop {
+                    futures_util::future::select(Box::pin(term.recv()), Box::pin(hup.recv())).await;
+                    if terminated.swap(true, Ordering::SeqCst) {
+                        release_terminal();
+                        std::process::exit(1);
+                    }
+                }
+            });
+        });
+}
+
+#[cfg(not(unix))]
+fn watch_signals(_terminated: Arc<AtomicBool>) {}
 
 impl InputSource for TerminalInput {
     /// One wait, and then — having already come up empty once — however long
@@ -153,7 +264,10 @@ impl InputSource for TerminalInput {
                     return Ok(None);
                 }
                 Err(RecvTimeoutError::Timeout) => {
-                    if !std::mem::replace(&mut self.idle, true) || timeout < IDLE_TIMEOUT {
+                    if !std::mem::replace(&mut self.idle, true)
+                        || timeout < IDLE_TIMEOUT
+                        || self.terminated()
+                    {
                         return Ok(None);
                     }
                 }
@@ -163,6 +277,10 @@ impl InputSource for TerminalInput {
 
     fn live(&self) -> bool {
         self.live
+    }
+
+    fn terminated(&self) -> bool {
+        self.terminated.load(Ordering::SeqCst)
     }
 }
 
@@ -179,6 +297,7 @@ pub fn run(config: &Config, args: &Cli, panic_after: Option<Duration>) -> Result
     let mut terminal = ratatui::try_init()
         .inspect_err(|_| ratatui::restore())
         .context("failed to take the terminal")?;
+    restore_only_from_main();
     let _restore = Restore;
     // A pasted block arrives as one `Event::Paste` rather than as however
     // many key presses, which is what makes it one undo and one redraw.
@@ -197,6 +316,29 @@ pub fn run(config: &Config, args: &Cli, panic_after: Option<Duration>) -> Result
         &mut driver,
         panic_after,
     )
+}
+
+/// Narrows the panic hook `try_init` installed to the loop's own thread.
+///
+/// A worker that panics is already an error the loop shows — the channel it
+/// was answering on ends — so giving the terminal back for it would leave the
+/// loop drawing over the shell. Its panic goes to the trace instead, because
+/// a message printed over the screen is one nobody can read.
+fn restore_only_from_main() {
+    let restoring = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let thread = std::thread::current();
+        match thread.name() {
+            Some("main") => restoring(info),
+            name => Trace::from_env().event(
+                "panic",
+                &[
+                    ("thread", name.unwrap_or("unnamed")),
+                    ("message", &info.to_string().replace(['\n', '\t'], " ")),
+                ],
+            ),
+        }
+    }));
 }
 
 struct Restore;
@@ -292,6 +434,10 @@ impl InputSource for PanicAfter<'_> {
 
     fn live(&self) -> bool {
         self.inner.live()
+    }
+
+    fn terminated(&self) -> bool {
+        self.inner.terminated()
     }
 }
 
@@ -403,6 +549,10 @@ impl Driver {
         if app.shell.should_quit {
             return Ok(false);
         }
+        if input.terminated() {
+            self.act(terminal, app, Action::Quit)?;
+            return Ok(false);
+        }
         self.dirty |= self.runtime.poll_connections(app);
         // Every batch that has arrived since the last turn, and then one
         // frame: a scan reporting five hundred rows at a time is not five
@@ -452,6 +602,10 @@ impl Driver {
             None => input.next(timeout)?,
         };
         let Some(first) = first else {
+            if input.terminated() {
+                self.act(terminal, app, Action::Quit)?;
+                return Ok(false);
+            }
             if (spinning || settling) && input.live() {
                 // An app still working is not an exhausted one — unless
                 // there is nobody left to watch it work.
@@ -582,7 +736,7 @@ impl Driver {
             Action::MoreRows { tab } => self.runtime.more_rows(app, tab),
             Action::OpenEditor { tab } => self.open_editor(terminal, app, tab)?,
             Action::SaveScratch { tab } => self.save_scratch(app, tab),
-            Action::Copy(text) => self.copy(text),
+            Action::Copy(text) => self.copy(app, text),
             Action::ReadClipboard { tab } => self.read_clipboard(app, tab),
             Action::Export { tab, path } => self.export(app, tab, &path),
             Action::LoadObjects { tab, request } => self.runtime.load(app, tab, request),
@@ -636,9 +790,11 @@ impl Driver {
             return Ok(());
         };
         let sql = open.scratch.text();
+        let editing = Editing::start();
         release_terminal();
         let edited = editor::round_trip(&std::env::temp_dir(), tab, &sql, &command);
         let taken = claim_terminal();
+        drop(editing);
         // The editor drew over the screen and ratatui still believes its own
         // last frame is on it; a resize to the size it already has resets
         // both, and — unlike `clear` — asks the terminal nothing.
@@ -697,12 +853,19 @@ impl Driver {
     /// and into the system's through its tool when there is one. Both are a
     /// best effort: a terminal that ignores the escape and a machine with no
     /// tool leave the text in the app's clipboard and nobody any worse off.
-    fn copy(&mut self, text: String) {
+    ///
+    /// A selection too big for OSC 52 is not sent that way at all, and when
+    /// there is no tool either, the footer says where the copy went.
+    fn copy(&mut self, app: &mut App, text: String) {
         use std::io::Write as _;
-        if self.terminal {
+        if self.terminal && text.len().div_ceil(3) * 4 <= OSC52_LIMIT {
             let mut out = std::io::stdout();
             let _ = write!(out, "\x1b]52;c;{}\x07", base64(text.as_bytes()));
             let _ = out.flush();
+        } else if self.terminal && matches!(self.clipboard, Clipboard::None) {
+            app.shell
+                .status
+                .push_str(" (inside sql-bench only: too big for the terminal's clipboard)");
         }
         match &mut self.clipboard {
             Clipboard::None => {}

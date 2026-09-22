@@ -401,3 +401,81 @@ fn a_right_click_draws_its_menu_and_resting_on_an_entry_lights_it_once() {
         Some(crate::app::Focus::Results)
     );
 }
+
+/// A terminal whose process has been sent SIGTERM.
+struct Terminated;
+
+impl InputSource for Terminated {
+    fn next(&mut self, _timeout: Duration) -> Result<Option<Event>> {
+        Ok(None)
+    }
+
+    fn terminated(&self) -> bool {
+        true
+    }
+}
+
+#[test]
+fn a_terminated_run_quits_and_saves_what_the_pad_still_owes() {
+    let directory = tempfile::tempdir().expect("a directory");
+    let store = crate::run::state::Store::new(Some(directory.path().to_path_buf()));
+    let path = store.path("local-mssql").expect("a file name");
+    let mut driver = driver();
+    driver.keep_scratch_in(store);
+    let mut app = two_tabs();
+    app.tabs[0].scratch.set_text("select 1");
+    let mut terminal = terminal();
+    run_loop(
+        &mut terminal,
+        &mut app,
+        &mut Terminated,
+        &Trace::new(None),
+        &mut driver,
+        None,
+    )
+    .expect("the loop");
+    assert!(app.shell.should_quit);
+    assert_eq!(
+        std::fs::read_to_string(path).expect("the pad"),
+        "select 1\n"
+    );
+}
+
+#[test]
+fn a_run_key_while_a_query_runs_is_refused_and_says_how_to_stop_it() {
+    let mut app = two_tabs();
+    app.apply(crate::app::RuntimeEvent::QueryStarted {
+        tab: 0,
+        at: Instant::now(),
+        statement: 0,
+        of: 1,
+        keep_view: false,
+    });
+    app.shell.focus = crate::app::Focus::Scratch;
+    app.tabs[0].scratch.set_text("select 1");
+    for spec in ["Ctrl-R", "F5"] {
+        assert_eq!(app.handle(Event::Key(key(spec))), Vec::new(), "{spec}");
+        assert_eq!(app.shell.status, "Esc cancels the running query");
+    }
+}
+
+#[test]
+fn a_copy_too_big_for_osc_52_says_where_it_went() {
+    let mut app = two_tabs();
+    app.shell.status = "copied 9 rows".to_owned();
+    driver().copy(&mut app, "x".repeat(OSC52_LIMIT));
+    assert_eq!(
+        app.shell.status,
+        "copied 9 rows (inside sql-bench only: too big for the terminal's clipboard)"
+    );
+}
+
+#[test]
+fn the_editor_keeps_the_input_thread_off_the_terminal_until_it_is_done() {
+    let editing = Editing::start();
+    assert!(EDITING.load(Ordering::SeqCst));
+    assert!(READING.try_lock().is_err(), "the reader cannot read");
+    drop(editing);
+    assert!(!EDITING.load(Ordering::SeqCst));
+    assert!(READING.try_lock().is_ok(), "and can again");
+}

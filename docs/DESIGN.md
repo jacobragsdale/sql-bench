@@ -75,7 +75,7 @@ does.
 | crossterm 0.29, ratatui 0.30 | terminal |
 | serde (derive), toml 0.9 | config |
 | tiberius (no default features; `tds73`, `rustls`) | SQL Server, pure Rust |
-| tokio (`rt`, `net`, `time`), tokio-util (`compat`), futures-util | tiberius is async; confined to `db/mssql.rs` |
+| tokio (`rt`, `net`, `time`, `signal`), tokio-util (`compat`), futures-util | tiberius is async; confined to `db/mssql.rs`, plus the thread that catches SIGTERM/SIGHUP |
 | oracle 0.6 | Oracle over ODPI-C; needs Instant Client at runtime |
 | time 0.3 | timestamps in traces and exports |
 | unicode-width 0.2 | how many terminal columns a glyph is drawn in; the grid and `export::table` align on it |
@@ -828,7 +828,9 @@ with no database on it.
 TDS client. No unixODBC, no vendor driver, no OpenSSL: `cargo install` is the
 whole install on every platform. The cost is that it is async, which is why
 one tokio current-thread runtime lives inside `db/mssql.rs` and nothing async
-leaves it.
+leaves it. The only other one is the signal thread in `run/mod.rs`, which
+waits for SIGTERM and SIGHUP so a killed run still gives the terminal back;
+tokio's `signal` feature is cheaper than a signal crate for two signals.
 
 **The `oracle` crate, not ODBC, for Oracle.** There is no pure-Rust Oracle
 driver, so a native client is unavoidable. ODPI-C is the vendor's own thin
