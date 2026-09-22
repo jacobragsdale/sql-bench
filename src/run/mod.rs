@@ -2,6 +2,7 @@
 //! changed, carrying out what the app asked for, and the trace file. The only
 //! module that blocks.
 
+pub mod clipboard;
 pub mod editor;
 pub mod replay;
 pub mod runtime;
@@ -14,6 +15,7 @@ pub use replay::replay;
 pub use runtime::{Pending, Runtime, startup_tabs};
 
 use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -32,6 +34,7 @@ use crate::app::{Action, App, SPIN_EVERY};
 use crate::cli::Cli;
 use crate::config::Config;
 use crate::export;
+use crate::run::clipboard::Clipboard;
 use crate::run::state::Store;
 use crate::trace::Trace;
 use crate::ui;
@@ -52,6 +55,10 @@ const IDLE_TIMEOUT: Duration = Duration::from_millis(250);
 /// that a run nobody is typing at costs a wake-up every tenth of a second
 /// and only for the half second after the last key.
 const SETTLE_POLL: Duration = Duration::from_millis(100);
+
+/// How long the loop waits for input while a paste is being read: the
+/// answer is a few milliseconds away and is drawn as soon as it lands.
+const PASTE_POLL: Duration = Duration::from_millis(10);
 
 /// A turn slower than this is worth a `turn` line in the trace. Anything
 /// faster is the loop working as intended and not worth the write.
@@ -177,6 +184,8 @@ pub fn run(config: &Config, args: &Cli, panic_after: Option<Duration>) -> Result
     // many key presses, which is what makes it one undo and one redraw.
     let _ = execute!(std::io::stdout(), EnableBracketedPaste, EnableMouseCapture);
     let mut driver = Driver::new(Theme::from_env(), config);
+    driver.clipboard =
+        Clipboard::detect(|name| std::env::var(name).ok(), cfg!(target_os = "macos"));
     driver.set_max_rows(args.max_rows);
     driver.restore_scratch(&mut app);
     driver.connect_at_startup(startup);
@@ -286,6 +295,9 @@ impl InputSource for PanicAfter<'_> {
     }
 }
 
+/// A paste worker's answer: the tab that asked, and what the clipboard held.
+type Pasted = (usize, Option<String>);
+
 /// What one turn of the loop carries over to the next, so the loop can be
 /// taken a turn at a time.
 ///
@@ -313,6 +325,13 @@ pub struct Driver {
     /// A mouse event that arrived behind one that changed the screen. It is
     /// handled next turn, after the frame it was aimed at has been drawn.
     held: Option<Event>,
+    /// The system clipboard's tool. Only a run on a real terminal looks
+    /// for one; a replay has a fake and a test has none.
+    clipboard: Clipboard,
+    /// Where the paste workers answer, which tab asked, and what they read.
+    pastes: (Sender<Pasted>, Receiver<Pasted>),
+    /// How many of them are still reading, which keeps the loop turning.
+    pasting: usize,
 }
 
 impl Driver {
@@ -329,6 +348,9 @@ impl Driver {
             terminal: true,
             hits: Hits::default(),
             held: None,
+            clipboard: Clipboard::None,
+            pastes: mpsc::channel(),
+            pasting: 0,
         }
     }
 
@@ -387,6 +409,11 @@ impl Driver {
         // hundred redraws.
         self.dirty |= self.runtime.poll_queries(app, trace);
         self.dirty |= self.runtime.poll_catalog(app);
+        while let Ok((tab, text)) = self.pastes.1.try_recv() {
+            self.pasting = self.pasting.saturating_sub(1);
+            app.pasted(tab, text);
+            self.dirty = true;
+        }
         for action in app.settle(Instant::now()) {
             self.act(terminal, app, action)?;
         }
@@ -411,9 +438,11 @@ impl Driver {
             }
         }
         // A pad that owes the disk a save keeps the loop turning too, because
-        // the save is due half a second after a key and not at the next one.
-        let settling = app.settling();
+        // the save is due half a second after a key and not at the next one;
+        // so does a paste still being read, whose answer nobody types for.
+        let settling = app.settling() || self.pasting > 0;
         let timeout = match (spinning, settling) {
+            (_, true) if self.pasting > 0 => PASTE_POLL,
             (true, _) => SPIN_EVERY,
             (false, true) => SETTLE_POLL,
             (false, false) => IDLE_TIMEOUT,
@@ -553,7 +582,8 @@ impl Driver {
             Action::MoreRows { tab } => self.runtime.more_rows(app, tab),
             Action::OpenEditor { tab } => self.open_editor(terminal, app, tab)?,
             Action::SaveScratch { tab } => self.save_scratch(app, tab),
-            Action::Copy(text) => self.copy(&text),
+            Action::Copy(text) => self.copy(text),
+            Action::ReadClipboard { tab } => self.read_clipboard(app, tab),
             Action::Export { tab, path } => self.export(app, tab, &path),
             Action::LoadObjects { tab, request } => self.runtime.load(app, tab, request),
             Action::Sorted { .. } => {}
@@ -663,17 +693,43 @@ impl Driver {
         self.dirty = true;
     }
 
-    /// The selection into the terminal's own clipboard, through OSC 52. It
-    /// is a best effort: a terminal that ignores the escape leaves the text
-    /// in the app's clipboard and nobody any worse off.
-    fn copy(&self, text: &str) {
+    /// The selection into the terminal's own clipboard through OSC 52,
+    /// and into the system's through its tool when there is one. Both are a
+    /// best effort: a terminal that ignores the escape and a machine with no
+    /// tool leave the text in the app's clipboard and nobody any worse off.
+    fn copy(&mut self, text: String) {
         use std::io::Write as _;
-        if !self.terminal {
-            return;
+        if self.terminal {
+            let mut out = std::io::stdout();
+            let _ = write!(out, "\x1b]52;c;{}\x07", base64(text.as_bytes()));
+            let _ = out.flush();
         }
-        let mut out = std::io::stdout();
-        let _ = write!(out, "\x1b]52;c;{}\x07", base64(text.as_bytes()));
-        let _ = out.flush();
+        match &mut self.clipboard {
+            Clipboard::None => {}
+            Clipboard::Tool { copy, .. } => clipboard::write(copy.clone(), text),
+            Clipboard::Fake(fake) => *fake = text,
+        }
+    }
+
+    /// Ctrl-V: the system clipboard read on a worker, whose answer the next
+    /// turns collect — a tool waiting on a display that is gone costs the
+    /// loop nothing. A fake one is answered at once.
+    fn read_clipboard(&mut self, app: &mut App, tab: usize) {
+        let paste = match &self.clipboard {
+            Clipboard::Tool { paste, .. } => paste.clone(),
+            Clipboard::Fake(text) => return app.pasted(tab, Some(text.clone())),
+            Clipboard::None => return app.pasted(tab, None),
+        };
+        let answer = self.pastes.0.clone();
+        let spawned = std::thread::Builder::new()
+            .name("paste".to_owned())
+            .spawn(move || {
+                let _ = answer.send((tab, clipboard::read(&paste, clipboard::TIMEOUT)));
+            });
+        match spawned {
+            Ok(_) => self.pasting += 1,
+            Err(_) => app.pasted(tab, None),
+        }
     }
 }
 

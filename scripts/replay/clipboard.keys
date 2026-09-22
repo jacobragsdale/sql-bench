@@ -1,0 +1,57 @@
+# Copy and paste, headlessly: Ctrl-V from another pane, a cut pasted back,
+# and Ctrl-A with typing over it. A replay never runs a clipboard tool; the
+# `clipboard` command fills the fake one Ctrl-V reads, and a copy writes it.
+# No database: scripts/qa.sh runs this with a state directory of its own,
+# because it types into an empty pad.
+
+expect ╭ Objects
+
+# Nothing on either clipboard yet.
+key Ctrl-V
+expect the clipboard is empty
+
+# Ctrl-V from Objects: the pad takes the focus and the text, which the
+# Shift-Left and Ctrl-X below prove by acting on it.
+key Shift-Tab
+clipboard select 1
+key Ctrl-V
+expect 1 select 1
+expect pasted 1 line
+
+# A cut goes onto the clipboard, and pastes back twice.
+key Shift-Left
+key Ctrl-X
+expect cut 1 characters
+expect-not select 1
+key Ctrl-V
+key Ctrl-V
+expect 1 select 11
+
+# A bracketed paste from Results lands in the pad too.
+key Shift-Tab
+key Shift-Tab
+paste  from t
+expect 1 select 11 from t
+
+# Ctrl-C with nothing selected copies the statement.
+key Ctrl-C
+expect copied the statement
+
+# Ctrl-A selects the whole pad and typing replaces it; after a pause, one
+# Ctrl-Z takes both back.
+wait 600
+key Ctrl-A
+type select 2
+expect 1 select 2
+expect-not select 11
+key Ctrl-Z
+expect 1 select 11 from t
+
+# And the statement copied above comes back over a selection of all of it.
+key Ctrl-A
+key Ctrl-V
+expect 1 select 11 from t
+expect pasted 1 line
+
+frame clipboard
+key Ctrl-Q

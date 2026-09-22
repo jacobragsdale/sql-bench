@@ -1625,7 +1625,7 @@ fn picking_each_entry_is_exactly_its_key() {
         }
     }
     assert!(wrong.is_empty(), "{wrong:#?}");
-    assert_eq!(checked, 6 * (7 + 5 + 8));
+    assert_eq!(checked, 6 * (7 + 8 + 8));
 }
 
 #[test]

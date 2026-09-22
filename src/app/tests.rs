@@ -423,6 +423,7 @@ fn the_keys_of_a_pane_are_its_own_and_the_ones_that_work_anywhere() {
             "Ctrl-E",
             "Ctrl-Z",
             "Ctrl-C",
+            "Ctrl-X",
             "Shift-Arrows",
             "Tab",
             "Home",
@@ -439,6 +440,7 @@ fn the_keys_of_a_pane_are_its_own_and_the_ones_that_work_anywhere() {
             "Ctrl-P",
             "Esc",
             "Ctrl-Q",
+            "Ctrl-V",
         ],
         "the pad's own keys, and the ones that are not characters"
     );
@@ -1651,4 +1653,101 @@ fn the_readme_lists_every_key_and_no_others() {
         listed, handled,
         "README.md and app::KEYS disagree about the keys"
     );
+}
+
+#[test]
+fn ctrl_v_from_any_pane_focuses_the_pad_and_asks_for_the_clipboard() {
+    for focus in [Focus::Objects, Focus::Scratch, Focus::Results] {
+        let mut app = ready(focus);
+        assert_eq!(
+            press(&mut app, "Ctrl-V"),
+            vec![Action::ReadClipboard { tab: 1 }],
+            "{focus:?}"
+        );
+        assert_eq!(app.shell.focus, Focus::Scratch, "{focus:?}");
+    }
+    let mut app = ready(Focus::Results);
+    press(&mut app, "?");
+    assert_eq!(press(&mut app, "Ctrl-V"), vec![], "not behind the help");
+    assert_eq!(app.shell.focus, Focus::Results);
+}
+
+#[test]
+fn what_the_clipboard_held_is_pasted_and_nothing_falls_back_to_the_apps_own() {
+    let mut app = two_tabs();
+    app.pasted(1, Some("select 1\nfrom t".to_owned()));
+    assert_eq!(app.tabs[1].scratch.text(), "select 1\nfrom t");
+    assert_eq!(app.shell.status, "pasted 2 lines");
+
+    app.pasted(0, None);
+    assert_eq!(app.tabs[0].scratch.text(), "");
+    assert_eq!(app.shell.status, "the clipboard is empty");
+
+    app.shell.clipboard = "bench.events".to_owned();
+    app.pasted(0, Some(String::new()));
+    assert_eq!(app.tabs[0].scratch.text(), "bench.events");
+    assert_eq!(app.shell.status, "pasted 1 line from sql-bench's clipboard");
+}
+
+#[test]
+fn a_bracketed_paste_outside_the_pad_lands_in_it_or_in_the_prompt_that_is_open() {
+    let mut app = two_tabs();
+    assert_eq!(app.shell.focus, Focus::Objects);
+    app.handle(Event::Paste("select 1".to_owned()));
+    assert_eq!(app.shell.focus, Focus::Scratch);
+    assert_eq!(app.tabs[0].scratch.text(), "select 1");
+
+    let mut app = two_tabs();
+    press(&mut app, "Ctrl-P");
+    app.handle(Event::Paste("cust\nord".to_owned()));
+    assert_eq!(
+        app.shell
+            .finder
+            .as_ref()
+            .map(|finder| finder.query.text.as_str()),
+        Some("cust ord"),
+        "one line of it"
+    );
+    assert_eq!(app.tabs[0].scratch.text(), "", "and not the pad behind it");
+
+    let mut app = two_tabs();
+    app.shell.prompt = Some(Prompt::new("~/".to_owned()));
+    app.handle(Event::Paste("out.csv".to_owned()));
+    assert_eq!(
+        app.shell.prompt.as_ref().map(|prompt| prompt.text.as_str()),
+        Some("~/out.csv")
+    );
+
+    let mut app = two_tabs();
+    press(&mut app, "?");
+    app.handle(Event::Paste("select 1".to_owned()));
+    assert_eq!(app.tabs[0].scratch.text(), "", "not behind the help");
+}
+
+#[test]
+fn ctrl_c_with_nothing_selected_copies_the_statement_and_ctrl_x_cuts() {
+    let mut app = two_tabs();
+    app.shell.focus = Focus::Scratch;
+    assert_eq!(press(&mut app, "Ctrl-C"), vec![], "an empty pad");
+    app.tabs[0]
+        .scratch
+        .set_text("select 1;\n\nselect 2\nfrom t");
+    press(&mut app, "Down");
+    press(&mut app, "Down");
+    assert_eq!(
+        press(&mut app, "Ctrl-C"),
+        vec![Action::Copy("select 2\nfrom t".to_owned())]
+    );
+    assert_eq!(app.shell.status, "copied the statement");
+
+    press(&mut app, "Shift-Right");
+    assert_eq!(
+        press(&mut app, "Ctrl-X"),
+        vec![Action::Copy("s".to_owned())]
+    );
+    assert_eq!(app.shell.status, "cut 1 characters");
+    assert_eq!(app.shell.clipboard, "s");
+    assert_eq!(app.tabs[0].scratch.text(), "select 1;\n\nelect 2\nfrom t");
+    assert_eq!(press(&mut app, "Ctrl-X"), vec![], "nothing selected");
+    assert_eq!(app.shell.status, "cut 1 characters", "and nothing said");
 }

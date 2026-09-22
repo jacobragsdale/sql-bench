@@ -48,6 +48,11 @@ pub enum Outcome {
     OpenEditor,
     /// Ctrl-C with a selection: this text, into the clipboard.
     Copy(String),
+    /// Ctrl-C with none: the statement under the cursor, which only the app
+    /// can find because only it knows the backend.
+    CopyStatement,
+    /// Ctrl-X: this text, into the clipboard, and already out of the pad.
+    Cut(String),
 }
 
 /// One tab's pad.
@@ -305,15 +310,29 @@ impl Scratch {
     pub fn handle(&mut self, key: KeyEvent) -> Outcome {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        // A key that deletes takes the selection and nothing more, the way
+        // it does in every editor that has one.
+        let deletes = matches!(key.code, KeyCode::Backspace | KeyCode::Delete)
+            || control && matches!(key.code, KeyCode::Char('u' | 'U' | 'k' | 'K' | 'w' | 'W'));
+        if deletes && self.take_selection() {
+            return Outcome::Edited;
+        }
         match key.code {
             KeyCode::Char('r' | 'R') if control => Outcome::RunStatement,
             KeyCode::F(5) => Outcome::RunAll,
             KeyCode::Char('e' | 'E') if control => Outcome::OpenEditor,
             KeyCode::Char('c' | 'C') if control => self
                 .selected_text()
-                .map_or(Outcome::Unchanged, Outcome::Copy),
+                .map_or(Outcome::CopyStatement, Outcome::Copy),
+            KeyCode::Char('x' | 'X') if control => match self.selected_text() {
+                Some(text) => {
+                    self.take_selection();
+                    Outcome::Cut(text)
+                }
+                None => Outcome::Unchanged,
+            },
             KeyCode::Char('z' | 'Z') if control => self.undo(),
-            KeyCode::Char('a' | 'A') if control => self.move_to((self.cursor.0, 0), shift),
+            KeyCode::Char('a' | 'A') if control => self.select_all(),
             KeyCode::Char('u' | 'U') if control => self.delete_to_line_start(),
             KeyCode::Char('k' | 'K') if control => self.delete_to_line_end(),
             KeyCode::Char('w' | 'W') if control => self.delete_word_back(),
@@ -343,16 +362,24 @@ impl Scratch {
             KeyCode::End => self.move_to((self.cursor.0, self.line_length(self.cursor.0)), shift),
             KeyCode::Backspace => self.backspace(),
             KeyCode::Delete => self.delete(),
-            KeyCode::Enter => self.insert_newline(),
-            KeyCode::Tab => self.insert(INDENT),
+            KeyCode::Enter => {
+                self.take_selection();
+                self.insert_newline()
+            }
+            KeyCode::Tab => {
+                self.take_selection();
+                self.insert(INDENT)
+            }
             KeyCode::Char(character) if !control && !key.modifiers.contains(KeyModifiers::ALT) => {
+                self.take_selection();
                 self.insert(&character.to_string())
             }
             _ => Outcome::Unchanged,
         }
     }
 
-    /// Bracketed paste: the whole block at the cursor, line breaks kept.
+    /// Bracketed paste: the whole block at the cursor, or over the
+    /// selection, line breaks kept.
     pub fn paste(&mut self, text: &str) -> Outcome {
         let mut cleaned = String::with_capacity(text.len());
         for character in text.replace("\r\n", "\n").chars() {
@@ -366,7 +393,33 @@ impl Scratch {
         if cleaned.is_empty() {
             return Outcome::Unchanged;
         }
+        self.take_selection();
         self.insert(&cleaned)
+    }
+
+    /// Ctrl-A: the whole pad, the cursor at its end.
+    fn select_all(&mut self) -> Outcome {
+        let last = self.lines.len() - 1;
+        self.selection = Some((0, 0));
+        self.cursor = (last, self.line_length(last));
+        self.goal = None;
+        Outcome::Edited
+    }
+
+    /// Delete the selection, if there is one, as the start of an edit: what
+    /// is typed next lands in its place, and one Ctrl-Z takes back both.
+    fn take_selection(&mut self) -> bool {
+        let Some(((from_line, from_column), (to_line, to_column))) = self.selection() else {
+            return false;
+        };
+        self.begin_edit();
+        let tail = slice(&self.lines[to_line], to_column, usize::MAX);
+        let line = &mut self.lines[from_line];
+        line.truncate(byte_index(line, from_column));
+        line.push_str(&tail);
+        self.lines.drain(from_line + 1..=to_line);
+        self.cursor = (from_line, from_column);
+        true
     }
 
     /// The statement the cursor is in, and the lines it is on.
@@ -912,7 +965,6 @@ mod tests {
         assert_eq!(scratch.cursor, (1, 18), "and the column comes back");
 
         assert_eq!(after(&["Home"]).1, (1, 0));
-        assert_eq!(after(&["Ctrl-A"]).1, (1, 0));
         assert_eq!(after(&["End"]).1, (1, 20));
         assert_eq!(
             after(&["Ctrl-Right"]).1,
@@ -940,8 +992,8 @@ mod tests {
         let mut scratch = pad();
         assert_eq!(
             press(&mut scratch, "Ctrl-C"),
-            Outcome::Unchanged,
-            "nothing to copy"
+            Outcome::CopyStatement,
+            "nothing selected, so the app copies the statement"
         );
 
         for _ in 0..4 {
@@ -962,6 +1014,95 @@ mod tests {
 
         press(&mut scratch, "Left");
         assert_eq!(scratch.selection(), None, "a plain move drops it");
+    }
+
+    /// The pad with `benc` on line 1 through `whe` on line 2 selected.
+    fn selected() -> Scratch {
+        let mut scratch = pad();
+        press(&mut scratch, "Shift-Down");
+        for _ in 0..2 {
+            press(&mut scratch, "Shift-Left");
+        }
+        assert_eq!(
+            scratch.selected_text().as_deref(),
+            Some("bench.customers\nwhe")
+        );
+        scratch
+    }
+
+    #[test]
+    fn what_is_typed_or_pasted_replaces_the_selection_and_one_undo_takes_both_back() {
+        let original = pad().text();
+        let replaced = "select id, name\nfrom re country = 'US'";
+        for (keys, text, cursor) in [
+            (
+                &["x"][..],
+                "select id, name\nfrom xre country = 'US'",
+                (1, 6),
+            ),
+            (
+                &["Enter"],
+                "select id, name\nfrom \nre country = 'US'",
+                (2, 0),
+            ),
+            (
+                &["Tab"],
+                "select id, name\nfrom   re country = 'US'",
+                (1, 7),
+            ),
+            (&["Backspace"], replaced, (1, 5)),
+            (&["Delete"], replaced, (1, 5)),
+            (&["Ctrl-U"], replaced, (1, 5)),
+            (&["Ctrl-K"], replaced, (1, 5)),
+            (&["Ctrl-W"], replaced, (1, 5)),
+        ] {
+            let mut scratch = selected();
+            for key in keys {
+                assert_eq!(press(&mut scratch, key), Outcome::Edited, "{keys:?}");
+            }
+            assert_eq!(
+                (scratch.text(), scratch.cursor),
+                (text.to_owned(), cursor),
+                "{keys:?}"
+            );
+            assert_eq!(scratch.selection(), None, "{keys:?}");
+            press(&mut scratch, "Ctrl-Z");
+            assert_eq!(scratch.text(), original, "{keys:?} is one undo");
+        }
+
+        let mut scratch = selected();
+        scratch.paste("a\nb");
+        assert_eq!(
+            scratch.text(),
+            "select id, name\nfrom a\nbre country = 'US'"
+        );
+        press(&mut scratch, "Ctrl-Z");
+        assert_eq!(scratch.text(), original, "a paste over it is one undo too");
+    }
+
+    #[test]
+    fn ctrl_x_cuts_the_selection_and_nothing_without_one() {
+        let mut scratch = selected();
+        assert_eq!(
+            press(&mut scratch, "Ctrl-X"),
+            Outcome::Cut("bench.customers\nwhe".to_owned())
+        );
+        assert_eq!(scratch.text(), "select id, name\nfrom re country = 'US'");
+        assert_eq!(press(&mut scratch, "Ctrl-X"), Outcome::Unchanged);
+        press(&mut scratch, "Ctrl-Z");
+        assert_eq!(scratch.text(), pad().text());
+    }
+
+    #[test]
+    fn ctrl_a_selects_the_whole_pad_and_typing_replaces_it() {
+        let mut scratch = pad();
+        assert_eq!(press(&mut scratch, "Ctrl-A"), Outcome::Edited);
+        assert_eq!(scratch.selected_text(), Some(pad().text()));
+        assert_eq!(scratch.cursor, (2, 20));
+        press(&mut scratch, "y");
+        assert_eq!((scratch.text(), scratch.cursor), ("y".to_owned(), (0, 1)));
+        press(&mut scratch, "Ctrl-Z");
+        assert_eq!(scratch.text(), pad().text());
     }
 
     #[test]

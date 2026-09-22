@@ -38,4 +38,4 @@
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
 ╰──────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────────╯
- Shift-Tab previous pane  Ctrl-T next tab  Ctrl-R run the statement  F5 run all  Ctrl-E edit in $EDITOR  ○ disconnected
+ copied the statement                                                                                    ○ disconnected

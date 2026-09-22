@@ -52,6 +52,13 @@ impl Prompt {
         }
     }
 
+    /// A paste: `text` at the cursor, and the cursor after it.
+    pub fn insert(&mut self, text: &str) {
+        let at = self.byte(self.cursor);
+        self.text.insert_str(at, text);
+        self.cursor += text.chars().count();
+    }
+
     /// The cursor onto the character drawn `column` cells from the start of
     /// the text, or past its end: a click on it.
     pub fn place(&mut self, column: usize) {

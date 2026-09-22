@@ -28,9 +28,10 @@ expect-not bench.customers
 key Ctrl-Z
 expect from bench.customers
 
-# Ctrl-C with nothing selected copies nothing, and never quits.
+# Ctrl-C with nothing selected copies the statement, and never quits.
 key Ctrl-C
 expect where country = 'US'
+expect copied the statement
 
 frame scratch
 key Ctrl-Q

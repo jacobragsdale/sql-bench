@@ -158,6 +158,7 @@ Anywhere:
 | `Ctrl-P` | find an object |
 | `Esc` | cancel or close help |
 | `Ctrl-Q` | quit |
+| `Ctrl-V` | paste into the pad |
 
 Anywhere but the scratch pad, which types them instead:
 
@@ -177,14 +178,15 @@ Scratch:
 | `F5` | run all |
 | `Ctrl-E` | edit in $EDITOR |
 | `Ctrl-Z` | undo the last edits |
-| `Ctrl-C` | copy the selection |
+| `Ctrl-C` | copy the selection or the statement |
+| `Ctrl-X` | cut the selection |
 | `Shift-Arrows` | select |
 | `Tab` | two spaces |
 | `Home` | line start |
 | `End` | line end |
 | `PageDown` | page down |
 | `PageUp` | page up |
-| `Ctrl-A` | line start |
+| `Ctrl-A` | select all |
 | `Ctrl-U` | delete to line start |
 | `Ctrl-K` | delete to line end |
 | `Ctrl-W` | delete the word before |
@@ -248,6 +250,18 @@ its source (or a table's columns) into the results pane, focused so it
 scrolls at once; Esc closes it.
 Every connection is indexed as soon as it is up, so nothing waits on the
 server while you type.
+
+Copying — Ctrl-C and Ctrl-X in the pad, `y` and `Y` in the grid, `y` in the
+tree — puts the text on the system clipboard two ways at once: an OSC 52
+escape, which the terminal takes even over SSH, and the first of `wl-copy`
+(under Wayland), `xclip`, `xsel` (under X11), `pbcopy` (macOS) or `clip.exe`
+(WSL) that is on `PATH`. Ctrl-V reads it back through `wl-paste`, `xclip -o`,
+`xsel -o`, `pbpaste` or PowerShell's `Get-Clipboard`, from any pane, into the
+pad; with none of them installed, or none answering within half a second, it
+pastes what sql-bench itself last copied and the footer says so. Typing, a
+delete key or a paste replaces the pad's selection, and one Ctrl-Z takes it
+back. Inside tmux OSC 52 needs `set -g set-clipboard on`, and a terminal
+paste (bracketed, from the terminal's own shortcut) always works.
 
 The scratch pad is one pad per connection, kept in
 `~/.local/state/sql-bench/scratch/<connection>.sql` and written half a second

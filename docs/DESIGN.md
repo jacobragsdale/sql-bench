@@ -331,8 +331,34 @@ PageUp/PageDown scroll it, which the grid under it does not see; Esc closes
 it, after the help and before a running query.
 
 `y` copies the cell and `Y` the row, tab-separated with a NULL as nothing,
-into the app's clipboard and out through OSC 52; the footer says `copied 1
-cell`. `e` opens a one-line prompt in the footer, `Export to: ` prefilled with
+into the app's clipboard and out to the system's; the footer says `copied 1
+cell`. In the pad Ctrl-C copies the selection, or the statement under the
+cursor when there is none, and Ctrl-X cuts it.
+
+Out to the system's is two routes at once, both best effort. OSC 52 is
+written on every copy, because it is the only one that reaches the clipboard
+of the machine a person is sitting at over SSH; and `src/run/clipboard.rs`
+pipes the text into a tool on a short-lived thread, so a big copy never holds
+up the loop. The tool is looked for once, when a real terminal is claimed, on
+`PATH` with no crate: `wl-copy`/`wl-paste --no-newline` when
+`WAYLAND_DISPLAY` is set, `xclip -selection clipboard [-o]` or `xsel -b
+[-i|-o]` when `DISPLAY` is, `pbcopy`/`pbpaste` on macOS, and `clip.exe` with
+PowerShell's `Get-Clipboard` under WSL. `Clipboard` is an enum — no tool, a
+tool's two argvs, or a replay's fake — not a trait.
+
+OSC 52 cannot be read back, so Ctrl-V is `Action::ReadClipboard`: a worker
+runs the paste tool, kills it after 500 ms, and answers over an `mpsc`
+channel the loop polls every 10 ms while one is out. `App::pasted` puts the
+answer in that tab's pad (`pasted 3 lines`); no tool, a failure, a timeout
+or an empty clipboard fall back to `shell.clipboard`, the app's own (`pasted
+1 line from sql-bench's clipboard`), and with that empty too the footer says
+`the clipboard is empty`. Ctrl-V and a bracketed paste work from any pane and
+move the focus to the pad, except that a paste goes into the finder's query
+or the export prompt when one is open, and nowhere while the help, the
+inspector or a menu is. Inside tmux, OSC 52 needs `set -g set-clipboard on`;
+the tool route does not care. A replay never runs a tool: `clipboard <text>`
+sets its fake, and a copy writes the fake, so copy and paste round-trip
+headlessly. `e` opens a one-line prompt in the footer, `Export to: ` prefilled with
 `~/sql-bench-<connection>-<YYYYmmdd-HHMMSS>.csv`, which takes every key while
 it is open — insert, Backspace, Left, Right, Home, End and Ctrl-U, and Esc to
 give up. Enter writes every fetched row of the set on screen: JSON for a
@@ -484,9 +510,9 @@ button or an overlay it is a left click and opens none.
 
 `pointer::MENU` names the entries as rows of `KEYS`: Objects Enter, s, i, y,
 r, /, Space; Results Enter, y, Y, o, e, m, [, ]; Scratch Ctrl-R, F5, Ctrl-C,
-Ctrl-Z, Ctrl-E. Their labels are read through `keys_for(pane)`, because
-`KEYS` has an Enter and a `y` for more than one pane, and a test checks every
-name is a key of its pane. Each entry is what it does on the left and its key
+Ctrl-X, Ctrl-V, Ctrl-A, Ctrl-Z, Ctrl-E. Their labels are read through
+`keys_for(pane)`, because `KEYS` has an Enter and a `y` for more than one
+pane, and a test checks every name is a key of its pane. Each entry is what it does on the left and its key
 on the right. The box opens right and down from the pointer, or left and up
 from it where that would run off the frame, clamped to it at every size down
 to 60x15. It pushes `Outside`, its body, then a `Target::MenuItem(n)` per
@@ -582,14 +608,15 @@ neither.
 ### Commands
 
 One per line. Blank lines and lines whose first non-space character is `#` are
-ignored. Every argument is trimmed except `type`'s and `paste`'s, which are
-the rest of the line exactly as written.
+ignored. Every argument is trimmed except `type`'s, `paste`'s and `clipboard`'s,
+which are the rest of the line exactly as written.
 
 | command | does |
 |---|---|
 | `key <name>` | one key press, as crossterm would deliver it |
 | `type <text>` | one key press per character, spaces included |
 | `paste <text>` | one `Event::Paste` with the whole text |
+| `clipboard <text>` | put the text on the replay's fake system clipboard, which Ctrl-V reads |
 | `resize <cols>x<rows>` | resize the backend and send `Event::Resize` |
 | `wait busy` | until nothing is connecting or running; 60 s, then exit 3 |
 | `wait <ms>` | sleep that many milliseconds |

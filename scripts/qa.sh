@@ -72,6 +72,9 @@ check "the terminal after stdin ran out" scripts/qa/stdin-eof.sh "$BIN"
 check "mouse bytes through a pty" scripts/qa/mouse-bytes.sh "$BIN"
 check "draw latency" scripts/qa/draw-latency.sh "$BIN" 16
 check "the scratch pad frame and its persistence" scripts/qa/scratch-frame.sh
+# It types into an empty pad, so it gets a state directory of its own.
+check "clipboard.keys at 120x40" env SQL_BENCH_STATE_DIR="$SQL_BENCH_STATE_DIR/clipboard" \
+    "$BIN" --replay scripts/replay/clipboard.keys --size 120x40 --frames-dir "$FRAMES"
 
 # Everything below needs the local databases (scripts/db-up.sh) and stops
 # containers along the way, so it runs only when asked for.
