@@ -330,12 +330,13 @@ how the app still sees no terminal and reads no clock.
   It uses both clicks up, so a third is a single again.
 - A right-click does what a left click does.
 - The wheel scrolls what is under the pointer, by 3, and never moves the
-  focus: the help, the inspector, the tree, the grid and an object's source.
+  focus: the help, the inspector, the tree, the grid, an object's source
+  and the pad.
   A sideways wheel, or Shift with the wheel, scrolls the grid a column a
   notch. The tree's and the grid's cursors come along only as far as they
   must to stay in view, because the app's window is a hint clamped round
   the cursor.
-- A drag does nothing yet.
+- A drag selects on pad text and does nothing anywhere else.
 - Clicking a tab shows it. Clicking anywhere in a pane focuses it.
 - In the tree a click moves the cursor to the row, a click on its `▸` or
   `▾` is Space, and a double-click is Enter: a table's select goes into the
@@ -391,6 +392,27 @@ Objects first ends typing the filter, the way Enter does, so a button's
 key is not typed into it. `every_button_drawn_is_exactly_its_key_and_does_something`
 in `src/ui/tests/mouse.rs` clicks every button in a table of states and
 presses its key on a copy, and the two apps have to come out the same.
+
+### The pad
+
+The pad keeps a scroll hint, the line and column its pane starts from, and
+`Scratch::window` clamps it just far enough to put the cursor on screen. The
+run loop hands each frame's `Target::Pad { top, left, gutter }` back through
+`App::drawn`, so the hint is always what was last drawn and a key that moves
+the cursor inside the view leaves the view alone. Only the renderer knows how
+tall the pad is; this is how the app follows it without asking.
+
+- The button going down puts the cursor on the character under it (a column
+  counts characters, one per cell), clamped to the line and to the last
+  line. The gutter is column 0. Shift extends the selection instead.
+- A click focuses Scratch. A double-click selects the run of letters, digits
+  and underscores under the pointer, and nothing on anything else.
+- A drag selects from where the button went down. Above or below the pad it
+  is the line just past the edge, so the view scrolls a line per move.
+- The wheel moves the drawn window by 3 lines and pulls the cursor along only
+  as far as it has to, the way vim's Ctrl-E does, extending a selection if
+  there is one. It stops with the last line at the bottom.
+- None of it is an edit: no undo snapshot, no `[modified]`, no save.
 
 ## The scratch pad
 

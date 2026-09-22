@@ -309,3 +309,34 @@ fn a_click_behind_a_key_that_changed_the_layout_lands_on_the_new_layout() {
     assert!(!app.shell.help, "the click beside the help closed it");
     assert_eq!(app.shell.active_tab, 0, "and reached nothing under it");
 }
+
+#[test]
+fn the_pad_scrolls_from_the_window_the_last_frame_drew() {
+    let mut app = two_tabs();
+    app.shell.focus = crate::app::Focus::Scratch;
+    let text: Vec<String> = (1..=40).map(|n| format!("select {n}")).collect();
+    app.tabs[0].scratch.set_text(&text.join("\n"));
+    // Down to the last line, then up five: every one of those lines was on
+    // the last frame, so the view does not move for them.
+    let mut specs = vec!["Down"; 39];
+    specs.extend(["Up"; 5]);
+    let mut terminal = terminal();
+    run_loop(
+        &mut terminal,
+        &mut app,
+        &mut Keys::new(&specs),
+        &Trace::new(None),
+        &mut driver(),
+        None,
+    )
+    .expect("the loop");
+    let buffer = terminal.backend().buffer();
+    let row = |y: u16| -> String {
+        (38..buffer.area.width)
+            .map(|x| buffer[(x, y)].symbol())
+            .collect::<String>()
+    };
+    assert_eq!(app.tabs[0].scratch.cursor(), (34, 0));
+    assert_eq!(row(2).trim_end_matches([' ', '│']), "28 select 28");
+    assert_eq!(row(14).trim_end_matches([' ', '│']), "40 select 40");
+}

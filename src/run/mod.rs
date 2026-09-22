@@ -398,6 +398,7 @@ impl Driver {
         if self.dirty {
             let at = Instant::now();
             terminal.draw(|frame| self.hits = ui::render(frame, app, &self.theme))?;
+            app.drawn(&self.hits);
             self.dirty = false;
             drew = at.elapsed();
             if trace.is_on() {
