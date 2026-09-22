@@ -24,7 +24,7 @@ cd "$(dirname "$0")/../.."
 
 export SQL_BENCH_CONFIG=${SQL_BENCH_CONFIG:-config.local.toml}
 bin=${SQL_BENCH_BIN:-target/release/sql-bench}
-[ -x "$bin" ] || cargo build --release --quiet
+[ -n "${SQL_BENCH_BIN:-}" ] || cargo build --release --quiet
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT

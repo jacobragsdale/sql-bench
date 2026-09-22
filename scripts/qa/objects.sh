@@ -25,7 +25,7 @@ cd "$(dirname "$0")/../.."
 
 export SQL_BENCH_CONFIG=${SQL_BENCH_CONFIG:-config.local.toml}
 bin=${SQL_BENCH_BIN:-target/release/sql-bench}
-[ -x "$bin" ] || cargo build --release --quiet
+[ -n "${SQL_BENCH_BIN:-}" ] || cargo build --release --quiet
 
 # 200x60: the object pane holds a seeded schema fully expanded, and the
 # results pane holds more lines than the longest seeded source.

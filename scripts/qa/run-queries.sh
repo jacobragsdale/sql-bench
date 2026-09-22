@@ -13,7 +13,7 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
 bin=${SQL_BENCH_BIN:-target/debug/sql-bench}
-[ -x "$bin" ] || cargo build --quiet
+[ -n "${SQL_BENCH_BIN:-}" ] || cargo build --quiet
 
 fail=0
 for script in run cancel error multi objects; do

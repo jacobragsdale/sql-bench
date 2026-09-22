@@ -24,7 +24,7 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 bin=${SQL_BENCH_BIN:-target/release/sql-bench}
-[ -x "$bin" ] || cargo build --release --quiet
+[ -n "${SQL_BENCH_BIN:-}" ] || cargo build --release --quiet
 
 work=$(mktemp -d)
 # Both containers are left running however this ends, including a `set -e`.

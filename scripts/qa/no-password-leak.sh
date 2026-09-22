@@ -11,7 +11,7 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 bin=${SQL_BENCH_BIN:-target/release/sql-bench}
-[ -x "$bin" ] || cargo build --release --quiet
+[ -n "${SQL_BENCH_BIN:-}" ] || cargo build --release --quiet
 
 secret='Sup3rSecret_Wrong!'
 work=$(mktemp -d)
