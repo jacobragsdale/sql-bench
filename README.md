@@ -13,8 +13,8 @@ stack, same layout, same keys.
 
 <!-- frame:start -->
 ```
- 1 local-mssql ●  2 local-oracle ○
-╭ Objects ───────────────────╮╭ Scratch ───────────────────────────────────────────────────────────╮
+ 1 local-mssql ●  2 local-oracle ○                                                           ? Help
+╭ Objects ──────── / Filter ─╮╭ Scratch ─────────────────────────────── ✎ Editor ─ ▶▶ All ─ ▶ Run ─╮
 │ ▾ dbo                      ││ 1 select id, name, country, credit_limit                           │
 │   ▸ Tables                 ││ 2 from bench.customers where country in ('DE', 'NO', 'IE')         │
 │   ▸ Views                  ││                                                                    │
@@ -24,7 +24,7 @@ stack, same layout, same keys.
 │ ▾ bench                    ││                                                                    │
 │   ▾ Tables                 ││                                                                    │
 │     ▸ all_types            │╰────────────────────────────────────────────────────────────────────╯
-│     ▸ big_text             │╭ Results · 15 rows · 1 ms ──────────────────────────────────────────╮
+│     ▸ big_text             │╭ Results · 15 rows · 1 ms ───────────────────────────────── Export ─╮
 │     ▸ binary_blobs         ││ id   name          country  credit_limit                           │
 │     ▸ customers            ││ int  nvarchar      char     decimal                                │
 │     ▸ events               ││   1  Zoë Bauer     DE             100.50                           │

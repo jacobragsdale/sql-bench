@@ -50,11 +50,24 @@ fn text(terminal: &Terminal<TestBackend>) -> String {
         .join("\n")
 }
 
+/// The whole tab bar: `tabs` on the left and the help button at the right
+/// end, one column off the edge.
+fn bar(terminal: &Terminal<TestBackend>, tabs: &str) -> String {
+    let width = usize::from(terminal.backend().buffer().area.width);
+    let gap = width - 1 - tabs.chars().count() - "? Help".len();
+    format!("{tabs}{:gap$}? Help", "")
+}
+
 /// The colour and weight a cell was painted in, as a [`Style`] to compare
-/// with a theme token.
+/// with a theme token. A background is only there if something painted one.
 fn painted(terminal: &Terminal<TestBackend>, x: u16, y: u16) -> Style {
     let cell = &terminal.backend().buffer()[(x, y)];
-    Style::new().fg(cell.fg).add_modifier(cell.modifier)
+    let style = Style::new().fg(cell.fg).add_modifier(cell.modifier);
+    if cell.bg == ratatui::style::Color::Reset {
+        style
+    } else {
+        style.bg(cell.bg)
+    }
 }
 
 /// The top-left corner of every pane frame, in the order they are drawn.

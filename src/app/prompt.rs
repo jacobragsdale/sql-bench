@@ -5,6 +5,7 @@
 //! behind it, and none of them are what a path being typed over wants.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use unicode_width::UnicodeWidthChar;
 
 /// One line being typed into the footer. The cursor counts characters and
 /// not bytes, because it is where a person is and not where a `String` is.
@@ -49,6 +50,20 @@ impl Prompt {
             KeyCode::End => self.cursor = length,
             _ => {}
         }
+    }
+
+    /// The cursor onto the character drawn `column` cells from the start of
+    /// the text, or past its end: a click on it.
+    pub fn place(&mut self, column: usize) {
+        let mut cells = 0;
+        self.cursor = self
+            .text
+            .chars()
+            .position(|character| {
+                cells += character.width().unwrap_or(0);
+                cells > column
+            })
+            .unwrap_or_else(|| self.text.chars().count());
     }
 
     /// Where character `at` starts, or the end of the text.
@@ -120,6 +135,20 @@ mod tests {
         // Nothing to delete, and nowhere further left to go.
         press(&mut prompt, &["Backspace", "Left"]);
         assert_eq!((prompt.text.as_str(), prompt.cursor), ("o.csv!", 0));
+    }
+
+    #[test]
+    fn a_click_lands_on_the_character_drawn_there() {
+        let mut prompt = Prompt::new("日本.csv".to_owned());
+        prompt.place(0);
+        assert_eq!(prompt.cursor, 0);
+        // Each of the first two is two cells wide.
+        prompt.place(3);
+        assert_eq!(prompt.cursor, 1);
+        prompt.place(4);
+        assert_eq!(prompt.cursor, 2);
+        prompt.place(40);
+        assert_eq!(prompt.cursor, 6, "past the end is the end");
     }
 
     #[test]

@@ -254,7 +254,10 @@ fn the_inspector_wraps_a_long_value_and_says_how_long_it_is() {
     let lines = overlay(&frame(120, 40, &app));
     assert_eq!(
         lines[0],
-        format!("╭ body · nvarchar(max) · 1,000 chars {}╮", "─".repeat(34))
+        format!(
+            "╭ body · nvarchar(max) · 1,000 chars {} × ─╮",
+            "─".repeat(30)
+        )
     );
     assert_eq!(
         lines[1],
@@ -287,7 +290,10 @@ fn a_value_taller_than_the_screen_scrolls_inside_the_tab_bar_and_the_footer() {
         38,
         "the tab bar and the footer are not covered"
     );
-    assert_eq!(line(&terminal, 0), " 1 local-mssql ○  2 local-oracle ○");
+    assert_eq!(
+        line(&terminal, 0),
+        bar(&terminal, " 1 local-mssql ○  2 local-oracle ○")
+    );
     assert_eq!(lines[1], format!("│ {:<68} │", "line 0"));
 
     app.handle(Event::Key(key("j")));
@@ -340,7 +346,7 @@ fn the_inspector_says_null_for_a_null_and_nothing_for_an_empty_string() {
     let lines = overlay(&frame(120, 40, &app));
     assert_eq!(
         lines[0],
-        format!("╭ body · nvarchar(max) · NULL {}╮", "─".repeat(41))
+        format!("╭ body · nvarchar(max) · NULL {} × ─╮", "─".repeat(37))
     );
     assert_eq!(lines[1], format!("│ {:<68} │", "NULL"));
     assert_eq!(lines.len(), 3);

@@ -337,7 +337,7 @@ how the app still sees no terminal and reads no clock.
   the way Esc does, and reaches nothing under it.
 - What the pointer rests on is painted in the theme's hover style, restyled
   over the finished frame from the same hits a click reads. Only things that
-  are there to be clicked light up: a tab, not a pane.
+  are there to be clicked light up: a tab or a button, not a pane.
 
 A press paints nothing, and the pointer moving costs a frame only when the
 target or row under it changes, so resting the mouse on the app costs one
@@ -345,6 +345,34 @@ frame and not one per event. The loop handles a burst of events together, but
 a mouse event behind one that changed the screen is held for the next turn,
 after the new frame is drawn, so it lands on what the person was looking at.
 Mouse capture goes on with the alternate screen and off before it is left.
+
+### Buttons
+
+A button is `Target::Button { pane, key }`, and clicking it focuses `pane`
+and runs `App::key(key)`, so a button can do nothing a key cannot. The title
+bars carry them right-aligned over the top border (`▶ Run`, `▶▶ All`,
+`✎ Editor`, `■ Stop` over Scratch; `Export`, `+10k`, `◀`, `▶`, `■ Cancel`
+over Results; `⟳ Reload`, `/ Filter`, `×` over Objects), dropped from the
+left when the title needs the room. The placeholders `[ Connect ]`,
+`[ Retry ]` and `[ Clear filter ]` are buttons, as are `? Help` at the end
+of the tab bar, every footer hint that names one key, the footer's
+connection state (`c` or `C`, always the Objects pane's), the error's `×`,
+the export prompt's `Export` and `Cancel`, and the help's and the
+inspector's `×`. A click on the prompt's text puts its cursor there.
+
+A button is drawn only where its key does what the button says. Esc cancels
+a running query before it clears a filter or an error, so the filter's `×`
+and the error's `×` are hidden while one runs, and the error's also while
+the tree has a filter; `[`, `]`, `m` and `e` do nothing over an object's
+source, so their buttons are not there either. The footer's Esc hint is not
+a button at all: while the hints show, nothing is running and no help is
+open, so Esc has nothing to do of what it says. Two clicks do a little more
+than their key, on purpose. A help row closes the help and then presses its
+key, because the help keeps the scroll keys for itself. Any click in
+Objects first ends typing the filter, the way Enter does, so a button's
+key is not typed into it. `every_button_drawn_is_exactly_its_key_and_does_something`
+in `src/ui/tests/mouse.rs` clicks every button in a table of states and
+presses its key on a copy, and the two apps have to come out the same.
 
 ## The scratch pad
 

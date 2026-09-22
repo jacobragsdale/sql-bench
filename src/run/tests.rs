@@ -83,7 +83,10 @@ fn a_run_draws_the_layout_and_q_ends_it() {
     let row: String = (0..120)
         .map(|x| terminal.backend().buffer()[(x, 0)].symbol())
         .collect();
-    assert_eq!(row.trim_end(), " 1 local-mssql ○  2 local-oracle ○");
+    assert_eq!(
+        row.trim_end(),
+        format!(" 1 local-mssql ○  2 local-oracle ○{:79}? Help", "")
+    );
     let footer: String = (0..120)
         .map(|x| terminal.backend().buffer()[(x, 39)].symbol())
         .collect();

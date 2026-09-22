@@ -13,12 +13,13 @@ use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph};
+use unicode_width::UnicodeWidthStr;
 
 use crate::app::pointer::{Hits, Target};
 use crate::app::prompt::Prompt;
 use crate::app::results::{INSPECT_WIDTH, Inspector, inspect_title};
 use crate::app::scratch::Scratch;
-use crate::app::{App, Focus, TabState, keys_for};
+use crate::app::{App, Focus, TabState, key_named, keys_for};
 use theme::Theme;
 
 /// Smaller than this and the three panes are narrower than their own titles,
@@ -78,14 +79,17 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) -> Hits {
     let [scratch, results] =
         Layout::vertical([Constraint::Percentage(40), Constraint::Min(3)]).areas(right);
 
-    frame.render_widget(tab_bar(app, theme, bar, &mut hits), bar);
-    objects::render(frame, app, theme, objects);
-    scratch_pane(frame, app, theme, scratch);
-    results::render(frame, app, theme, results);
+    tab_bar(frame, app, theme, bar, &mut hits);
+    // Under the buttons each pane draws over itself.
     hits.push(objects, Target::Pane(Focus::Objects));
     hits.push(scratch, Target::Pane(Focus::Scratch));
     hits.push(results, Target::Pane(Focus::Results));
-    frame.render_widget(footer_line(app, theme, area.width), footer);
+    objects::render(frame, app, theme, objects, &mut hits);
+    scratch_pane(frame, app, theme, scratch, &mut hits);
+    results::render(frame, app, theme, results, &mut hits);
+    if app.shell.prompt.is_none() {
+        footer_line(frame, app, theme, footer, &mut hits);
+    }
     if let Some(inspector) = &app.shell.inspector {
         render_inspector(frame, area, app, inspector, theme, &mut hits);
     }
@@ -95,9 +99,11 @@ pub fn render(frame: &mut Frame, app: &App, theme: &Theme) -> Hits {
         render_help(frame, area, app, theme, &mut hits);
     }
     // The prompt takes every key, so it takes every click too: one beside it
-    // gives up the way Esc does.
+    // gives up the way Esc does, and only its own text and buttons are over
+    // that.
     if app.shell.prompt.is_some() {
         hits.push(area, Target::Outside);
+        footer_line(frame, app, theme, footer, &mut hits);
     }
     hover(frame, app, theme, &hits);
     hits
@@ -114,9 +120,28 @@ fn hover(frame: &mut Frame, app: &App, theme: &Theme, hits: &Hits) {
     }
 }
 
-/// `1 local-mssql ●  2 local-oracle ○`, the tab showing in the accent colour.
-/// Each label is a click target, cut to the bar where it runs off the end.
-fn tab_bar(app: &App, theme: &Theme, bar: Rect, hits: &mut Hits) -> Line<'static> {
+/// `1 local-mssql ●  2 local-oracle ○`, the tab showing in the accent colour,
+/// and `? Help` at the right end while the tabs leave room for it.
+fn tab_bar(frame: &mut Frame, app: &App, theme: &Theme, bar: Rect, hits: &mut Hits) {
+    let line = Line::from(tabs(app, theme, bar, hits));
+    let end = bar
+        .x
+        .saturating_add(u16::try_from(line.width()).unwrap_or(u16::MAX));
+    frame.render_widget(line, bar);
+    let help = " ? Help ";
+    let x = bar.right().saturating_sub(cells(help));
+    if x > end {
+        frame.buffer_mut().set_string(x, bar.y, help, theme.dim);
+        hits.push(
+            Rect::new(x, bar.y, cells(help), 1),
+            button(app.shell.focus, "?"),
+        );
+    }
+}
+
+/// The tab labels, drawn. Each is a click target, cut to the bar where it
+/// runs off the end.
+fn tabs(app: &App, theme: &Theme, bar: Rect, hits: &mut Hits) -> Vec<Span<'static>> {
     let mut spans = Vec::with_capacity(app.tabs.len() * 2);
     let mut x = bar.x;
     for (index, tab) in app.tabs.iter().enumerate() {
@@ -136,11 +161,73 @@ fn tab_bar(app: &App, theme: &Theme, bar: Rect, hits: &mut Hits) -> Line<'static
         spans.push(gap);
         spans.push(label);
     }
-    Line::from(spans)
+    spans
 }
 
 fn width(span: &Span) -> u16 {
     u16::try_from(span.width()).unwrap_or(u16::MAX)
+}
+
+/// How many cells `text` takes on screen.
+fn cells(text: &str) -> u16 {
+    u16::try_from(UnicodeWidthStr::width(text)).unwrap_or(u16::MAX)
+}
+
+/// A button pressing the key [`KEYS`](crate::app::KEYS) spells `name`.
+fn button(pane: Focus, name: &str) -> Target {
+    Target::Button {
+        pane,
+        key: key_named(name).unwrap_or_else(|| panic!("{name}: not a key")),
+    }
+}
+
+/// Buttons right-aligned over the top border of `area`, each ` label ` with
+/// a border cell between it and the next, pressing its key in `pane`.
+///
+/// The title keeps its room: a button that would reach it is dropped, and so
+/// is every one left of it, so the least of them goes first in `chips`.
+pub(super) fn buttons(
+    frame: &mut Frame,
+    area: Rect,
+    title: &str,
+    chips: &[(&str, &str)],
+    pane: Focus,
+    style: Style,
+    hits: &mut Hits,
+) {
+    // The title, and one border cell after it.
+    let floor = area.x.saturating_add(cells(title)).saturating_add(2);
+    // Where the next button ends: one border cell short of the corner.
+    let mut end = area.right().saturating_sub(2);
+    for (label, name) in chips.iter().rev() {
+        let text = format!(" {label} ");
+        let Some(x) = end.checked_sub(cells(&text)).filter(|x| *x >= floor) else {
+            break;
+        };
+        frame.buffer_mut().set_string(x, area.y, &text, style);
+        hits.push(Rect::new(x, area.y, cells(&text), 1), button(pane, name));
+        end = x.saturating_sub(1);
+    }
+}
+
+/// A placeholder that is a button, `[ Connect ]`, on the first row of
+/// `area`.
+pub(super) fn placeholder_button(
+    frame: &mut Frame,
+    area: Rect,
+    label: &str,
+    (pane, name): (Focus, &str),
+    theme: &Theme,
+    hits: &mut Hits,
+) {
+    let text = format!("[ {label} ]");
+    let row = Rect {
+        width: cells(&text).min(area.width),
+        height: 1.min(area.height),
+        ..area
+    };
+    frame.render_widget(Span::styled(text, theme.accent), row);
+    hits.push(row, button(pane, name));
 }
 
 /// The scratch pad: a line number gutter, the text with the cursor cell and
@@ -148,7 +235,7 @@ fn width(span: &Span) -> u16 {
 ///
 /// It draws its own block rather than going through [`pane`], because it is
 /// the one pane whose body has to know how wide the inside is.
-fn scratch_pane(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
+fn scratch_pane(frame: &mut Frame, app: &App, theme: &Theme, area: Rect, hits: &mut Hits) {
     let focused = app.shell.focus == Focus::Scratch;
     let (title_style, border_style) = if focused {
         (theme.accent, theme.accent)
@@ -165,9 +252,27 @@ fn scratch_pane(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     let block = titled(title, title_style, border_style);
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let Some(scratch) = scratch else {
+    let Some(tab) = app.tab() else {
         return;
     };
+    let mut chips = vec![
+        ("✎ Editor", "Ctrl-E"),
+        ("▶▶ All", "F5"),
+        ("▶ Run", "Ctrl-R"),
+    ];
+    if tab.results.running() {
+        chips.push(("■ Stop", "Esc"));
+    }
+    buttons(
+        frame,
+        area,
+        title,
+        &chips,
+        Focus::Scratch,
+        title_style,
+        hits,
+    );
+    let scratch = &tab.scratch;
     if scratch.is_empty() && !focused {
         frame.render_widget(
             Paragraph::new(placeholder("your SQL goes here", theme)),
@@ -255,8 +360,9 @@ fn placeholder(text: &str, theme: &Theme) -> Line<'static> {
 }
 
 /// Key hints on the left — or the error, or the status — and where the tab's
-/// connection is on the right.
-fn footer_line(app: &App, theme: &Theme, width: u16) -> Line<'static> {
+/// connection is on the right. Each part of it that is one key is a button
+/// for that key.
+fn footer_line(frame: &mut Frame, app: &App, theme: &Theme, area: Rect, hits: &mut Hits) {
     let disconnected = TabState::Disconnected;
     let tab = app.tab();
     let state = tab.map_or(&disconnected, |tab| &tab.state);
@@ -274,23 +380,73 @@ fn footer_line(app: &App, theme: &Theme, width: u16) -> Line<'static> {
             _ => theme.dim,
         },
     );
-    let budget = usize::from(width).saturating_sub(right.width() + 1);
-    let left = match (
+    let budget = usize::from(area.width).saturating_sub(right.width() + 1);
+    let focus = app.shell.focus;
+    let mut parts = match (
         &app.shell.prompt,
         &app.shell.error,
         app.shell.status.as_str(),
     ) {
-        (Some(prompt), ..) => prompt_spans(prompt, theme),
-        (None, Some(error), _) => vec![Span::styled(cut(error, budget), theme.error)],
-        (None, None, "") => vec![Span::styled(hints(app.shell.focus, budget), theme.dim)],
-        (None, None, status) => vec![Span::raw(cut(status, budget))],
+        (Some(prompt), ..) => prompt_spans(prompt, focus, theme, budget),
+        (None, Some(error), _) if error_closes(app) => vec![
+            (
+                Span::styled(cut(error, budget.saturating_sub(3)), theme.error),
+                None,
+            ),
+            (Span::styled(" × ", theme.error), Some(button(focus, "Esc"))),
+        ],
+        (None, Some(error), _) => vec![(Span::styled(cut(error, budget), theme.error), None)],
+        (None, None, "") => hints(focus, budget, theme),
+        (None, None, status) => vec![(Span::raw(cut(status, budget)), None)],
     };
-    let used: usize = left.iter().map(Span::width).sum();
-    let gap = usize::from(width).saturating_sub(used + right.width());
-    let mut spans = left;
-    spans.push(Span::raw(" ".repeat(gap)));
-    spans.push(right);
-    Line::from(spans)
+    let used: usize = parts.iter().map(|(span, _)| span.width()).sum();
+    let gap = usize::from(area.width).saturating_sub(used + right.width());
+    // The tree's `c` and `C`, because the pad would type them.
+    let toggle = match state {
+        TabState::Connected | TabState::Connecting => "C",
+        _ => "c",
+    };
+    parts.push((Span::raw(" ".repeat(gap)), None));
+    parts.push((
+        right,
+        app.shell
+            .prompt
+            .is_none()
+            .then(|| button(Focus::Objects, toggle)),
+    ));
+    let mut x = area.x;
+    for (span, target) in &parts {
+        if let Some(target) = target {
+            hits.push(
+                Rect::new(x, area.y, width(span), 1).intersection(area),
+                *target,
+            );
+        }
+        x = x.saturating_add(width(span));
+    }
+    if let Some(prompt) = &app.shell.prompt {
+        // The text and the cell past its end, where a click puts the cursor
+        // back at the end.
+        let text = Rect::new(
+            area.x + cells(PROMPT),
+            area.y,
+            cells(&prompt.text).saturating_add(1),
+            1,
+        );
+        hits.push(text.intersection(area), Target::PromptText);
+    }
+    let spans: Vec<Span> = parts.into_iter().map(|(span, _)| span).collect();
+    frame.render_widget(Line::from(spans), area);
+}
+
+/// Whether Esc would close the error, which is only when nothing else is
+/// ahead of it: a running query is cancelled first, and a filter in the tree
+/// cleared.
+fn error_closes(app: &App) -> bool {
+    app.tab().is_none_or(|tab| {
+        !tab.results.running()
+            && (app.shell.focus != Focus::Objects || tab.objects.filter().is_empty())
+    })
 }
 
 /// ` text`, cut to `budget` columns with an ellipsis. The footer's right end
@@ -305,44 +461,86 @@ fn cut(text: &str, budget: usize) -> String {
     format!(" {kept}…")
 }
 
+const PROMPT: &str = " Export to: ";
+
 /// ` Export to: ` and the path being typed, the cursor painted the way the
 /// scratch pad's is — a `TestBackend` has no terminal cursor, so a prompt
-/// whose cursor were the real one could not be tested at all.
-fn prompt_spans(prompt: &Prompt, theme: &Theme) -> Vec<Span<'static>> {
+/// whose cursor were the real one could not be tested at all. Then Enter and
+/// Esc as buttons, while there is room for them.
+fn prompt_spans(
+    prompt: &Prompt,
+    focus: Focus,
+    theme: &Theme,
+    budget: usize,
+) -> Vec<(Span<'static>, Option<Target>)> {
     let characters: Vec<char> = prompt.text.chars().collect();
-    vec![
-        Span::styled(" Export to: ".to_owned(), theme.accent),
-        Span::raw(characters.iter().take(prompt.cursor).collect::<String>()),
-        Span::styled(
-            characters
-                .get(prompt.cursor)
-                .copied()
-                .unwrap_or(' ')
-                .to_string(),
-            theme.cursor,
+    let mut parts = vec![
+        (Span::styled(PROMPT.to_owned(), theme.accent), None),
+        (
+            Span::raw(characters.iter().take(prompt.cursor).collect::<String>()),
+            None,
         ),
-        Span::raw(
-            characters
-                .iter()
-                .skip(prompt.cursor + 1)
-                .collect::<String>(),
+        (
+            Span::styled(
+                characters
+                    .get(prompt.cursor)
+                    .copied()
+                    .unwrap_or(' ')
+                    .to_string(),
+                theme.cursor,
+            ),
+            None,
         ),
-    ]
-}
-
-/// As many of this pane's keys as fit, in the order [`KEYS`] lists them.
-fn hints(focus: Focus, budget: usize) -> String {
-    let mut text = String::new();
-    for (key, _, does) in keys_for(focus) {
-        let hint = format!("{key} {does}");
-        let separator = if text.is_empty() { " " } else { "  " };
-        if text.chars().count() + separator.len() + hint.chars().count() > budget {
+        (
+            Span::raw(
+                characters
+                    .iter()
+                    .skip(prompt.cursor + 1)
+                    .collect::<String>(),
+            ),
+            None,
+        ),
+    ];
+    let mut room = budget.saturating_sub(parts.iter().map(|(span, _)| span.width()).sum());
+    // Dropped from the left, the way a pane's are: Cancel is the one to keep.
+    let mut chips = Vec::new();
+    for (label, name) in [("Cancel", "Esc"), ("Export", "Enter")] {
+        let chip = format!(" {label} ");
+        if chip.len() + 1 > room {
             break;
         }
-        text.push_str(separator);
-        text.push_str(&hint);
+        room -= chip.len() + 1;
+        chips.push((Span::styled(chip, theme.accent), Some(button(focus, name))));
+        chips.push((Span::raw(" "), None));
     }
-    text
+    parts.extend(chips.into_iter().rev());
+    parts
+}
+
+/// As many of this pane's keys as fit, in the order [`KEYS`] lists them,
+/// each a button for its key when it is one key. Esc is not: while the hints
+/// are showing nothing is running and no help is open, so it would have
+/// nothing to do of what it says it does.
+///
+/// [`KEYS`]: crate::app::KEYS
+fn hints(focus: Focus, budget: usize, theme: &Theme) -> Vec<(Span<'static>, Option<Target>)> {
+    let mut parts = Vec::new();
+    let mut used = 0;
+    for (key, _, does) in keys_for(focus) {
+        let hint = format!("{key} {does}");
+        let separator = if used == 0 { " " } else { "  " };
+        let wide = separator.len() + hint.chars().count();
+        if used + wide > budget {
+            break;
+        }
+        used += wide;
+        let target = key_named(key)
+            .filter(|_| *key != "Esc")
+            .map(|key| Target::Button { pane: focus, key });
+        parts.push((Span::styled(separator, theme.dim), None));
+        parts.push((Span::styled(hint, theme.dim), target));
+    }
+    parts
 }
 
 /// The keys that work in the focused pane, from the one table the footer
@@ -389,6 +587,22 @@ fn render_help(frame: &mut Frame, area: Rect, app: &App, theme: &Theme, hits: &m
     );
     hits.push(area, Target::Outside);
     hits.push(overlay, Target::Overlay);
+    // Each row that is one key is a button for it, the width of the inside.
+    for (y, (key, _, _)) in (overlay.y + 1..).zip(&rows[top..top + showing]) {
+        if let Some(key) = key_named(key) {
+            let row = Rect::new(overlay.x + 1, y, overlay.width.saturating_sub(2), 1);
+            hits.push(row, Target::Button { pane: focus, key });
+        }
+    }
+    buttons(
+        frame,
+        overlay,
+        &title,
+        &[("×", "Esc")],
+        focus,
+        theme.accent,
+        hits,
+    );
 }
 
 /// The whole of one cell over the grid: the column, its type and how much of
@@ -423,17 +637,23 @@ fn render_inspector(
         .into_iter()
         .map(Line::raw)
         .collect();
+    let title = format!(" {} ", inspect_title(column, cell));
     frame.render_widget(Clear, overlay);
     frame.render_widget(
-        Paragraph::new(body).block(titled(
-            &format!(" {} ", inspect_title(column, cell)),
-            theme.accent,
-            theme.accent,
-        )),
+        Paragraph::new(body).block(titled(&title, theme.accent, theme.accent)),
         overlay,
     );
     hits.push(area, Target::Outside);
     hits.push(overlay, Target::Overlay);
+    buttons(
+        frame,
+        overlay,
+        &title,
+        &[("×", "Esc")],
+        app.shell.focus,
+        theme.accent,
+        hits,
+    );
 }
 
 fn titled(title: &str, title_style: Style, border_style: Style) -> Block<'static> {

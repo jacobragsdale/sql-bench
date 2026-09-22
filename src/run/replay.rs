@@ -909,7 +909,10 @@ mod tests {
         let written = std::fs::read_to_string(directory.path().join("help.txt")).expect("a frame");
         let lines: Vec<&str> = written.lines().collect();
         assert_eq!(lines[0], "# help 120x40");
-        assert_eq!(lines[1], " 1 local-mssql ○  2 local-oracle ○");
+        assert_eq!(
+            lines[1],
+            format!(" 1 local-mssql ○  2 local-oracle ○{:79}? Help", "")
+        );
         assert_eq!(lines.len(), 41, "a header and one line per row");
         assert!(written.contains("╭ Help "), "{written}");
         assert!(

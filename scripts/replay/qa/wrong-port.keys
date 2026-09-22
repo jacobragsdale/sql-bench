@@ -7,6 +7,6 @@ wait busy
 expect ✗
 expect localhost:1:
 expect cannot connect
-expect c to retry
+expect [ Retry ]
 frame wrong-port
 key q
