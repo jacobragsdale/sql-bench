@@ -32,14 +32,12 @@ key Enter
 expect select * from BENCH.CUSTOMERS fetch first 100 rows only
 key Shift-Tab
 
-# The views, so the filter has something of each kind to keep. G is the last
-# schema, and the kinds of this one are the five rows above it.
-key G
-key k
-key k
-key k
-key k
-key k
+# The views, so the filter has something of each kind to keep. Up from the
+# table to its kind, close it, and the next row is the views: counting from
+# the last schema breaks as soon as the server has one more.
+key h
+key h
+key j
 key l
 wait busy
 expect V_RECENT_ORDERS
@@ -50,9 +48,9 @@ type cust
 expect ╭ Objects /cust ─
 expect CUSTOMERS
 expect V_CUSTOMER_TOTALS
-expect-not ▸ ORDERS
+expect-not ▸ Procedures
 key Esc
-expect ▸ ORDERS
+expect ▸ Procedures
 
 # s: the text that made a procedure, in the results pane with line numbers.
 key h
