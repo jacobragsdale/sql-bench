@@ -84,7 +84,7 @@ pub(super) fn render(frame: &mut Frame, app: &App, theme: &Theme, area: Rect, hi
         return;
     }
     let height = usize::from(inner.height);
-    let top = objects.window(height);
+    let top = objects.window(&visible, height);
     let width = usize::from(inner.width);
     scrollbar(
         frame,
