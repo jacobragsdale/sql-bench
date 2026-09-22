@@ -31,7 +31,9 @@ pub const MENU: [(Focus, &[&str]); 3] = [
     ),
     (
         Focus::Scratch,
-        &["Ctrl-R", "F5", "Ctrl-C", "Ctrl-Z", "Ctrl-E"],
+        &[
+            "Ctrl-R", "F5", "Ctrl-C", "Ctrl-X", "Ctrl-V", "Ctrl-A", "Ctrl-Z", "Ctrl-E",
+        ],
     ),
 ];
 

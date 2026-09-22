@@ -46,14 +46,15 @@ pub const KEYS: &[(&str, &str, &str)] = &[
     ("F5", SCRATCH, "run all"),
     ("Ctrl-E", SCRATCH, "edit in $EDITOR"),
     ("Ctrl-Z", SCRATCH, "undo the last edits"),
-    ("Ctrl-C", SCRATCH, "copy the selection"),
+    ("Ctrl-C", SCRATCH, "copy the selection or the statement"),
+    ("Ctrl-X", SCRATCH, "cut the selection"),
     ("Shift-Arrows", SCRATCH, "select"),
     ("Tab", SCRATCH, "two spaces"),
     ("Home", SCRATCH, "line start"),
     ("End", SCRATCH, "line end"),
     ("PageDown", SCRATCH, "page down"),
     ("PageUp", SCRATCH, "page up"),
-    ("Ctrl-A", SCRATCH, "line start"),
+    ("Ctrl-A", SCRATCH, "select all"),
     ("Ctrl-U", SCRATCH, "delete to line start"),
     ("Ctrl-K", SCRATCH, "delete to line end"),
     ("Ctrl-W", SCRATCH, "delete the word before"),
@@ -64,6 +65,7 @@ pub const KEYS: &[(&str, &str, &str)] = &[
     ("Esc", ANYWHERE, "cancel or close help"),
     ("q", NOT_SCRATCH, "quit"),
     ("Ctrl-Q", ANYWHERE, "quit"),
+    ("Ctrl-V", ANYWHERE, "paste into the pad"),
     ("j", RESULTS, "row down"),
     ("k", RESULTS, "row up"),
     ("h", RESULTS, "column left"),
@@ -234,8 +236,13 @@ pub enum Action {
     MoreRows {
         tab: usize,
     },
-    /// Best effort, into the terminal's clipboard.
+    /// Best effort, into the terminal's clipboard and the system's.
     Copy(String),
+    /// Ask the system clipboard what it holds, off the loop, and hand the
+    /// answer to [`App::pasted`] for this tab's pad.
+    ReadClipboard {
+        tab: usize,
+    },
     /// Write the result set on screen where the prompt said: JSON for a
     /// `.json` name, CSV for anything else.
     Export {
@@ -613,10 +620,8 @@ impl App {
     pub fn handle(&mut self, event: Event) -> Vec<Action> {
         match event {
             Event::Key(key) if key.kind == KeyEventKind::Press => self.key(key),
-            Event::Paste(text) if self.shell.focus == Focus::Scratch => {
-                if let Some(tab) = self.tabs.get_mut(self.shell.active_tab) {
-                    tab.scratch.paste(&text);
-                }
+            Event::Paste(text) => {
+                self.paste(&text);
                 Vec::new()
             }
             Event::Resize(columns, rows) => {
@@ -690,6 +695,14 @@ impl App {
             KeyCode::Char('p' | 'P') if control => {
                 self.shell.finder = Some(Finder::open(&self.tabs));
             }
+            KeyCode::Char('v' | 'V') if control => {
+                if !self.overlaid() && !self.tabs.is_empty() {
+                    self.shell.focus = Focus::Scratch;
+                    return vec![Action::ReadClipboard {
+                        tab: self.shell.active_tab,
+                    }];
+                }
+            }
             KeyCode::Tab if !typing => self.shell.focus = self.shell.focus.next(),
             KeyCode::BackTab => self.shell.focus = self.shell.focus.previous(),
             KeyCode::Char('?') => {
@@ -735,6 +748,54 @@ impl App {
             _ => {}
         }
         Vec::new()
+    }
+
+    /// Whether an overlay the pad would be hidden behind is open. Text pasted
+    /// there would land where nobody can see it.
+    fn overlaid(&self) -> bool {
+        self.shell.help || self.shell.inspector.is_some() || self.shell.mouse.menu.is_some()
+    }
+
+    /// A bracketed paste. The finder and the footer prompt are one line
+    /// being typed, so they take it as one line; anywhere else it goes into
+    /// the pad, which takes the focus, because that is the only place text
+    /// can be put.
+    fn paste(&mut self, text: &str) {
+        let line = || text.split_whitespace().collect::<Vec<_>>().join(" ");
+        if let Some(prompt) = self.shell.prompt.as_mut() {
+            prompt.insert(&line());
+        } else if let Some(finder) = self.shell.finder.as_mut() {
+            finder.query.insert(&line());
+            finder.search(&self.tabs);
+        } else if !self.overlaid()
+            && let Some(tab) = self.tabs.get_mut(self.shell.active_tab)
+        {
+            self.shell.focus = Focus::Scratch;
+            tab.scratch.paste(text);
+        }
+    }
+
+    /// What Ctrl-V's read of the system clipboard came back with: `None` is
+    /// no tool, a tool that failed or timed out, or nothing on it, and then
+    /// the app's own clipboard is the next best thing.
+    pub fn pasted(&mut self, tab: usize, text: Option<String>) {
+        let (text, from) = match text.filter(|text| !text.is_empty()) {
+            Some(text) => (text, ""),
+            None if !self.shell.clipboard.is_empty() => {
+                (self.shell.clipboard.clone(), " from sql-bench's clipboard")
+            }
+            None => {
+                self.shell.status = "the clipboard is empty".to_owned();
+                return;
+            }
+        };
+        let Some(open) = self.tabs.get_mut(tab) else {
+            return;
+        };
+        open.scratch.paste(&text);
+        let lines = text.lines().count().max(1);
+        let noun = if lines == 1 { "line" } else { "lines" };
+        self.shell.status = format!("pasted {lines} {noun}{from}");
     }
 
     /// Put this tab on screen, and connect it if it is not: a tab is opened
@@ -1063,9 +1124,18 @@ impl App {
             }
             Outcome::OpenEditor => vec![Action::OpenEditor { tab }],
             Outcome::Copy(text) => {
-                self.shell.status = format!("copied {} characters", text.chars().count());
-                self.shell.clipboard = text.clone();
-                vec![Action::Copy(text)]
+                let characters = format!("{} characters", text.chars().count());
+                self.copied(text, &characters)
+            }
+            Outcome::CopyStatement => match open.scratch.statement_at_cursor(kind) {
+                Some((sql, _)) => self.copied(sql, "the statement"),
+                None => Vec::new(),
+            },
+            Outcome::Cut(text) => {
+                let characters = format!("{} characters", text.chars().count());
+                let actions = self.copied(text, &characters);
+                self.shell.status = format!("cut {characters}");
+                actions
             }
         }
     }

@@ -33,6 +33,7 @@ use ratatui::buffer::Buffer;
 use crate::app::{App, key_named};
 use crate::cli::{Cli, Size};
 use crate::config::Config;
+use crate::run::clipboard::Clipboard;
 use crate::run::state::Store;
 use crate::run::{Driver, InputSource, startup_tabs};
 use crate::trace::Trace;
@@ -161,6 +162,9 @@ enum Command {
     /// One [`KeyEvent`] per character, which is what typing is.
     Type(String),
     Paste(String),
+    /// Put this text on the replay's stand-in for the system clipboard,
+    /// which is what Ctrl-V reads.
+    Clipboard(String),
     Wait(Wait),
     /// Write `<frames-dir>/<name>.txt` now.
     Frame(String),
@@ -248,7 +252,7 @@ fn parse(source: &str) -> Result<Vec<(usize, Command)>> {
 
 /// One line, or `None` for a blank line or a comment.
 ///
-/// `type` and `paste` take the rest of the line exactly as written, spaces and
+/// `type`, `paste` and `clipboard` take the rest of the line exactly as written, spaces and
 /// all, because that is the text they send. Every other argument is trimmed,
 /// because a trailing space in a script is an invisible mistake.
 fn parse_line(line: &str) -> Result<Option<Command>> {
@@ -276,6 +280,10 @@ fn parse_line(line: &str) -> Result<Option<Command>> {
         "paste" => {
             needed("something to paste")?;
             Command::Paste(rest.to_owned())
+        }
+        "clipboard" => {
+            needed("something to put on the clipboard")?;
+            Command::Clipboard(rest.to_owned())
         }
         "wait" => Command::Wait(parse_wait(needed(
             "busy, text <substring> or milliseconds",
@@ -397,6 +405,9 @@ impl Replay {
         // A replay owns no terminal, so Ctrl-E says so rather than handing
         // over a screen it cannot take back.
         driver.without_terminal();
+        // And no real clipboard tool is ever run: what a script copies and
+        // pastes goes through a fake one that `clipboard` fills.
+        driver.clipboard = Clipboard::Fake(String::new());
         driver.restore_scratch(&mut app);
         driver.connect_at_startup(options.connect.clone());
         Ok(Self {
@@ -421,6 +432,7 @@ impl Replay {
                 Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
             }))?,
             Command::Paste(text) => self.send([Event::Paste(text.clone())])?,
+            Command::Clipboard(text) => self.driver.clipboard = Clipboard::Fake(text.clone()),
             Command::Resize(size) => {
                 self.terminal.backend_mut().resize(size.cols, size.rows);
                 self.send([Event::Resize(size.cols, size.rows)])?;
@@ -712,6 +724,10 @@ mod tests {
             parsed("paste one  two"),
             Command::Paste("one  two".to_owned())
         );
+        assert_eq!(
+            parsed("clipboard select 1  from t"),
+            Command::Clipboard("select 1  from t".to_owned())
+        );
         assert_eq!(parsed("wait busy"), Command::Wait(Wait::Busy));
         assert_eq!(parsed("wait 250"), Command::Wait(Wait::Millis(250)));
         assert_eq!(
@@ -914,6 +930,10 @@ mod tests {
             ("frame a/b\n", "is not a frame name"),
             ("type\n", "type needs something to type"),
             ("paste\n", "paste needs something to paste"),
+            (
+                "clipboard\n",
+                "clipboard needs something to put on the clipboard",
+            ),
             ("click\n", "click \"\": expected X Y or on <substring>"),
             ("click 3\n", "click \"3\": expected X Y or on <substring>"),
             ("click 3 4 5\n", "expected X Y or on <substring>"),
@@ -1110,6 +1130,29 @@ mod tests {
              expect connecting… then running\n\
              key Ctrl-E\n\
              expect editor unavailable in replay\n\
+             key Ctrl-Q\n",
+            App::new(&two_connections()),
+            &options(directory.path()),
+        );
+        assert_eq!(code, OK);
+    }
+
+    #[test]
+    fn ctrl_v_pastes_the_fake_clipboard_and_a_cut_goes_back_onto_it() {
+        let directory = tempfile::tempdir().expect("a directory");
+        let code = run(
+            "key Ctrl-V\n\
+             expect the clipboard is empty\n\
+             clipboard select 1\n\
+             key Ctrl-V\n\
+             expect 1 select 1\n\
+             expect pasted 1 line\n\
+             key Shift-Left\n\
+             key Ctrl-X\n\
+             expect cut 1 characters\n\
+             key Ctrl-V\n\
+             key Ctrl-V\n\
+             expect 1 select 11\n\
              key Ctrl-Q\n",
             App::new(&two_connections()),
             &options(directory.path()),
