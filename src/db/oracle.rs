@@ -6,7 +6,9 @@
 //! stuck in, instead of throwing the socket away. And a statement is one
 //! statement — Oracle has no batches, and the `;` every SQL editor puts on the
 //! end is not part of one, so [`statement`] takes it off again for everything
-//! that is not a PL/SQL block.
+//! that is not PL/SQL. And every statement commits, the way SQL Server's do:
+//! a workbench whose `insert` quietly rolls back on the next reconnect or
+//! cancel is worse than one with no manual transactions.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -104,8 +106,9 @@ impl Backend {
     }
 
     fn connect(&mut self) -> Result<(), DbError> {
-        let driver = Driver::connect(&self.user, &self.password, &self.connect_string)
+        let mut driver = Driver::connect(&self.user, &self.password, &self.connect_string)
             .map_err(|why| DbError::Connect(complaint(&why)))?;
+        driver.set_autocommit(true);
         self.driver = Some(Arc::new(driver));
         Ok(())
     }
@@ -209,6 +212,14 @@ fn execute(driver: &Driver, sql: &str, sink: &mut Sink) -> Result<(), DbError> {
 
     if !stmt.is_query() {
         stmt.execute(&[]).map_err(|why| failure(&why, sql))?;
+        // A stored program that does not compile is still created, INVALID,
+        // and OCI calls that success with a warning. It is not success to
+        // anyone who just typed it.
+        if driver.last_warning().is_some()
+            && let Some(error) = compile_error(driver, sql)
+        {
+            return Err(error);
+        }
         // OCI answers 1 for any PL/SQL block, meaning "one block ran", which
         // would read as one row changed. What a block changed is its own
         // business and the statement itself affected nothing.
@@ -241,8 +252,9 @@ fn execute(driver: &Driver, sql: &str, sink: &mut Sink) -> Result<(), DbError> {
 
 /// Oracle takes one statement and no terminator: a `;` after it is ORA-00933
 /// on 19c and earlier, and 23ai only tolerates it. Editors write one anyway,
-/// so one comes off — but not off a PL/SQL block, where `end;` is the
-/// language and not punctuation, and losing it is PLS-00103.
+/// so one comes off — but not off PL/SQL, a block or a `CREATE` of a stored
+/// program, where `end;` is the language and not punctuation, and losing it
+/// is PLS-00103.
 fn statement(sql: &str) -> &str {
     let sql = sql.trim_end();
     if is_plsql(sql) {
@@ -253,7 +265,90 @@ fn statement(sql: &str) -> &str {
 
 fn is_plsql(sql: &str) -> bool {
     let first = sql.split_whitespace().next().unwrap_or_default();
-    first.eq_ignore_ascii_case("begin") || first.eq_ignore_ascii_case("declare")
+    first.eq_ignore_ascii_case("begin")
+        || first.eq_ignore_ascii_case("declare")
+        || created(sql).is_some()
+}
+
+/// What a `CREATE` of stored PL/SQL makes: its type as `ALL_ERRORS` spells
+/// it, where in `sql` that type's keyword starts, and the word that names it.
+fn created(sql: &str) -> Option<(&'static str, usize, &str)> {
+    let mut words = sql.split_whitespace();
+    if !words.next()?.eq_ignore_ascii_case("create") {
+        return None;
+    }
+    let mut word = words.next()?;
+    if word.eq_ignore_ascii_case("or") {
+        words.next()?; // replace
+        word = words.next()?;
+    }
+    if word.eq_ignore_ascii_case("editionable") || word.eq_ignore_ascii_case("noneditionable") {
+        word = words.next()?;
+    }
+    let (kind, body) = match word.to_ascii_lowercase().as_str() {
+        "procedure" => ("PROCEDURE", ""),
+        "function" => ("FUNCTION", ""),
+        "trigger" => ("TRIGGER", ""),
+        "package" => ("PACKAGE", "PACKAGE BODY"),
+        "type" => ("TYPE", "TYPE BODY"),
+        _ => return None,
+    };
+    // A slice of `sql`, so its address is its offset.
+    let at = word.as_ptr() as usize - sql.as_ptr() as usize;
+    let name = words.next()?;
+    if !body.is_empty() && name.eq_ignore_ascii_case("body") {
+        return Some((body, at, words.next()?));
+    }
+    Some((kind, at, name))
+}
+
+/// The first error `ALL_ERRORS` holds for the program `sql` just created, on
+/// the line of `sql` it is on. `None` when `sql` created no such program.
+fn compile_error(driver: &Driver, sql: &str) -> Option<DbError> {
+    let (kind, at, word) = created(sql)?;
+    // `bench.p(a number)`, `"Bench"."P"`: unquoted parts fold to upper case
+    // the way Oracle stored them.
+    let name = word.split('(').next().unwrap_or(word);
+    let mut parts = name.split('.').map(|part| match part.strip_prefix('"') {
+        Some(quoted) => quoted.trim_end_matches('"').to_owned(),
+        None => part.to_uppercase(),
+    });
+    let (owner, name) = match (parts.next(), parts.next()) {
+        (Some(owner), Some(name)) => (Some(owner), name),
+        (Some(name), None) => (None, name),
+        _ => return None,
+    };
+    // Unqualified is the session's schema. Not a bound NULL and `coalesce`:
+    // a NULL bind is NVARCHAR2 to OCI and `sys_context` is not (ORA-12704).
+    let owner = owner.map_or_else(
+        || "sys_context('USERENV', 'CURRENT_SCHEMA')".to_owned(),
+        |owner| format!("'{}'", owner.replace('\'', "''")),
+    );
+    let errors = driver
+        .query_as::<(u32, String)>(
+            &format!(
+                "select line, text from all_errors \
+                 where owner = {owner} and name = :1 and type = :2 \
+                   and attribute = 'ERROR' \
+                 order by sequence"
+            ),
+            &[&name, &kind],
+        )
+        .ok()?
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    let (line, text) = errors.first()?;
+    // `ALL_ERRORS` counts from the line the type keyword is on, which is
+    // where the stored source starts.
+    let before = u32::try_from(sql[..at].matches('\n').count()).unwrap_or(0);
+    let more = match errors.len() {
+        1 => String::new(),
+        n => format!(" (and {} more)", n - 1),
+    };
+    Some(DbError::Query {
+        message: format!("{}{more}", text.trim_end()),
+        line: Some(line + before),
+    })
 }
 
 fn column(info: &oracle::ColumnInfo) -> Column {
@@ -278,7 +373,8 @@ fn cell(column_type: &OracleType, value: &SqlValue<'_>) -> Result<Cell, DbError>
         OracleType::Number(precision, 0) if (1..=18).contains(precision) => Cell::Int(get(value)?),
         OracleType::Int64 => Cell::Int(get(value)?),
         OracleType::Number(..) | OracleType::Float(_) => Cell::Decimal(get(value)?),
-        OracleType::BinaryFloat | OracleType::BinaryDouble => Cell::Float(get(value)?),
+        OracleType::BinaryFloat => Cell::Float(super::widen(get(value)?)),
+        OracleType::BinaryDouble => Cell::Float(get(value)?),
         OracleType::Date
         | OracleType::Timestamp(_)
         | OracleType::TimestampTZ(_)
@@ -303,7 +399,14 @@ fn get<T: oracle::sql_type::FromSql>(value: &SqlValue<'_>) -> Result<T, DbError>
 }
 
 fn text(reader: &mut impl std::io::Read) -> Result<Cell, DbError> {
-    let (bytes, truncated) = lob(reader)?;
+    let (mut bytes, truncated) = lob(reader)?;
+    if truncated {
+        // Cut on a character boundary so the lossy decode below does not
+        // invent a replacement character at the end of every long CLOB.
+        while std::str::from_utf8(&bytes).is_err() {
+            bytes.pop();
+        }
+    }
     let mut text = String::from_utf8_lossy(&bytes).into_owned();
     if truncated {
         text.push('…');
@@ -312,6 +415,10 @@ fn text(reader: &mut impl std::io::Read) -> Result<Cell, DbError> {
 }
 
 /// At most [`LOB_LIMIT`] bytes of a locator, and whether there were more.
+// ponytail: every LOB costs one more round trip than its data, the read that
+// comes back empty. A short read is not the end: a CLOB read stops at 16,384
+// characters whatever the buffer, so only the empty one is certain. Ask the
+// locator for its size first if a column of small CLOBs over a WAN matters.
 fn lob(reader: &mut impl std::io::Read) -> Result<(Vec<u8>, bool), DbError> {
     let mut bytes = Vec::new();
     let mut chunk = vec![0u8; 64 * 1024];
@@ -325,11 +432,7 @@ fn lob(reader: &mut impl std::io::Read) -> Result<(Vec<u8>, bool), DbError> {
         }
         bytes.extend_from_slice(&chunk[..read]);
     }
-    // Cut on a character boundary so the lossy decode above does not invent a
-    // replacement character at the very end of every truncated CLOB.
-    while bytes.len() > LOB_LIMIT || std::str::from_utf8(&bytes).is_err() {
-        bytes.pop();
-    }
+    bytes.truncate(LOB_LIMIT);
     Ok((bytes, true))
 }
 
@@ -353,7 +456,20 @@ fn line_of(sql: &str, offset: usize) -> u32 {
 /// `OCI Error: ORA-00933: ...`, and without the newline OCI ends it with.
 fn complaint(why: &oracle::Error) -> String {
     why.db_error()
-        .map_or_else(|| why.to_string(), |db| db.message().trim_end().to_owned())
+        .map_or_else(|| why.to_string(), |db| unhelped(db.message()))
+}
+
+/// 23ai ends every message with `Help: https://docs.oracle.com/…` on a line
+/// of its own, which a footer has no room for and a person has a search
+/// engine for.
+fn unhelped(message: &str) -> String {
+    message
+        .lines()
+        .filter(|line| !line.starts_with("Help: http"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim_end()
+        .to_owned()
 }
 
 #[cfg(test)]
@@ -437,6 +553,55 @@ mod tests {
     }
 
     #[test]
+    fn a_stored_program_keeps_its_terminator_and_a_table_does_not() {
+        for sql in [
+            "create or replace procedure p is begin null; end;",
+            "CREATE FUNCTION f return number is begin return 1; end;",
+            "create or replace editionable package body bench.pk as end;",
+            "create trigger t before insert on x begin null; end;",
+            "create or replace type body tb as end;",
+        ] {
+            assert_eq!(statement(sql), sql);
+        }
+        assert_eq!(
+            statement("create table zz (id number);"),
+            "create table zz (id number)"
+        );
+        assert_eq!(
+            statement("create or replace view v as select 1 a from dual;"),
+            "create or replace view v as select 1 a from dual"
+        );
+    }
+
+    #[test]
+    fn a_create_says_what_it_made_and_where_the_keyword_is() {
+        let sql = "create or replace\n  package body bench.pk as end;";
+        assert_eq!(created(sql), Some(("PACKAGE BODY", 20, "bench.pk")));
+        assert_eq!(
+            created("create procedure p(a number) is begin null; end;"),
+            Some(("PROCEDURE", 7, "p(a"))
+        );
+        assert_eq!(created("create package"), None, "no name");
+        assert_eq!(created("select 1 from dual"), None);
+    }
+
+    #[test]
+    fn the_help_link_23ai_appends_is_left_behind() {
+        assert_eq!(
+            unhelped(
+                "ORA-01476: divisor is equal to zero\n\
+                 Help: https://docs.oracle.com/error-help/db/ora-01476/"
+            ),
+            "ORA-01476: divisor is equal to zero"
+        );
+        assert_eq!(
+            unhelped("ORA-06550: line 1, column 7:\nPLS-00201: identifier 'X' must be declared\n"),
+            "ORA-06550: line 1, column 7:\nPLS-00201: identifier 'X' must be declared",
+            "the lines that are the message stay"
+        );
+    }
+
+    #[test]
     fn a_word_that_only_starts_with_begin_is_not_a_block() {
         assert!(!is_plsql("beginning_balance"));
         assert!(!is_plsql("select * from beginnings"));
@@ -460,6 +625,15 @@ mod tests {
         assert_eq!(lob(&mut exact.as_slice()).unwrap(), (exact, false));
 
         let long = vec![b'x'; LOB_LIMIT + 1];
+        let (bytes, truncated) = lob(&mut long.as_slice()).unwrap();
+        assert_eq!(bytes.len(), LOB_LIMIT);
+        assert!(truncated);
+    }
+
+    #[test]
+    fn a_long_blob_keeps_its_first_mebibyte_whatever_the_bytes_are() {
+        // 0xff is never UTF-8: a character-boundary cut would eat all of it.
+        let long = vec![0xff; LOB_LIMIT * 2];
         let (bytes, truncated) = lob(&mut long.as_slice()).unwrap();
         assert_eq!(bytes.len(), LOB_LIMIT);
         assert!(truncated);

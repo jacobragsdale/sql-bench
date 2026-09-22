@@ -321,6 +321,7 @@ fn done(results: &mut Results, truncated: bool) {
     results.apply(QueryEvent::Done {
         rows: 3,
         truncated,
+        reset: false,
         connect_ms: 1,
         first_row_ms: 2,
         total_ms: 3,

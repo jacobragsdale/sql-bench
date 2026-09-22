@@ -120,6 +120,12 @@ One `[[connection]]` per database, in the order the tabs appear.
 Exactly one of `password`, `password_env` and `password_cmd` per connection. A
 password never reaches a trace file or the screen.
 
+Every statement commits on its own, on both servers: Oracle sessions are
+opened in autocommit, the way SQL Server's already are, so an `insert` is
+still there after a reconnect or a cancel. A SQL Server `begin tran` lasts
+while its session does, and a scan stopped at the row cap or by Esc ends the
+session. When the row cap does that, the footer says the session was reset.
+
 ## Mouse
 
 | Gesture | Does |

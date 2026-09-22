@@ -102,11 +102,13 @@ impl Backend {
 
         // tiberius sends no attention packet, so the only way to stop a server
         // that is halfway through a million rows is to drop the socket — that
-        // is what cancel does, and what a truncated scan wants too: draining
-        // the rest would cost more than reconnecting. A server-side complaint
-        // (a syntax error) leaves the connection perfectly good.
-        if sink.truncated() || !matches!(outcome, Ok(()) | Err(DbError::Query { .. })) {
+        // is what cancel does, and what a truncated scan or a reader that went
+        // away wants too: draining the rest would cost more than reconnecting,
+        // and keeping the socket leaves the next query to drain it instead. A
+        // server-side complaint (a syntax error) leaves the connection good.
+        if sink.stopped() || !matches!(outcome, Ok(()) | Err(DbError::Query { .. })) {
             self.client = None;
+            sink.reset();
         }
         outcome
     }
@@ -145,7 +147,15 @@ async fn open_driver(config: &tiberius::Config) -> Result<Driver, DbError> {
         .map_err(|why| DbError::Connect(why.to_string()))?;
     Client::connect(config.clone(), tcp.compat_write())
         .await
-        .map_err(|why| DbError::Connect(why.to_string()))
+        .map_err(|why| match why {
+            // "Token error: 'Login failed for user 'sa'.' on server 5f2c…
+            // executing  on line 1 (code: 18456, …)" is the driver talking;
+            // the server's own sentence and its number are what to act on.
+            TiberiusError::Server(token) => {
+                DbError::Connect(format!("{} (error {})", token.message(), token.code()))
+            }
+            why => DbError::Connect(why.to_string()),
+        })
 }
 
 /// Runs one batch: `simple_query` because a scratch pad sends whole batches,
@@ -253,10 +263,14 @@ fn cell(column_type: ColumnType, data: &ColumnData<'static>) -> Cell {
         ColumnData::I16(Some(value)) => Cell::Int(i64::from(*value)),
         ColumnData::I32(Some(value)) => Cell::Int(i64::from(*value)),
         ColumnData::I64(Some(value)) => Cell::Int(*value),
-        ColumnData::F32(Some(value)) => Cell::Float(f64::from(*value)),
+        ColumnData::F32(Some(value)) => Cell::Float(super::widen(*value)),
         ColumnData::F64(Some(value)) => match column_type {
             // money is a fixed four places, and rounding it into a float for
             // display is how money goes missing.
+            // ponytail: tiberius has already decoded it through an f64, so
+            // past about 9e11 the last cent is the float's guess. Its public
+            // API has no raw money; read the column as decimal(19,4) if that
+            // range ever matters.
             ColumnType::Money | ColumnType::Money4 => Cell::Decimal(format!("{value:.4}")),
             _ => Cell::Float(*value),
         },
@@ -371,11 +385,11 @@ const FATAL_CLASS: u8 = 20;
 
 fn failure(why: TiberiusError) -> DbError {
     match why {
-        // The session did not come through this one, so it is a `Connect` and
-        // not a complaint: `run` throws the client away for everything that is
+        // The session did not come through this one, so it is `Lost` and not
+        // a complaint: `run` throws the client away for everything that is
         // not a complaint, and a dead client would answer nothing for ever.
         TiberiusError::Server(token) if token.class() >= FATAL_CLASS => {
-            DbError::Connect(token.message().to_owned())
+            DbError::Lost(token.message().to_owned())
         }
         TiberiusError::Server(token) => DbError::Query {
             message: token.message().to_owned(),
@@ -385,7 +399,7 @@ fn failure(why: TiberiusError) -> DbError {
         // protocol going wrong — a database stopped under a running query
         // arrives here — and none of those leave anything to run on.
         why @ (TiberiusError::Io { .. } | TiberiusError::Protocol(_) | TiberiusError::Tls(_)) => {
-            DbError::Connect(why.to_string())
+            DbError::Lost(why.to_string())
         }
         other => DbError::Query {
             message: other.to_string(),
@@ -479,6 +493,18 @@ mod tests {
         assert_eq!(
             cell(ColumnType::Float8, &ColumnData::F64(Some(1234.5678))),
             Cell::Float(1234.5678)
+        );
+    }
+
+    #[test]
+    fn a_real_reads_as_the_number_it_was_written_as() {
+        assert_eq!(
+            cell(ColumnType::Float4, &ColumnData::F32(Some(0.1))),
+            Cell::Float(0.1)
+        );
+        assert_eq!(
+            cell(ColumnType::Float4, &ColumnData::F32(Some(12_345.678))),
+            Cell::Float(12_345.678)
         );
     }
 

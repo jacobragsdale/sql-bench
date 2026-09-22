@@ -561,10 +561,14 @@ impl Runtime {
     /// Where the failure was, and what the driver said — never the password,
     /// which this module never sees a resolved copy of.
     fn message(&self, tab: usize, error: &db::model::DbError) -> String {
-        self.config.connections.get(tab).map_or_else(
-            || error.to_string(),
-            |spec| format!("{}:{}: {error}", spec.host, spec.port),
-        )
+        match (self.config.connections.get(tab), error) {
+            // A setting that is wrong never reached the host, so naming it
+            // would only point the reader at the network.
+            (Some(spec), error) if !matches!(error, db::model::DbError::Config(_)) => {
+                format!("{}:{}: {error}", spec.host, spec.port)
+            }
+            _ => error.to_string(),
+        }
     }
 
     /// Remember what to run once this tab is connected, and say what the
@@ -671,6 +675,25 @@ mod tests {
         assert!(message.contains("127.0.0.1:1"), "{message}");
         assert!(!message.contains("s3cret"), "{message}");
         assert!(runtime.connection(0).is_none());
+    }
+
+    #[test]
+    fn a_setting_that_is_wrong_is_not_blamed_on_the_host() {
+        let mut config = refused("unused");
+        config.connections[0].password = Some(Password::Env("SQL_BENCH_POLISH_UNSET".to_owned()));
+        let mut app = App::new(&config);
+        let mut runtime = Runtime::new(&config);
+        runtime.connect(&mut app, 0);
+        settle(&mut runtime, &mut app);
+
+        let TabState::Failed(message) = &app.tabs[0].state else {
+            panic!("the variable is unset: {:?}", app.tabs[0].state);
+        };
+        assert_eq!(
+            message,
+            "connection \"refused\": reading $SQL_BENCH_POLISH_UNSET: \
+             environment variable not found"
+        );
     }
 
     /// T4.2: `C` on a tab whose `password_cmd` is sleeping has to be the end

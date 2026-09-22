@@ -877,6 +877,7 @@ impl Results {
         self.apply(QueryEvent::Done {
             rows: count,
             truncated: false,
+            reset: false,
             connect_ms: 0,
             first_row_ms: 0,
             total_ms: 0,
@@ -1160,6 +1161,7 @@ mod tests {
         Done {
             rows,
             truncated,
+            reset: false,
             connect_ms: 0,
             first_row_ms: 1,
             total_ms,

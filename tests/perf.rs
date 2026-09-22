@@ -121,6 +121,7 @@ fn app_with_rows(rows: usize) -> App {
     results.apply(QueryEvent::Done {
         rows,
         truncated: false,
+        reset: false,
         connect_ms: 0,
         first_row_ms: 0,
         total_ms: 0,

@@ -66,7 +66,7 @@ impl Connection {
         // terminal.
         let password = spec
             .password()
-            .map_err(|why| DbError::Connect(format!("{why:#}")))?;
+            .map_err(|why| DbError::Config(format!("{why:#}")))?;
         let spec = spec.clone();
         let config = config.clone();
         let (name, kind) = (spec.name.clone(), spec.kind);
@@ -203,6 +203,10 @@ fn work(
             } => {
                 let mut sink = Sink::new(reply, Arc::clone(cancel), options);
                 let timing = match backend.run(&sql, &mut sink) {
+                    // A backend that saw the flag between batches stops the
+                    // way it stops at the cap, and says nothing; the flag is
+                    // what makes it a cancel rather than a short result.
+                    Ok(()) if sink.cancelled() => sink.fail(DbError::Cancelled),
                     Ok(()) => sink.finish(),
                     Err(error) => sink.fail(error),
                 };
@@ -268,6 +272,9 @@ struct Sink {
     batch: Vec<Vec<Cell>>,
     rows: usize,
     truncated: bool,
+    /// The backend was told to stop before the server had finished talking.
+    stopped: bool,
+    reset: bool,
     started: Instant,
     connect_ms: u32,
     first_row_ms: Option<u32>,
@@ -289,6 +296,8 @@ impl Sink {
             batch: Vec::with_capacity(options.batch_size),
             rows: 0,
             truncated: false,
+            stopped: false,
+            reset: false,
             started: Instant::now(),
             connect_ms: 0,
             first_row_ms: None,
@@ -310,9 +319,16 @@ impl Sink {
         Arc::clone(&self.cancel)
     }
 
-    /// True once the cap stopped a query that had more rows to give.
-    fn truncated(&self) -> bool {
-        self.truncated
+    /// True once any [`Flow::Stop`] went back to the backend: the server
+    /// still had something to say, and the session is mid-answer.
+    fn stopped(&self) -> bool {
+        self.stopped
+    }
+
+    /// The backend threw its session away to stop; [`QueryEvent::Done`]
+    /// says so.
+    fn reset(&mut self) {
+        self.reset = true;
     }
 
     /// How long this query spent opening a connection: zero when one was
@@ -335,6 +351,7 @@ impl Sink {
         // whole, and says so.
         if self.options.max_rows.is_some_and(|max| self.rows >= max) {
             self.truncated = true;
+            self.stopped = true;
             self.flush();
             return Flow::Stop;
         }
@@ -362,9 +379,10 @@ impl Sink {
         self.send(QueryEvent::Rows(batch))
     }
 
-    fn send(&self, event: QueryEvent) -> Flow {
+    fn send(&mut self, event: QueryEvent) -> Flow {
         // A dropped receiver is the UI having moved on, not an error.
         if self.reply.send(event).is_err() || self.cancelled() {
+            self.stopped = true;
             Flow::Stop
         } else {
             Flow::Go
@@ -377,6 +395,7 @@ impl Sink {
         let _ = self.reply.send(QueryEvent::Done {
             rows: timing.rows,
             truncated: timing.truncated,
+            reset: self.reset,
             connect_ms: timing.connect_ms,
             first_row_ms: timing.first_row_ms,
             total_ms: timing.total_ms,
@@ -411,6 +430,12 @@ struct Timing {
     connect_ms: u32,
     first_row_ms: u32,
     total_ms: u32,
+}
+
+/// An `f32` as the `f64` that prints the same: `f64::from` keeps the binary
+/// value exactly, so `real` 0.1 would read 0.10000000149011612 in the grid.
+fn widen(value: f32) -> f64 {
+    value.to_string().parse().unwrap_or(f64::from(value))
 }
 
 fn millis(since: Instant) -> u32 {
@@ -699,6 +724,27 @@ mod tests {
         assert!(
             matches!(after.last(), Some(QueryEvent::Done { rows: 1, .. })),
             "{after:?}"
+        );
+    }
+
+    #[test]
+    fn a_cancel_the_backend_sees_between_batches_is_still_a_cancel() {
+        let (connection, _) = fake();
+        let events = connection.query(
+            "rows:1000000",
+            QueryOptions {
+                batch_size: 1,
+                max_rows: None,
+            },
+        );
+        assert!(matches!(events.recv(), Ok(QueryEvent::Columns(_))));
+        assert!(matches!(events.recv(), Ok(QueryEvent::Rows(_))));
+        connection.cancel();
+        let last = events.iter().last();
+        assert_eq!(
+            last,
+            Some(QueryEvent::Error(DbError::Cancelled)),
+            "not a Done with however many rows had arrived"
         );
     }
 

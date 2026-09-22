@@ -214,6 +214,10 @@ fn a_big_scan_stops_at_the_cap() {
     );
     let elapsed = started.elapsed();
     assert_eq!(done(&events), (10_000, true));
+    assert!(
+        matches!(events.last(), Some(QueryEvent::Done { reset: true, .. })),
+        "stopping threw the session away, and the event says so"
+    );
     assert_eq!(rows(&events).len(), 10_000);
     eprintln!("10_000 of 1_000_000 rows in {elapsed:?}");
     assert!(elapsed < Duration::from_secs(2), "{elapsed:?}");
@@ -307,6 +311,58 @@ fn a_refused_login_is_a_connect_error() {
         panic!("{failure:?}");
     };
     assert!(message.contains("Login failed"), "{message}");
+}
+
+#[test]
+fn a_cancel_in_the_middle_of_a_scan_is_a_cancel_and_leaves_nothing_to_drain() {
+    let connection = connection!();
+    let events = connection.query(
+        "select * from bench.events",
+        QueryOptions {
+            batch_size: 1,
+            max_rows: None,
+        },
+    );
+    assert!(matches!(events.recv(), Ok(QueryEvent::Columns(_))));
+    assert!(matches!(events.recv(), Ok(QueryEvent::Rows(_))));
+    connection.cancel();
+    assert_eq!(
+        events.iter().last(),
+        Some(QueryEvent::Error(DbError::Cancelled)),
+        "not a Done with the rows that happened to arrive"
+    );
+
+    // The half-read scan went with its socket, so the next query does not
+    // read the rest of a million rows before it starts.
+    let started = Instant::now();
+    assert_eq!(rows(&run(&connection, "select 1 as one")), [[Cell::Int(1)]]);
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn a_refused_login_says_what_the_server_said() {
+    let Some((config, mut spec)) = local() else {
+        return;
+    };
+    spec.password = Some(config::Password::Literal("not the password".to_owned()));
+    let failure = Connection::open(&spec, &config).expect_err("sa has a password");
+    assert_eq!(
+        failure.to_string(),
+        "cannot connect: Login failed for user 'sa'. (error 18456)"
+    );
+}
+
+#[test]
+fn a_real_reads_as_the_number_it_was_written_as() {
+    let connection = connection!();
+    assert_eq!(
+        rows(&run(&connection, "select cast(0.1 as real) as r")),
+        [[Cell::Float(0.1)]]
+    );
 }
 
 #[test]
