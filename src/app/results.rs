@@ -11,6 +11,7 @@
 //! loop pushed in every turn would be the same clock with more moving parts.
 
 use std::borrow::Cow;
+use std::cmp::Ordering;
 use std::ops::Range;
 use std::time::{Duration, Instant};
 
@@ -49,6 +50,8 @@ pub enum Hit {
     CopyRow,
     /// `e`: ask where to write the result set.
     Export,
+    /// `o`: sort by the selected column.
+    Sort,
 }
 
 /// The open cell inspector: an overlay showing one whole value.
@@ -122,6 +125,88 @@ pub struct Set {
     /// Character widths, capped at [`WIDTH_CAP`] and never below the header.
     pub widths: Vec<usize>,
     pub align: Vec<Align>,
+    /// The column the rows are sorted by, and whether downwards. [`None`]
+    /// is the order they arrived in.
+    pub sort: Option<(usize, bool)>,
+    /// Which arrival each row was: `rows[i]` came `order[i]`th. Empty while
+    /// they are in arrival order, which is the order `o` goes back to.
+    order: Vec<usize>,
+}
+
+impl Set {
+    /// The rows in the order `sort` says. Ties go by arrival, so the sort
+    /// is stable and sorting back to [`None`] is exactly the order they came.
+    fn arrange(&mut self) {
+        let count = self.rows.len();
+        if self.order.is_empty() {
+            self.order = (0..count).collect();
+        }
+        let mut by: Vec<usize> = (0..count).collect();
+        match self.sort {
+            None => by.sort_unstable_by_key(|&at| self.order[at]),
+            Some((column, descending)) => {
+                let keys: Vec<Key> = self.rows.iter().map(|row| key(row.get(column))).collect();
+                by.sort_unstable_by(|&a, &b| {
+                    compare(&keys[a], &keys[b], descending).then(self.order[a].cmp(&self.order[b]))
+                });
+            }
+        }
+        let order = by.iter().map(|&at| self.order[at]).collect();
+        self.order = if self.sort.is_some() {
+            order
+        } else {
+            Vec::new()
+        };
+        let mut rows: Vec<Option<Vec<Cell>>> = std::mem::take(&mut self.rows)
+            .into_iter()
+            .map(Some)
+            .collect();
+        self.rows = by.iter().filter_map(|&at| rows[at].take()).collect();
+    }
+}
+
+/// What a cell sorts by. Oracle's `NUMBER` and SQL Server's numeric and
+/// money arrive as [`Cell::Decimal`] text, and are numbers here.
+enum Key<'a> {
+    /// ponytail: an `i64` past 2^53 rounds, so two ids that far out can tie
+    /// and keep their arrival order. An exact integer variant if one shows.
+    Number(f64),
+    /// Text, dates and bytes, as bytes. A date is ISO-shaped text, so that
+    /// is its order too — though not across UTC offsets — and bytes order
+    /// the way their hex does.
+    Text(&'a [u8]),
+    Null,
+}
+
+fn key(cell: Option<&Cell>) -> Key<'_> {
+    match cell {
+        None | Some(Cell::Null) => Key::Null,
+        #[allow(clippy::cast_precision_loss)]
+        Some(Cell::Int(value)) => Key::Number(*value as f64),
+        Some(Cell::Float(value)) => Key::Number(*value),
+        Some(Cell::Decimal(text)) => text.parse().map_or(Key::Text(text.as_bytes()), Key::Number),
+        Some(Cell::Bool(value)) => Key::Text(if *value { b"true" } else { b"false" }),
+        Some(Cell::Text(text) | Cell::DateTime(text)) => Key::Text(text.as_bytes()),
+        Some(Cell::Bytes(bytes)) => Key::Text(bytes),
+    }
+}
+
+/// NULL last whichever way, numbers before text in a column that has both.
+fn compare(a: &Key, b: &Key, descending: bool) -> Ordering {
+    let ordering = match (a, b) {
+        (Key::Null, Key::Null) => return Ordering::Equal,
+        (Key::Null, _) => return Ordering::Greater,
+        (_, Key::Null) => return Ordering::Less,
+        (Key::Number(a), Key::Number(b)) => a.total_cmp(b),
+        (Key::Text(a), Key::Text(b)) => a.cmp(b),
+        (Key::Number(_), Key::Text(_)) => Ordering::Less,
+        (Key::Text(_), Key::Number(_)) => Ordering::Greater,
+    };
+    if descending {
+        ordering.reverse()
+    } else {
+        ordering
+    }
 }
 
 /// One tab's results pane.
@@ -207,9 +292,9 @@ impl Results {
                 let align = vec![Align::default(); columns.len()];
                 self.sets.push(Set {
                     columns,
-                    rows: Vec::new(),
                     widths,
                     align,
+                    ..Set::default()
                 });
                 // The newest set is the one on screen: a statement's last
                 // result is what a person asked the statement for.
@@ -304,6 +389,7 @@ impl Results {
             KeyCode::Char('y') => Hit::CopyCell,
             KeyCode::Char('Y') => Hit::CopyRow,
             KeyCode::Char('e') => Hit::Export,
+            KeyCode::Char('o') => Hit::Sort,
             _ => Hit::Ignored,
         }
     }
@@ -353,7 +439,8 @@ impl Results {
     }
 
     /// A click on a column's header, drawn with `left` at the left edge:
-    /// the column is selected and the rows stay where they are.
+    /// the column is selected and the view stays where it is. The click
+    /// then presses `o`.
     pub fn click_header(&mut self, column: usize, left: usize) {
         if column < self.columns().len() {
             self.selected.1 = column;
@@ -407,6 +494,26 @@ impl Results {
                 .saturating_add_signed(by)
                 .min(source.lines.len().saturating_sub(height));
         }
+    }
+
+    /// `o`: the selected column ascending, then descending, then the order
+    /// the rows came in. The cursor keeps its row number, not its row. How
+    /// many rows were put in order.
+    pub fn sort(&mut self) -> usize {
+        let column = self.selected.1;
+        let Some(set) = self.sets.get_mut(self.shown) else {
+            return 0;
+        };
+        if column >= set.columns.len() {
+            return 0;
+        }
+        set.sort = match set.sort {
+            Some((by, false)) if by == column => Some((column, true)),
+            Some((by, true)) if by == column => None,
+            _ => Some((column, false)),
+        };
+        set.arrange();
+        set.rows.len()
     }
 
     /// `[` and `]`, wrapping round the way Ctrl-T wraps round the tabs.

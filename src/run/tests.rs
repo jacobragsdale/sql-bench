@@ -155,6 +155,34 @@ fn a_key_is_a_frame_and_a_traced_run_says_how_long_it_took_to_draw() {
 }
 
 #[test]
+fn a_traced_sort_says_how_many_rows_and_how_long() {
+    let directory = tempfile::tempdir().expect("a directory");
+    let path = directory.path().join("trace.tsv");
+    let mut app = two_tabs();
+    app.tabs[0].results = crate::app::tests::filled(30, 2);
+    app.shell.focus = crate::app::Focus::Results;
+    run_loop(
+        &mut terminal(),
+        &mut app,
+        &mut Keys::new(&["o", "j"]),
+        &Trace::new(Some(path.clone())),
+        &mut driver(),
+        None,
+    )
+    .expect("the loop");
+    let written = std::fs::read_to_string(&path).expect("a trace file");
+    let sorts: Vec<Vec<&str>> = written
+        .lines()
+        .map(|line| line.split('\t').skip(1).collect::<Vec<_>>())
+        .filter(|fields| fields[0] == "sort")
+        .collect();
+    assert_eq!(sorts.len(), 1, "one sort, and j is not one:\n{written}");
+    assert_eq!(sorts[0][1], "rows=30");
+    let ms = sorts[0][2].strip_prefix("ms=").expect("an ms field");
+    ms.parse::<f64>().expect("milliseconds");
+}
+
+#[test]
 fn osc_52_carries_the_selection_as_base64() {
     // The three lengths that matter: a multiple of three, and each of the
     // two paddings.

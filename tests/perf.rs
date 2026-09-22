@@ -33,6 +33,10 @@ const KEY_TO_FRAME: Duration = Duration::from_millis(16);
 /// How much dearer a draw of ten times the rows may be. The budget is that
 /// it costs nothing, which is a ratio and not a duration.
 const ROWS_ALLOWANCE: f64 = 0.20;
+/// `o` over 100,000 rows. Not a `docs/DESIGN.md` budget: a sort is one key
+/// a person asks for once, so it is held to feeling instant rather than to
+/// a frame.
+const SORT: Duration = Duration::from_millis(100);
 /// What every budget above is multiplied by before it is asserted.
 const MARGIN: u32 = 2;
 
@@ -240,4 +244,36 @@ fn a_key_reaches_the_frame_inside_the_budget_with_a_full_grid() {
         p95 < KEY_TO_FRAME * MARGIN,
         "key to frame p95 was {p95:?}, and the budget is {KEY_TO_FRAME:?}"
     );
+}
+
+#[test]
+#[ignore = "a timing: cargo test --release -- --ignored"]
+fn a_sort_of_a_hundred_thousand_rows_is_inside_the_budget() {
+    let app = app_with_rows(100_000);
+    // `amount`, which is decimals: the dearest key, each one parsed. And
+    // `note`, which is text, for the other half of the comparisons.
+    for (column, name) in [(3, "amount"), (5, "note")] {
+        let mut samples = Vec::new();
+        for _ in 0..5 {
+            let mut sorting = app.clone();
+            for _ in 0..column {
+                sorting.handle(Event::Key(KeyEvent::new(
+                    KeyCode::Char('l'),
+                    KeyModifiers::NONE,
+                )));
+            }
+            let at = Instant::now();
+            sorting.handle(Event::Key(KeyEvent::new(
+                KeyCode::Char('o'),
+                KeyModifiers::NONE,
+            )));
+            samples.push(at.elapsed());
+        }
+        let took = median(samples);
+        eprintln!("sort of 100,000 rows by {name}: {took:?}");
+        assert!(
+            took < SORT * MARGIN,
+            "a sort of 100,000 rows by {name} took {took:?}, and the budget is {SORT:?}"
+        );
+    }
 }

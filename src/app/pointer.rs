@@ -44,6 +44,7 @@ pub enum Target {
         left: usize,
     },
     /// A column's header, drawn with column `left` at the pane's left edge.
+    /// A click selects the column and presses `o`.
     Header { column: usize, left: usize },
     /// An object's source, drawn from line `top`.
     Source { top: usize },
@@ -259,6 +260,7 @@ impl App {
                 if let Some(tab) = self.tabs.get_mut(self.shell.active_tab) {
                     tab.results.click_header(column, left);
                 }
+                return self.results_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
             }
             Target::Source { .. } => self.shell.focus = Focus::Results,
             Target::Tab(index) if index < self.tabs.len() => self.shell.active_tab = index,

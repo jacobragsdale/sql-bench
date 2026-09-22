@@ -342,9 +342,11 @@ how the app still sees no terminal and reads no clock.
   `▾` is Space, and a double-click is Enter: a table's select goes into the
   pad, a procedure's source into the results pane. In the grid a click
   selects the cell, a double-click is Enter (the inspector), and a click on
-  a header selects its column. Those are the keys themselves, pressed after
-  the click has moved the cursor, so a load or a select is decided in one
-  place.
+  a header selects its column and presses `o`, which sorts by it: ascending,
+  descending, then the order the rows came in, with the header's last
+  character turned into `▲` or `▼` so a narrow column still shows it. Those
+  are the keys themselves, pressed after the click has moved the cursor, so
+  a load, a select or a sort is decided in one place.
 - A click never moves the view. `Tree`, `Cells`, `Header` and `Source`
   carry the window they were drawn from (`top`, and the grid's `left`), and
   `Objects::click` and `Results::click` set the scroll hint from that and
@@ -618,6 +620,7 @@ shell's idea of when the process began.
 | results | rows, batches, first_batch_ms | the app has taken the last event of a run |
 | frame | draw_ms | every redraw |
 | turn | total_ms, draw_ms, input_ms | a turn that drew and handled input slower than the budget |
+| sort | rows, ms | `o` or a header click sorted the grid; `ms` is the whole event, which is the sort |
 
 ## Budgets
 

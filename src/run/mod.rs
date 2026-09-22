@@ -446,7 +446,7 @@ impl Driver {
                 self.held = Some(this);
                 break;
             }
-            self.dirty |= self.handle(terminal, app, this)?;
+            self.dirty |= self.handle(terminal, app, this, trace)?;
             if app.shell.should_quit || handling.elapsed() >= DRAIN_LIMIT {
                 break;
             }
@@ -482,10 +482,14 @@ impl Driver {
         terminal: &mut Terminal<B>,
         app: &mut App,
         event: Event,
+        trace: &Trace,
     ) -> Result<bool>
     where
         B::Error: std::error::Error + Send + Sync + 'static,
     {
+        // The app sorts inside the call and reads no clock, so the call is
+        // what a `sort` line times: the sort is all of it worth timing.
+        let at = trace.is_on().then(Instant::now);
         let (actions, changed) = match event {
             Event::Mouse(mouse) => {
                 let before = app.shell.mouse.pointer;
@@ -503,6 +507,12 @@ impl Driver {
             other => (app.handle(other), true),
         };
         for action in actions {
+            if let (Action::Sorted { rows }, Some(at)) = (&action, at) {
+                trace.event(
+                    "sort",
+                    &[("rows", &rows.to_string()), ("ms", &millis(at.elapsed()))],
+                );
+            }
             self.act(terminal, app, action)?;
         }
         Ok(changed)
@@ -541,6 +551,7 @@ impl Driver {
             Action::Copy(text) => self.copy(&text),
             Action::Export { tab, path } => self.export(app, tab, &path),
             Action::LoadObjects { tab, request } => self.runtime.load(app, tab, request),
+            Action::Sorted { .. } => {}
         }
         Ok(())
     }
