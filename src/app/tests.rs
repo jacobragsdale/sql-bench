@@ -113,49 +113,15 @@ pub(crate) fn two_tabs() -> App {
 
 /// A key the way [`KEYS`] spells it, as crossterm sends it.
 pub(crate) fn key(spec: &str) -> KeyEvent {
-    // The one spelling that is a range rather than a chord; any of its nine
-    // digits would do, and this one is a tab both fixtures have.
-    if spec == "1-9" {
-        return KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE);
-    }
-    let mut parts: Vec<&str> = spec.rsplitn(2, '-').collect();
-    parts.reverse();
-    let last = parts.pop().expect("a key to press");
-    let mut modifiers = KeyModifiers::NONE;
-    for part in parts {
-        modifiers |= match part {
-            "Ctrl" => KeyModifiers::CONTROL,
-            "Shift" => KeyModifiers::SHIFT,
-            other => panic!("{spec}: unknown modifier {other:?}"),
-        };
-    }
-    let code = match last {
-        "Tab" if modifiers.contains(KeyModifiers::SHIFT) => KeyCode::BackTab,
-        "Tab" => KeyCode::Tab,
-        "Esc" => KeyCode::Esc,
-        "Enter" => KeyCode::Enter,
-        "Backspace" => KeyCode::Backspace,
-        "Delete" => KeyCode::Delete,
-        "Home" => KeyCode::Home,
-        "Space" => KeyCode::Char(' '),
-        "End" => KeyCode::End,
-        "Up" => KeyCode::Up,
-        "Down" => KeyCode::Down,
-        "Left" => KeyCode::Left,
-        "Right" => KeyCode::Right,
-        "PageUp" => KeyCode::PageUp,
-        "PageDown" => KeyCode::PageDown,
-        // The one row that names four keys; the left one stands for them.
-        "Arrows" => KeyCode::Left,
-        "F5" => KeyCode::F(5),
-        other => {
-            let mut characters = other.chars();
-            let character = characters.next().expect("a key to press");
-            assert!(characters.next().is_none(), "{spec}: not one key");
-            KeyCode::Char(character)
-        }
+    // The two spellings that are a range rather than a chord: any of the nine
+    // digits would do and `1` is a tab both fixtures have, and the left arrow
+    // stands for all four.
+    let spec = if spec == "1-9" {
+        "1".to_owned()
+    } else {
+        spec.replace("Arrows", "Left")
     };
-    KeyEvent::new(code, modifiers)
+    key_named(&spec).unwrap_or_else(|| panic!("{spec}: not a key"))
 }
 
 fn press(app: &mut App, spec: &str) -> Vec<Action> {

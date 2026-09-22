@@ -25,6 +25,9 @@ pub struct Theme {
     pub selection: Style,
     /// The lines of the statement a driver said no to, until the next edit.
     pub flagged: Style,
+    /// What the pointer is resting on, where a click there would do
+    /// something.
+    pub hover: Style,
 }
 
 impl Theme {
@@ -48,6 +51,7 @@ impl Theme {
             cursor: Style::new().add_modifier(Modifier::REVERSED),
             selection: Style::new().bg(Color::Cyan).fg(Color::Black),
             flagged: Style::new().bg(Color::Red).fg(Color::Black),
+            hover: Style::new().bg(Color::DarkGray).fg(Color::White),
         }
     }
 }

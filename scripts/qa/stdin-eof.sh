@@ -17,7 +17,11 @@ STATE=$(mktemp -d)
 trap 'rm -rf "$OUT" "$STATE"' EXIT
 
 leave=$(printf '\033[?1049l')
+mouse_off=$(printf '\033[?1000l')
 show=$(printf '\033[?25h')
+
+# The byte offset of the last time the capture has `$1` in it, or nothing.
+last() { grep -aobF "$1" "$OUT" | tail -n 1 | cut -d: -f1; }
 
 fail() {
     echo "stdin-eof: $1" >&2
@@ -37,5 +41,8 @@ elapsed=$(($(date +%s%3N) - started))
 grep -qa "Objects" "$OUT" || fail "the shell was never drawn, so nothing was taken to give back"
 tail -c 32 "$OUT" | grep -qaF "$leave$show" ||
     fail "the run did not end with the alternate screen left and the cursor shown"
+off=$(last "$mouse_off")
+[ -n "$off" ] && [ "$off" -lt "$(last "$leave")" ] ||
+    fail "the mouse was not given back (\\e[?1000l) before the alternate screen was left"
 
-echo "exit 0 after ${elapsed} ms, then \\e[?1049l\\e[?25h: the terminal was given back"
+echo "exit 0 after ${elapsed} ms, then \\e[?1000l before \\e[?1049l\\e[?25h: the terminal was given back"

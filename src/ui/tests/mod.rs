@@ -2,6 +2,7 @@
 //! text of a line, which is what rule 3 asks for: no screenshots.
 
 mod layout;
+mod mouse;
 mod objects;
 mod overlays;
 mod results;
@@ -24,7 +25,9 @@ fn frame(width: u16, height: u16, app: &App) -> Terminal<TestBackend> {
 fn frame_with(width: u16, height: u16, app: &App, theme: &Theme) -> Terminal<TestBackend> {
     let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("a test terminal");
     terminal
-        .draw(|frame| render(frame, app, theme))
+        .draw(|frame| {
+            render(frame, app, theme);
+        })
         .expect("a frame");
     terminal
 }

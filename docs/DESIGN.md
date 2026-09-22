@@ -48,8 +48,8 @@ src/cli.rs         clap definitions and the headless subcommands
 src/config.rs      config.toml: connections, the Oracle client directory
 src/db/            model.rs (Cell, Column, QueryEvent), mod.rs (the handle and
                    its worker), mssql.rs, oracle.rs, catalog.rs (object SQL)
-src/app/           pure state: mod.rs (tabs, focus, keys), scratch.rs,
-                   results.rs, objects.rs, prompt.rs
+src/app/           pure state: mod.rs (tabs, focus, keys), pointer.rs (the
+                   mouse), scratch.rs, results.rs, objects.rs, prompt.rs
 src/ui/            rendering and theme; tests in src/ui/tests/
 src/run/           mod.rs (the loop and the terminal), runtime.rs (threads and
                    channels), replay.rs, state.rs (the pads), editor.rs
@@ -313,6 +313,39 @@ does not see while it is open, and the title says which rows are showing
 (`Help · Scratch (1-11 of 20)`). `?` and Esc close it and put it back to the
 top.
 
+## Mouse
+
+Every frame says what can be clicked: `ui::render` returns a `Hits`, the
+regions it drew in paint order with a `Target` each (`src/app/pointer.rs`),
+and `Hits::at` is the last region pushed that holds the pointer. There are no
+layers. An overlay pushes a whole-frame `Outside` and then its own body, so
+nothing under it can be reached. The run loop keeps the hits of its last draw
+and hands them to `App::pointer` with each mouse event and the time, which is
+how the app still sees no terminal and reads no clock.
+
+- A click fires when the button comes up, on the target that was pressed, and
+  only if the pointer never left that target and row on the way. Sliding off
+  takes a press back.
+- A double-click is a second click on the same target and row within 400 ms.
+  It uses both clicks up, so a third is a single again.
+- A right-click does what a left click does.
+- The wheel scrolls what is under the pointer, by 3, and never moves the
+  focus. Today that is the help and the inspector.
+- A drag does nothing yet.
+- Clicking a tab shows it. Clicking anywhere in a pane focuses it. A click
+  beside the help, the inspector or the export prompt closes the one on top,
+  the way Esc does, and reaches nothing under it.
+- What the pointer rests on is painted in the theme's hover style, restyled
+  over the finished frame from the same hits a click reads. Only things that
+  are there to be clicked light up: a tab, not a pane.
+
+A press paints nothing, and the pointer moving costs a frame only when the
+target or row under it changes, so resting the mouse on the app costs one
+frame and not one per event. The loop handles a burst of events together, but
+a mouse event behind one that changed the screen is held for the next turn,
+after the new frame is drawn, so it lands on what the person was looking at.
+Mouse capture goes on with the alternate screen and off before it is left.
+
 ## The scratch pad
 
 One pad per connection, kept in `<state dir>/scratch/<connection>.sql`. The
@@ -377,6 +410,19 @@ the rest of the line exactly as written.
 | `frame <name>` | write `<frames-dir>/<name>.txt` now |
 | `expect <substring>` | the substring is on the frame, or exit 4 |
 | `expect-not <substring>` | the substring is not on the frame, or exit 4 |
+| `click <where>` | left button down and up there |
+| `double-click <where>` | two clicks there, inside the double-click time |
+| `right-click <where>` | right button down and up there |
+| `hover <where>` | the pointer moves there, no button down |
+| `scroll up\|down\|left\|right <where>` | one notch of the wheel there |
+| `drag X Y X Y` | left button down at the first cell, moved to the second, up there |
+
+`<where>` is `X Y`, a column and a row counted from 0 the way a frame file
+counts them, or `on <substring>`: the first cell of the first place the text
+is on the frame, found cell by cell so that the blank after a wide glyph is
+not part of what has to be typed. Text that is not on the frame is exit 4,
+like a failed `expect`. Two clicks on one spot less than 400 ms apart are a
+double-click here too; put `wait 500` between them to keep them apart.
 
 ### Key names
 
@@ -461,8 +507,9 @@ are a clock and not a layout.
 Four ways out of a run, and all four give the terminal back. A quit (`q`,
 `Ctrl-Q`), an input that ran out, and an error returning `Err` up to `main`
 all drop the `Restore` guard in `src/run/mod.rs`. A panic runs the hook
-`ratatui::try_init` installed. Guard and hook do the same two things — raw
-mode off, then the alternate screen left — and the terminal's own `Drop` shows
+`ratatui::try_init` installed and then unwinds through the same guard. Guard
+and hook do the same two things — raw mode off, then the alternate screen
+left — the guard turning mouse capture off (`\e[?1000l`) first, and the terminal's own `Drop` shows
 the cursor after them. The hook restores *before* it prints, so a panic
 message lands on the normal screen and not on the one about to be thrown away.
 
@@ -472,7 +519,7 @@ A replay never takes the terminal at all, so QA checks this on a real pty:
 `cfg(debug_assertions)`, and that panics where the loop waits for a key, so no
 key has to arrive for it to fire — and asserts that the capture has the shell
 drawn on it, that the run exits 101, and that `\e[?1049l\e[?25h` comes after
-the panic message and is the last thing written.
+the panic message and is the last thing written, with `\e[?1000l` before it.
 
 Input that ran out is the fourth way: keys are read on a thread
 of their own into an `mpsc` channel, so the loop waits on the channel and
@@ -484,7 +531,7 @@ all: crossterm would quietly read `/dev/tty` instead, which is how `sql-bench
 </dev/null` used to hold raw mode and the alternate screen with no key left
 that could quit it. `scripts/qa/stdin-eof.sh` runs that under `script` and
 asserts the shell was drawn, the run exits 0 inside two seconds, and
-`\e[?1049l\e[?25h` is the last thing written.
+`\e[?1049l\e[?25h` is the last thing written, with `\e[?1000l` before it.
 
 ## Trace format
 

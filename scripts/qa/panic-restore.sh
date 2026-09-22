@@ -14,7 +14,11 @@ OUT=$(mktemp)
 trap 'rm -f "$OUT"' EXIT
 
 leave=$(printf '\033[?1049l')
+mouse_off=$(printf '\033[?1000l')
 show=$(printf '\033[?25h')
+
+# The byte offset of the last time the capture has `$1` in it, or nothing.
+last() { grep -aobF "$1" "$OUT" | tail -n 1 | cut -d: -f1; }
 
 fail() {
     echo "panic-restore: $1" >&2
@@ -38,5 +42,8 @@ sed -n '/panicked at/,$p' "$OUT" | grep -qaF "$leave$show" ||
     fail "the alternate screen and the cursor were not given back after the panic"
 tail -c 32 "$OUT" | grep -qaF "$leave$show" ||
     fail "the run did not end with the alternate screen left and the cursor shown"
+off=$(last "$mouse_off")
+[ -n "$off" ] && [ "$off" -lt "$(last "$leave")" ] ||
+    fail "the mouse was not given back (\\e[?1000l) before the alternate screen was left"
 
-echo "panic exit 101, then \\e[?1049l\\e[?25h: raw mode off, alternate screen left, cursor shown"
+echo "panic exit 101, then \\e[?1000l before \\e[?1049l\\e[?25h: raw mode off, alternate screen left, cursor shown"

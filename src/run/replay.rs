@@ -23,12 +23,14 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 
-use crate::app::App;
+use crate::app::{App, key_named};
 use crate::cli::{Cli, Size};
 use crate::config::Config;
 use crate::run::state::Store;
@@ -168,6 +170,57 @@ enum Command {
         text: String,
         present: bool,
     },
+    Mouse(Gesture, Where),
+    /// Press at the first, move to the second, release there.
+    Drag([u16; 2], [u16; 2]),
+}
+
+/// What a mouse command does where it points.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Gesture {
+    Click,
+    DoubleClick,
+    RightClick,
+    Hover,
+    /// One notch of the wheel: `ScrollUp`, `ScrollDown`, `ScrollLeft` or
+    /// `ScrollRight`.
+    Scroll(MouseEventKind),
+}
+
+impl Gesture {
+    /// What a terminal sends for it at `(x, y)`.
+    fn events(self, x: u16, y: u16) -> Vec<Event> {
+        let at = |kind| {
+            Event::Mouse(MouseEvent {
+                kind,
+                column: x,
+                row: y,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        let click = |button| {
+            [
+                at(MouseEventKind::Down(button)),
+                at(MouseEventKind::Up(button)),
+            ]
+        };
+        match self {
+            Self::Click => click(MouseButton::Left).to_vec(),
+            Self::DoubleClick => [click(MouseButton::Left), click(MouseButton::Left)].concat(),
+            Self::RightClick => click(MouseButton::Right).to_vec(),
+            Self::Hover => vec![at(MouseEventKind::Moved)],
+            Self::Scroll(kind) => vec![at(kind)],
+        }
+    }
+}
+
+/// Where a mouse command points: a cell, or the text drawn there.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum Where {
+    /// Column and row, from 0, the way a frame file counts them.
+    At(u16, u16),
+    /// The first cell of the first place the text is on the frame.
+    On(String),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -212,7 +265,10 @@ fn parse_line(line: &str) -> Result<Option<Command>> {
         Ok(argument)
     };
     Ok(Some(match verb {
-        "key" => Command::Key(parse_key(needed("a key name")?)?),
+        "key" => {
+            let name = needed("a key name")?;
+            Command::Key(key_named(name).ok_or_else(|| anyhow!("unknown key {name:?}"))?)
+        }
         "type" => {
             needed("something to type")?;
             Command::Type(rest.to_owned())
@@ -238,8 +294,46 @@ fn parse_line(line: &str) -> Result<Option<Command>> {
             text: needed("a substring")?.to_owned(),
             present: false,
         },
+        "click" => Command::Mouse(Gesture::Click, parse_where(verb, argument)?),
+        "double-click" => Command::Mouse(Gesture::DoubleClick, parse_where(verb, argument)?),
+        "right-click" => Command::Mouse(Gesture::RightClick, parse_where(verb, argument)?),
+        "hover" => Command::Mouse(Gesture::Hover, parse_where(verb, argument)?),
+        "scroll" => {
+            let (way, place) = argument.split_once(' ').unwrap_or((argument, ""));
+            let kind = match way {
+                "up" => MouseEventKind::ScrollUp,
+                "down" => MouseEventKind::ScrollDown,
+                "left" => MouseEventKind::ScrollLeft,
+                "right" => MouseEventKind::ScrollRight,
+                _ => bail!("scroll {argument:?}: expected up, down, left or right, then a place"),
+            };
+            Command::Mouse(Gesture::Scroll(kind), parse_where(verb, place.trim())?)
+        }
+        "drag" => match cells(argument).as_deref() {
+            Some(&[x, y, to_x, to_y]) => Command::Drag([x, y], [to_x, to_y]),
+            _ => bail!("drag {argument:?}: expected X Y X Y, from and to"),
+        },
         other => bail!("unknown command {other:?}"),
     }))
+}
+
+/// `X Y`, or `on <substring>`.
+fn parse_where(verb: &str, argument: &str) -> Result<Where> {
+    if let Some(text) = argument.strip_prefix("on ") {
+        return Ok(Where::On(text.trim().to_owned()));
+    }
+    match cells(argument).as_deref() {
+        Some(&[x, y]) => Ok(Where::At(x, y)),
+        _ => bail!("{verb} {argument:?}: expected X Y or on <substring>"),
+    }
+}
+
+/// Whitespace-separated cell numbers, or `None` if any of them is not one.
+fn cells(argument: &str) -> Option<Vec<u16>> {
+    argument
+        .split_whitespace()
+        .map(|number| number.parse().ok())
+        .collect()
 }
 
 fn parse_wait(argument: &str) -> Result<Wait> {
@@ -265,61 +359,6 @@ fn frame_name(name: &str) -> Result<String> {
         bail!("{name:?} is not a frame name");
     }
     Ok(name.to_owned())
-}
-
-/// A key the way the help overlay and `docs/DESIGN.md` spell one.
-fn parse_key(name: &str) -> Result<KeyEvent> {
-    let (modifiers, base) = match name.split_once('-') {
-        Some(("Ctrl", rest)) => (KeyModifiers::CONTROL, rest),
-        Some(("Alt", rest)) => (KeyModifiers::ALT, rest),
-        Some(("Shift", rest)) => (KeyModifiers::SHIFT, rest),
-        _ => (KeyModifiers::NONE, name),
-    };
-    let code = match base {
-        "Enter" => KeyCode::Enter,
-        "Esc" => KeyCode::Esc,
-        // Shift-Tab is what a keyboard calls it and BackTab is what crossterm
-        // sends; both spellings are the one key.
-        "Tab" if modifiers == KeyModifiers::SHIFT => KeyCode::BackTab,
-        "Tab" => KeyCode::Tab,
-        "BackTab" => KeyCode::BackTab,
-        "Up" => KeyCode::Up,
-        "Down" => KeyCode::Down,
-        "Left" => KeyCode::Left,
-        "Right" => KeyCode::Right,
-        "PageUp" => KeyCode::PageUp,
-        "PageDown" => KeyCode::PageDown,
-        "Home" => KeyCode::Home,
-        "End" => KeyCode::End,
-        "Backspace" => KeyCode::Backspace,
-        "Delete" => KeyCode::Delete,
-        "Insert" => KeyCode::Insert,
-        "Space" => KeyCode::Char(' '),
-        other => function_key(other)
-            .or_else(|| character_key(other))
-            .ok_or_else(|| anyhow!("unknown key {name:?}"))?,
-    };
-    // BackTab is already the shifted key, and saying so twice is how a key the
-    // app matches on stops matching.
-    let modifiers = if code == KeyCode::BackTab {
-        modifiers.difference(KeyModifiers::SHIFT)
-    } else {
-        modifiers
-    };
-    Ok(KeyEvent::new(code, modifiers))
-}
-
-fn function_key(name: &str) -> Option<KeyCode> {
-    let number: u8 = name.strip_prefix('F')?.parse().ok()?;
-    (1..=12).contains(&number).then_some(KeyCode::F(number))
-}
-
-fn character_key(name: &str) -> Option<KeyCode> {
-    let mut characters = name.chars();
-    match (characters.next(), characters.next()) {
-        (Some(character), None) => Some(KeyCode::Char(character)),
-        _ => None,
-    }
 }
 
 /// The events the command being run queued, and nothing else.
@@ -397,6 +436,36 @@ impl Replay {
                 }
             }
             Command::Wait(wait) => return self.wait(wait, line),
+            Command::Mouse(gesture, place) => {
+                let (x, y) = match place {
+                    Where::At(x, y) => (*x, *y),
+                    Where::On(text) => match find(self.screen(), text) {
+                        Some(cell) => cell,
+                        None => {
+                            eprintln!("sql-bench: line {line}: {text:?} is not on this frame:");
+                            eprintln!("{}", self.screen_text());
+                            return Ok(Some(FAILED));
+                        }
+                    },
+                };
+                self.send(gesture.events(x, y))?;
+            }
+            Command::Drag([x, y], [to_x, to_y]) => {
+                let at = |kind, column, row| {
+                    Event::Mouse(MouseEvent {
+                        kind,
+                        column,
+                        row,
+                        modifiers: KeyModifiers::NONE,
+                    })
+                };
+                let left = MouseButton::Left;
+                self.send([
+                    at(MouseEventKind::Down(left), *x, *y),
+                    at(MouseEventKind::Drag(left), *to_x, *to_y),
+                    at(MouseEventKind::Up(left), *to_x, *to_y),
+                ])?;
+            }
         }
         Ok(None)
     }
@@ -404,7 +473,8 @@ impl Replay {
     /// Hand the loop some events and let it paint what they changed.
     fn send(&mut self, events: impl IntoIterator<Item = Event>) -> Result<()> {
         self.input.pending.extend(events);
-        while !self.input.pending.is_empty() && self.turn()? {}
+        // A click the loop held back for the next frame is still to come.
+        while (!self.input.pending.is_empty() || self.driver.held.is_some()) && self.turn()? {}
         // One more, because a turn draws what the turn before it changed.
         self.turn()?;
         Ok(())
@@ -509,6 +579,34 @@ fn screen_text(buffer: &Buffer) -> String {
         .join("\n")
 }
 
+/// The cell `text` starts at, the first time it is on the frame.
+///
+/// The search goes cell by cell rather than through the frame's text, because
+/// a glyph two cells wide is followed by a blank cell a person reading the
+/// screen never sees — and would not type.
+fn find(buffer: &Buffer, text: &str) -> Option<(u16, u16)> {
+    use unicode_width::UnicodeWidthStr as _;
+    let area = buffer.area;
+    (0..area.height).find_map(|y| {
+        let mut row = String::new();
+        // Where in `row` each drawn cell's text starts.
+        let mut starts = Vec::new();
+        let mut x = 0;
+        while x < area.width {
+            let symbol = buffer[(x, y)].symbol();
+            starts.push((row.len(), x));
+            row.push_str(symbol);
+            x = x.saturating_add(u16::try_from(symbol.width()).unwrap_or(1).max(1));
+        }
+        let at = row.find(text)?;
+        starts
+            .iter()
+            .rev()
+            .find(|(start, _)| *start <= at)
+            .map(|(_, x)| (*x, y))
+    })
+}
+
 /// The colours of a frame, as the runs of cells that share one style:
 /// `<row> <from>..<to> fg=<colour> bg=<colour> mod=<modifiers>`.
 fn styles_text(name: &str, buffer: &Buffer) -> String {
@@ -545,7 +643,7 @@ mod tests {
     }
 
     fn key(name: &str) -> KeyEvent {
-        parse_key(name).unwrap_or_else(|error| panic!("{name:?}: {error:#}"))
+        key_named(name).unwrap_or_else(|| panic!("{name:?} is not a key"))
     }
 
     /// The options a test runs with: colour pinned on, so the styles file is
@@ -608,6 +706,88 @@ mod tests {
                 present: false,
             }
         );
+        assert_eq!(
+            parsed("click 3 0"),
+            Command::Mouse(Gesture::Click, Where::At(3, 0))
+        );
+        assert_eq!(
+            parsed("click on  2 local-oracle "),
+            Command::Mouse(Gesture::Click, Where::On("2 local-oracle".to_owned()))
+        );
+        assert_eq!(
+            parsed("double-click on Tables"),
+            Command::Mouse(Gesture::DoubleClick, Where::On("Tables".to_owned()))
+        );
+        assert_eq!(
+            parsed("right-click 10 5"),
+            Command::Mouse(Gesture::RightClick, Where::At(10, 5))
+        );
+        assert_eq!(
+            parsed("hover  0  0"),
+            Command::Mouse(Gesture::Hover, Where::At(0, 0))
+        );
+        for (way, kind) in [
+            ("up", MouseEventKind::ScrollUp),
+            ("down", MouseEventKind::ScrollDown),
+            ("left", MouseEventKind::ScrollLeft),
+            ("right", MouseEventKind::ScrollRight),
+        ] {
+            assert_eq!(
+                parsed(&format!("scroll {way} 40 20")),
+                Command::Mouse(Gesture::Scroll(kind), Where::At(40, 20))
+            );
+        }
+        assert_eq!(
+            parsed("scroll down on Help"),
+            Command::Mouse(
+                Gesture::Scroll(MouseEventKind::ScrollDown),
+                Where::On("Help".to_owned())
+            )
+        );
+        assert_eq!(parsed("drag 1 2 30 4"), Command::Drag([1, 2], [30, 4]));
+    }
+
+    #[test]
+    fn a_gesture_is_what_a_terminal_sends_for_it() {
+        let kinds = |gesture: Gesture| -> Vec<MouseEventKind> {
+            gesture
+                .events(7, 3)
+                .into_iter()
+                .map(|event| match event {
+                    Event::Mouse(mouse) => {
+                        assert_eq!((mouse.column, mouse.row), (7, 3));
+                        mouse.kind
+                    }
+                    other => panic!("{other:?} is not the mouse"),
+                })
+                .collect()
+        };
+        let (down, up) = (MouseEventKind::Down, MouseEventKind::Up);
+        let (left, right) = (MouseButton::Left, MouseButton::Right);
+        assert_eq!(kinds(Gesture::Click), [down(left), up(left)]);
+        assert_eq!(
+            kinds(Gesture::DoubleClick),
+            [down(left), up(left), down(left), up(left)]
+        );
+        assert_eq!(kinds(Gesture::RightClick), [down(right), up(right)]);
+        assert_eq!(kinds(Gesture::Hover), [MouseEventKind::Moved]);
+        assert_eq!(
+            kinds(Gesture::Scroll(MouseEventKind::ScrollLeft)),
+            [MouseEventKind::ScrollLeft]
+        );
+    }
+
+    #[test]
+    fn text_is_found_by_the_cell_it_starts_in_past_a_wide_glyph() {
+        let mut buffer = Buffer::empty(ratatui::layout::Rect::new(0, 0, 20, 3));
+        buffer.set_string(2, 1, "表 orders", ratatui::style::Style::default());
+        assert_eq!(find(&buffer, "orders"), Some((5, 1)));
+        assert_eq!(
+            find(&buffer, "表 orders"),
+            Some((2, 1)),
+            "no blank typed after it"
+        );
+        assert_eq!(find(&buffer, "customers"), None);
     }
 
     #[test]
@@ -687,6 +867,19 @@ mod tests {
             ("frame a/b\n", "is not a frame name"),
             ("type\n", "type needs something to type"),
             ("paste\n", "paste needs something to paste"),
+            ("click\n", "click \"\": expected X Y or on <substring>"),
+            ("click 3\n", "click \"3\": expected X Y or on <substring>"),
+            ("click 3 4 5\n", "expected X Y or on <substring>"),
+            ("click -1 0\n", "expected X Y or on <substring>"),
+            ("click on\n", "expected X Y or on <substring>"),
+            ("double-click x y\n", "double-click \"x y\": expected X Y"),
+            ("right-click\n", "right-click \"\": expected X Y"),
+            ("hover 70000 0\n", "hover \"70000 0\": expected X Y"),
+            ("scroll\n", "expected up, down, left or right"),
+            ("scroll sideways 1 1\n", "expected up, down, left or right"),
+            ("scroll up\n", "scroll \"\": expected X Y or on <substring>"),
+            ("drag 1 2 3\n", "drag \"1 2 3\": expected X Y X Y"),
+            ("drag on Tables\n", "expected X Y X Y"),
             ("dance\n", "unknown command \"dance\""),
         ] {
             let error = format!("{:#}", parse(source).expect_err(source));
@@ -737,6 +930,34 @@ mod tests {
         assert!(
             replay.app.shell.should_quit,
             "q in the scratch pad is typed"
+        );
+    }
+
+    #[test]
+    fn a_click_on_a_tab_shows_that_tab() {
+        let directory = tempfile::tempdir().expect("a directory");
+        let mut app = two_tabs();
+        app.tabs[1].state = TabState::Failed("listener refused".to_owned());
+        let code = run(
+            "expect ○ disconnected\n\
+             click on 2 local-oracle\n\
+             expect ✗ failed\n\
+             expect listener refused\n\
+             click 1 0\n\
+             expect ○ disconnected\n\
+             key q\n",
+            app,
+            &options(directory.path()),
+        );
+        assert_eq!(code, OK);
+        assert_eq!(
+            run(
+                "click on nothing says this\n",
+                two_tabs(),
+                &options(directory.path())
+            ),
+            FAILED,
+            "text that is not there is a failed expectation"
         );
     }
 

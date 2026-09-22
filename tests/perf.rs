@@ -146,7 +146,9 @@ fn draws(app: &App, count: usize) -> Vec<Duration> {
         .map(|_| {
             let at = Instant::now();
             terminal
-                .draw(|frame| sql_bench::ui::render(frame, app, &theme))
+                .draw(|frame| {
+                    sql_bench::ui::render(frame, app, &theme);
+                })
                 .expect("a draw");
             at.elapsed()
         })

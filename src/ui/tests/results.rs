@@ -210,11 +210,15 @@ fn one_draw() -> Duration {
     let theme = Theme::new(false);
     let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("a test terminal");
     terminal
-        .draw(|frame| render(frame, &app, &theme))
+        .draw(|frame| {
+            render(frame, &app, &theme);
+        })
         .expect("a frame");
     let at = Instant::now();
     terminal
-        .draw(|frame| render(frame, &app, &theme))
+        .draw(|frame| {
+            render(frame, &app, &theme);
+        })
         .expect("a frame");
     at.elapsed()
 }
