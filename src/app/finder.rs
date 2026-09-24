@@ -243,6 +243,9 @@ impl Finder {
 /// names its letters appear in, in order, with as little between them as
 /// possible.
 fn rank(query: &str, name: &str) -> Option<u32> {
+    // Each bucket below is a subsequence too, and most names are in none of
+    // them, so the cheapest test rules them out first.
+    let gap = subsequence(query, name)?;
     if name == query {
         return Some(0);
     }
@@ -252,7 +255,7 @@ fn rank(query: &str, name: &str) -> Option<u32> {
     if let Some(at) = name.find(query) {
         return Some(2_000 + u32::try_from(at).unwrap_or(u32::MAX - 2_000));
     }
-    subsequence(query, name).map(|gap| 3_000 + gap)
+    Some(3_000 + gap)
 }
 
 /// The letters of `query` in `name`, in order, taking each as early as it
