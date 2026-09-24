@@ -108,11 +108,16 @@ pub struct Node {
     pub loaded: bool,
     /// What the load said instead, shown on the row.
     pub error: Option<String>,
+    /// `item.name()` lower-cased once, because `/` compares against every
+    /// row on every key and lower-casing fifty thousand names each time is
+    /// most of what a keystroke costs.
+    lower: String,
 }
 
 impl Node {
     fn new(item: Item, depth: usize) -> Self {
         Self {
+            lower: item.name().to_lowercase(),
             item,
             depth,
             expanded: false,
@@ -565,7 +570,7 @@ impl Objects {
         }
         let visible = self.visible();
         let wanted = self.filter.to_lowercase();
-        let hit = |index: &usize| matches(&self.nodes[*index].item, &wanted);
+        let hit = |index: &usize| matches(&self.nodes[*index], &wanted);
         let at = visible.iter().position(|index| *index == self.cursor);
         let found = match (by, at) {
             (1, Some(at)) => visible[at + 1..]
@@ -871,10 +876,6 @@ impl Objects {
     /// The rows on screen, top to bottom: what is open, or — with a filter
     /// on — the rows that match it, open or not, and the branches above them.
     /// A column only counts under a table that is open: `id` is in every one.
-    ///
-    /// ponytail: every row's name is lowered on every call, which is O(rows)
-    /// allocations a frame. Fine to tens of thousands of objects; keep a
-    /// lowered copy on each node if a bigger catalog makes typing lag.
     #[must_use]
     pub fn visible(&self) -> Vec<usize> {
         let mut open = vec![false; self.nodes.len()];
@@ -904,7 +905,7 @@ impl Objects {
                 path.pop();
             }
             let counts = open[index] || !matches!(node.item, Item::Column(_));
-            if counts && matches(&node.item, &wanted) {
+            if counts && matches(node, &wanted) {
                 keep[index] = true;
                 for above in path.iter().rev() {
                     if std::mem::replace(&mut keep[*above], true) {
@@ -1034,14 +1035,14 @@ impl Objects {
 /// Whether a row is one the filter `wanted` (lower case) is looking for: its
 /// name has it in it, or with a dot in it, an object's `schema.name` does.
 /// A branch of kinds is never one: `t` would keep every `Tables`.
-fn matches(item: &Item, wanted: &str) -> bool {
-    match item {
+fn matches(node: &Node, wanted: &str) -> bool {
+    match &node.item {
         Item::Kind { .. } => false,
         Item::Object(object) if wanted.contains('.') => {
             format!("{}.{}", object.schema, object.name)
                 .to_lowercase()
                 .contains(wanted)
         }
-        _ => item.name().to_lowercase().contains(wanted),
+        _ => node.lower.contains(wanted),
     }
 }
