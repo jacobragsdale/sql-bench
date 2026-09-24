@@ -568,8 +568,18 @@ impl Objects {
             self.show_cursor();
             return;
         }
-        let visible = self.visible();
         let wanted = self.filter.to_lowercase();
+        if by == 0 {
+            match self.first_match(&wanted) {
+                Some((index, above)) => {
+                    self.cursor = index;
+                    self.scroll_to(above);
+                }
+                None => self.show_cursor(),
+            }
+            return;
+        }
+        let visible = self.visible();
         let hit = |index: &usize| matches(&self.nodes[*index], &wanted);
         let at = visible.iter().position(|index| *index == self.cursor);
         let found = match (by, at) {
@@ -587,6 +597,34 @@ impl Objects {
             }
             None => self.show_cursor(),
         }
+    }
+
+    /// The first row [`Self::visible`] would show that `wanted` matches, and
+    /// how many rows it shows above it: only the branches over it, because
+    /// nothing before it matched. Every typed key seeks it, and one walk
+    /// that stops there is cheaper than building the whole list.
+    fn first_match(&self, wanted: &str) -> Option<(usize, usize)> {
+        let mut closed: Option<usize> = None;
+        // The depths of the rows above this one, nearest last.
+        let mut path: Vec<usize> = Vec::new();
+        for (index, node) in self.nodes.iter().enumerate() {
+            let open = match closed {
+                Some(depth) if node.depth > depth => false,
+                _ => {
+                    closed = (!node.expanded).then_some(node.depth);
+                    true
+                }
+            };
+            while path.last().is_some_and(|above| *above >= node.depth) {
+                path.pop();
+            }
+            let counts = open || !matches!(node.item, Item::Column(_));
+            if counts && matches(node, wanted) {
+                return Some((index, path.len()));
+            }
+            path.push(node.depth);
+        }
+        None
     }
 
     /// Drop the filter and open every branch above the cursor, so the row it
