@@ -562,11 +562,12 @@ fn footer_line(frame: &mut Frame, app: &App, theme: &Theme, area: Rect, hits: &m
 
 /// Whether Esc would close the error, which is only when nothing else is
 /// ahead of it: a running query is cancelled first, and a filter in the tree
-/// cleared.
+/// or the grid cleared.
 fn error_closes(app: &App) -> bool {
     app.tab().is_none_or(|tab| {
         !tab.results.running()
             && (app.shell.focus != Focus::Objects || tab.objects.filter().is_empty())
+            && (app.shell.focus != Focus::Results || tab.results.filter().is_empty())
     })
 }
 

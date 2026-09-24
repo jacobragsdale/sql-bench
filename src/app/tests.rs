@@ -841,6 +841,47 @@ fn o_waits_for_the_last_row_and_says_so() {
 }
 
 #[test]
+fn slash_filters_the_rows_to_those_with_the_text_in_any_cell() {
+    let mut app = mixed(false);
+    app.shell.focus = Focus::Results;
+    press(&mut app, "l");
+    press(&mut app, "o");
+    press(&mut app, "/");
+    for spec in ["A", "p", "q"] {
+        press(&mut app, spec);
+    }
+    assert_eq!(ids(&app), Vec::<String>::new(), "`q` is typed, not quit");
+    press(&mut app, "Backspace");
+    // Any cell, any case, in the order the sort put them.
+    assert_eq!(ids(&app), ["r5", "r2"]);
+    assert_eq!(
+        app.tabs[0].results.title(),
+        "Results · 2 of 8 rows · 3 ms · /Ap"
+    );
+    // Enter gives the keys back; what they move over is what matched.
+    press(&mut app, "Enter");
+    press(&mut app, "G");
+    assert_eq!(
+        app.tabs[0].results.rows_text(),
+        Some(("id\tn\tt\nr2\t\tapple\n".to_owned(), 1))
+    );
+
+    // Esc gives every row back, still sorted.
+    press(&mut app, "Esc");
+    assert_eq!(ids(&app), ["r3", "r5", "r6", "r1", "r0", "r4", "r2", "r7"]);
+    assert_eq!(app.tabs[0].results.title(), "Results · 8 rows · 3 ms");
+}
+
+#[test]
+fn slash_waits_for_the_last_row_and_says_so() {
+    let mut app = mixed(true);
+    app.shell.focus = Focus::Results;
+    press(&mut app, "/");
+    assert!(!app.tabs[0].results.filtering());
+    assert_eq!(app.shell.status, "filter once every row is here");
+}
+
+#[test]
 fn the_open_inspector_takes_the_scroll_keys_and_esc_closes_it_before_an_error() {
     let mut app = ready(Focus::Results);
     let row = app.tabs[1].results.selected().0;
@@ -1288,7 +1329,7 @@ fn enter_on_a_table_puts_a_select_in_the_pad_and_moves_the_focus_to_it() {
     assert_eq!(press(&mut app, "Enter"), vec![]);
     assert_eq!(
         app.tabs[1].scratch.text(),
-        "select * from dbo.customers fetch first 100 rows only\n"
+        "select * from dbo.customers fetch first 100 rows only;\n"
     );
     assert_eq!(app.shell.focus, Focus::Scratch);
 
@@ -1300,7 +1341,7 @@ fn enter_on_a_table_puts_a_select_in_the_pad_and_moves_the_focus_to_it() {
     press(&mut app, "Enter");
     assert_eq!(
         app.tabs[0].scratch.text(),
-        "select top 100 * from dbo.customers\nselect 1",
+        "select top 100 * from dbo.customers;\nselect 1",
         "the line the cursor is on is pushed down rather than written over"
     );
 }

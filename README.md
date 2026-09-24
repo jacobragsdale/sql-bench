@@ -255,6 +255,7 @@ Results:
 | `Y` | copy the rows with headers |
 | `e` | export the result set |
 | `o` | sort by the column |
+| `/` | filter the rows |
 
 A range of cells is the rectangle between where it started and the cursor.
 Shift-arrows start and grow one, and any unshifted move drops it; `v` starts

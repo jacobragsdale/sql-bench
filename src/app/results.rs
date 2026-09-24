@@ -53,6 +53,8 @@ pub enum Hit {
     Export,
     /// `o`: sort by the selected column.
     Sort,
+    /// `/`: start typing a filter over the rows.
+    Filter,
 }
 
 /// The open cell inspector: an overlay showing one whole value.
@@ -132,12 +134,16 @@ pub struct Set {
     /// Which arrival each row was: `rows[i]` came `order[i]`th. Empty while
     /// they are in arrival order, which is the order `o` goes back to.
     order: Vec<usize>,
+    /// How many rows at the end the filter hides. They are kept rather than
+    /// dropped, so clearing the filter costs a sort and not a query.
+    hidden: usize,
 }
 
 impl Set {
-    /// The rows in the order `sort` says. Ties go by arrival, so the sort
-    /// is stable and sorting back to [`None`] is exactly the order they came.
-    fn arrange(&mut self) {
+    /// The rows in the order `sort` says, with those `filter` hides moved to
+    /// the end. Ties go by arrival, so the sort is stable and sorting back to
+    /// [`None`] is exactly the order they came.
+    fn arrange(&mut self, filter: &str) {
         let count = self.rows.len();
         if self.order.is_empty() {
             self.order = (0..count).collect();
@@ -152,8 +158,15 @@ impl Set {
                 });
             }
         }
+        self.hidden = 0;
+        if !filter.is_empty() {
+            let wanted = filter.to_lowercase();
+            let hides: Vec<bool> = self.rows.iter().map(|row| !matches(row, &wanted)).collect();
+            by.sort_by_key(|&at| hides[at]);
+            self.hidden = hides.iter().filter(|hides| **hides).count();
+        }
         let order = by.iter().map(|&at| self.order[at]).collect();
-        self.order = if self.sort.is_some() {
+        self.order = if self.sort.is_some() || self.hidden > 0 {
             order
         } else {
             Vec::new()
@@ -164,6 +177,17 @@ impl Set {
             .collect();
         self.rows = by.iter().filter_map(|&at| rows[at].take()).collect();
     }
+}
+
+/// Whether any cell of `row` reads as something with `wanted` (lower case)
+/// in it, the way the grid draws it: `null` finds a NULL.
+///
+/// ponytail: every cell is lowered on every key typed, a copy of each value.
+/// Fine to the fetch cap; a LOB-heavy set that makes typing lag wants a
+/// case-insensitive search that does not copy.
+fn matches(row: &[Cell], wanted: &str) -> bool {
+    row.iter()
+        .any(|cell| shown(cell).to_lowercase().contains(wanted))
 }
 
 /// What a cell sorts by. Oracle's `NUMBER` and SQL Server's numeric and
@@ -245,6 +269,10 @@ pub struct Results {
     of: usize,
     sets_total: usize,
     affected_total: u64,
+    /// What `/` narrowed the set on screen to, case-insensitively.
+    filter: String,
+    /// Whether `/` is still being typed into.
+    filtering: bool,
 }
 
 impl Results {
@@ -265,6 +293,7 @@ impl Results {
         self.rows_affected = None;
         self.source = None;
         self.label = None;
+        self.unfilter();
         self.clear_selection();
         if !keep_view {
             self.selected = (0, 0);
@@ -385,6 +414,9 @@ impl Results {
     /// any other move drops it: the range is the rectangle between where it
     /// started and the cursor.
     pub fn key(&mut self, key: KeyEvent) -> Hit {
+        if self.filtering {
+            return self.filter_key(key);
+        }
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         // Ctrl-E is not `e`: past Ctrl-C, Ctrl-D and Ctrl-U a chord is no
         // key of the grid's, or of the source view's.
@@ -439,12 +471,91 @@ impl Results {
             KeyCode::Char('Y') => Hit::CopyRow,
             KeyCode::Char('e') => Hit::Export,
             KeyCode::Char('o') => Hit::Sort,
+            KeyCode::Char('/') => Hit::Filter,
+            // A filter Enter committed is still a filter, and Esc is the way
+            // out of one whether or not it is being typed into.
+            KeyCode::Esc if !self.filter.is_empty() => {
+                self.unfilter();
+                Hit::Moved
+            }
             KeyCode::Char('v') => {
                 self.visual = !self.visual;
                 self.anchor = self.visual.then_some(self.selected);
                 Hit::Moved
             }
             _ => Hit::Ignored,
+        }
+    }
+
+    /// `/`: start typing a filter over the rows of the set on screen.
+    pub fn search(&mut self) {
+        self.filtering = true;
+    }
+
+    /// A paste while the filter is being typed into: one more piece of it.
+    pub fn paste_filter(&mut self, text: &str) {
+        self.filter.push_str(text);
+        self.refilter();
+    }
+
+    #[must_use]
+    pub fn filter(&self) -> &str {
+        &self.filter
+    }
+
+    #[must_use]
+    pub const fn filtering(&self) -> bool {
+        self.filtering
+    }
+
+    /// The keys `/` takes for itself while it is being typed into.
+    fn filter_key(&mut self, key: KeyEvent) -> Hit {
+        match key.code {
+            KeyCode::Char('u' | 'U') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.filter.clear();
+                self.refilter();
+            }
+            KeyCode::Char(_) if chord(key) => return Hit::Ignored,
+            KeyCode::Char(character) => {
+                self.filter.push(character);
+                self.refilter();
+            }
+            KeyCode::Backspace => {
+                if self.filter.pop().is_none() {
+                    self.filtering = false;
+                }
+                self.refilter();
+            }
+            // Esc clears it; Enter keeps it and gives the keys back.
+            KeyCode::Esc => {
+                self.unfilter();
+            }
+            KeyCode::Enter => self.filtering = false,
+            _ => return Hit::Ignored,
+        }
+        Hit::Moved
+    }
+
+    /// Drop the filter and show every row again. Whether there was one, so
+    /// Esc knows it had something to do.
+    pub fn unfilter(&mut self) -> bool {
+        self.filtering = false;
+        if self.filter.is_empty() {
+            return false;
+        }
+        self.filter.clear();
+        self.refilter();
+        true
+    }
+
+    /// The set on screen narrowed to the filter anew, the cursor on its
+    /// first row: the row it was on may be hidden now.
+    fn refilter(&mut self) {
+        self.clear_selection();
+        self.selected.0 = 0;
+        self.scroll.0 = 0;
+        if let Some(set) = self.sets.get_mut(self.shown) {
+            set.arrange(&self.filter);
         }
     }
 
@@ -666,7 +777,7 @@ impl Results {
             Some((by, true)) if by == column => None,
             _ => Some((column, false)),
         };
-        set.arrange();
+        set.arrange(&self.filter);
         set.rows.len()
     }
 
@@ -675,6 +786,7 @@ impl Results {
         if self.sets.len() < 2 {
             return Hit::Moved;
         }
+        self.unfilter();
         let count = self.sets.len();
         self.shown = (self.shown + count).saturating_add_signed(delta) % count;
         self.clear_selection();
@@ -693,9 +805,11 @@ impl Results {
         self.set().map_or(&[], |set| &set.columns)
     }
 
+    /// The rows the filter lets through, which is every row without one.
     #[must_use]
     pub fn rows(&self) -> &[Vec<Cell>] {
-        self.set().map_or(&[], |set| &set.rows)
+        self.set()
+            .map_or(&[], |set| &set.rows[..set.rows.len() - set.hidden])
     }
 
     #[must_use]
@@ -790,7 +904,10 @@ impl Results {
         if let Some(source) = &self.source {
             return format!("Source · {} · {} lines", source.title, source.lines.len());
         }
-        let title = self.run_title();
+        let mut title = self.run_title();
+        if self.filtering || !self.filter.is_empty() {
+            title = format!("{title} · /{}", self.filter);
+        }
         match self.selection() {
             Some((rows, columns)) => format!(
                 "{title} · {}×{} selected",
@@ -832,7 +949,7 @@ impl Results {
                     (Some(affected), 0) => format!("{} affected", counted(affected, "row")),
                     _ => format!(
                         "{}{}",
-                        counted(rows as u64, "row"),
+                        self.of(rows),
                         if truncated { " (truncated)" } else { "" }
                     ),
                 };
@@ -851,9 +968,19 @@ impl Results {
             } => format!(
                 "Results{set} · cancelled after {}, {}",
                 seconds(*elapsed),
-                counted(*rows as u64, "row")
+                self.of(*rows)
             ),
             Status::Failed { .. } => "Results · failed".to_owned(),
+        }
+    }
+
+    /// `100 rows`, or `3 of 100 rows` while a filter hides some.
+    fn of(&self, rows: usize) -> String {
+        let all = counted(rows as u64, "row");
+        if self.filter.is_empty() {
+            all
+        } else {
+            format!("{} of {all}", grouped(self.rows().len()))
         }
     }
 
@@ -924,6 +1051,7 @@ impl Results {
 
     /// `s`: the text that made the object, read only.
     pub fn show_source(&mut self, title: String, text: &str) {
+        self.unfilter();
         self.source = Some(Source {
             title,
             lines: text.lines().map(str::to_owned).collect(),

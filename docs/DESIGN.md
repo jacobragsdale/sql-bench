@@ -336,6 +336,14 @@ was (`statement 2 of 3 failed`), the pane shows the driver's own message with
 the line number when it gave one, and the scratch pad paints that statement's
 lines in the error background until the next edit.
 
+`/` filters the set on screen to the rows with what is typed in any cell,
+case-insensitively and as the grid draws it (`null` finds a NULL), and the
+title says so: `Results · 2 of 8 rows · 3 ms · /apple`. The hidden rows move
+to the end of the set rather than out of it, so the grid, copy, the inspector
+and export all see only the matches and clearing costs a sort, not a query.
+Enter keeps the filter and gives the keys back; Esc clears it. Like `o`, it
+waits for the last row, and a run, `m`, `[`, `]` or `s` drops it.
+
 ## Overlays, copy and export
 
 Enter opens the cell inspector over the layout: a 72-column overlay, inside

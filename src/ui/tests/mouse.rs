@@ -1099,7 +1099,7 @@ fn a_double_click_on_a_table_drops_its_select_into_the_pad_as_enter_does() {
     assert_eq!(app.shell.focus, Focus::Scratch);
     assert!(
         line(&frame(120, 40, &app), 2).starts_with(
-            "│ ▾ dbo                            ││ 1 select top 100 * from dbo.orders "
+            "│ ▾ dbo                            ││ 1 select top 100 * from dbo.orders;"
         ),
     );
 }

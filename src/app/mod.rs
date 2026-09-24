@@ -93,6 +93,7 @@ pub const KEYS: &[(&str, &str, &str)] = &[
     ("Y", RESULTS, "copy the rows with headers"),
     ("e", RESULTS, "export the result set"),
     ("o", RESULTS, "sort by the column"),
+    ("/", RESULTS, "filter the rows"),
     ("j", OBJECTS, "down"),
     ("k", OBJECTS, "up"),
     ("l", OBJECTS, "expand or open"),
@@ -694,16 +695,19 @@ impl App {
         // The scratch pad types every key the shell does not keep for
         // itself, which is why the shell's keys are matched first.
         let typing = self.shell.focus == Focus::Scratch;
-        // So does the filter line, once `/` has opened it: `c` is a letter
+        // So does a filter line, once `/` has opened it: `c` is a letter
         // of a table's name there and not a connect key.
-        let filtering = self.shell.focus == Focus::Objects
-            && self.tab().is_some_and(|tab| tab.objects.filtering());
+        let filtering = self.filtering();
         match key.code {
             KeyCode::Char('q' | 'Q') if control => return vec![Action::Quit],
             KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Esc | KeyCode::Enter
                 if filtering && !control =>
             {
-                return self.objects_key(key);
+                return if self.shell.focus == Focus::Results {
+                    self.results_key(key)
+                } else {
+                    self.objects_key(key)
+                };
             }
             KeyCode::Char('t' | 'T') if control => {
                 if !self.tabs.is_empty() {
@@ -749,6 +753,12 @@ impl App {
                         .is_some_and(|tab| tab.scratch.clear_selection())
                 {
                     // So was the pad's.
+                } else if self.shell.focus == Focus::Results
+                    && self
+                        .tab()
+                        .is_some_and(|tab| !tab.results.filter().is_empty())
+                {
+                    return self.results_key(key);
                 } else if self.shell.focus == Focus::Objects
                     && self
                         .tab()
@@ -800,9 +810,8 @@ impl App {
         } else if let Some(finder) = self.shell.finder.as_mut() {
             finder.query.insert(&line());
             finder.search(&self.tabs);
-        } else if let Some(tab) = self.filtering_tab() {
-            tab.objects.paste_filter(&line());
-        } else if !self.overlaid()
+        } else if !self.paste_filter(text)
+            && !self.overlaid()
             && let Some(tab) = self.tabs.get_mut(self.shell.active_tab)
         {
             self.shell.focus = Focus::Scratch;
@@ -824,11 +833,7 @@ impl App {
                 return;
             }
         };
-        if tab == self.shell.active_tab
-            && let Some(open) = self.filtering_tab()
-        {
-            open.objects
-                .paste_filter(&text.split_whitespace().collect::<Vec<_>>().join(" "));
+        if tab == self.shell.active_tab && self.paste_filter(&text) {
             return;
         }
         let Some(open) = self.tabs.get_mut(tab) else {
@@ -840,12 +845,30 @@ impl App {
         self.shell.status = format!("pasted {lines} {noun}{from}");
     }
 
-    /// The tab on screen, when its tree's filter is what is being typed.
-    fn filtering_tab(&mut self) -> Option<&mut Tab> {
-        let focused = self.shell.focus == Focus::Objects;
-        self.tabs
-            .get_mut(self.shell.active_tab)
-            .filter(|tab| focused && tab.objects.filtering())
+    /// Whether the focused pane's filter is what is being typed.
+    fn filtering(&self) -> bool {
+        self.tab().is_some_and(|tab| match self.shell.focus {
+            Focus::Objects => tab.objects.filtering(),
+            Focus::Results => tab.results.filtering(),
+            _ => false,
+        })
+    }
+
+    /// Text into the filter being typed, as one line, if one is.
+    fn paste_filter(&mut self, text: &str) -> bool {
+        if !self.filtering() {
+            return false;
+        }
+        let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let focus = self.shell.focus;
+        if let Some(tab) = self.tabs.get_mut(self.shell.active_tab) {
+            if focus == Focus::Results {
+                tab.results.paste_filter(&line);
+            } else {
+                tab.objects.paste_filter(&line);
+            }
+        }
+        true
     }
 
     /// Put this tab on screen, and connect it if it is not: a tab is opened
@@ -1068,6 +1091,15 @@ impl App {
             Hit::Sort => vec![Action::Sorted {
                 rows: open.results.sort(),
             }],
+            // The same: a batch landing on filtered rows would skip it.
+            Hit::Filter if open.results.running() => {
+                self.shell.status = "filter once every row is here".to_owned();
+                Vec::new()
+            }
+            Hit::Filter => {
+                open.results.search();
+                Vec::new()
+            }
         }
     }
 
@@ -1243,10 +1275,11 @@ fn scroll_by(key: KeyEvent) -> Option<isize> {
 }
 
 /// The statement Enter drops in the pad: a hundred rows, spelled the way the
-/// backend spells a limit.
+/// backend spells a limit, and terminated so it cannot run into whatever
+/// statement follows it.
 fn select_from(kind: Kind, schema: &str, name: &str) -> String {
     match kind {
-        Kind::Mssql => format!("select top 100 * from {schema}.{name}"),
-        Kind::Oracle => format!("select * from {schema}.{name} fetch first 100 rows only"),
+        Kind::Mssql => format!("select top 100 * from {schema}.{name};"),
+        Kind::Oracle => format!("select * from {schema}.{name} fetch first 100 rows only;"),
     }
 }
