@@ -258,13 +258,25 @@ fn rank(query: &str, name: &str) -> Option<u32> {
 /// The letters of `query` in `name`, in order, taking each as early as it
 /// comes: how many other bytes sit between the first and the last.
 fn subsequence(query: &str, name: &str) -> Option<u32> {
-    let mut rest = name.char_indices();
     let mut first = None;
     let mut end = 0;
-    for wanted in query.chars() {
-        let (at, found) = rest.by_ref().find(|(_, found)| *found == wanted)?;
-        first.get_or_insert(at);
-        end = at + found.len_utf8();
+    if query.is_ascii() {
+        // An ASCII byte is never part of a wider letter, so the bytes find
+        // the same letters at the same offsets without decoding the name,
+        // which is most of a keystroke over names that match nothing.
+        let mut rest = name.bytes().enumerate();
+        for wanted in query.bytes() {
+            let (at, _) = rest.find(|(_, found)| *found == wanted)?;
+            first.get_or_insert(at);
+            end = at + 1;
+        }
+    } else {
+        let mut rest = name.char_indices();
+        for wanted in query.chars() {
+            let (at, found) = rest.find(|(_, found)| *found == wanted)?;
+            first.get_or_insert(at);
+            end = at + found.len_utf8();
+        }
     }
     // The matched letters are the query's own, so the span holds at least
     // its bytes.
