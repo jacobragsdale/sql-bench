@@ -23,6 +23,10 @@ pub const CELL_LIMIT: usize = 60;
 /// a control character the one column of the glyph [`printable`] draws it as.
 #[must_use]
 pub fn width(text: &str) -> usize {
+    // Printable ASCII is a column a byte, and most cells are nothing else.
+    if text.bytes().all(|byte| (b' '..=b'~').contains(&byte)) {
+        return text.len();
+    }
     text.chars().map(cells).sum()
 }
 

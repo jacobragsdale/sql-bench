@@ -392,7 +392,7 @@ impl Results {
                     continue;
                 };
                 if *width < WIDTH_CAP {
-                    *width = (*width).max(width_of(&shown(cell))).min(WIDTH_CAP);
+                    *width = (*width).max(measured(cell)).min(WIDTH_CAP);
                 }
                 if let Some(align) = set.align.get_mut(index) {
                     *align = match (*align, cell) {
@@ -1126,6 +1126,21 @@ pub fn shown(cell: &Cell) -> Cow<'_, str> {
         Cell::Null => Cow::Borrowed("NULL"),
         Cell::Bytes(bytes) => Cow::Owned(short_hex(bytes)),
         other => other.display(),
+    }
+}
+
+/// How wide [`shown`] draws `cell`. A number is counted rather than
+/// formatted, because every cell of every batch is measured.
+fn measured(cell: &Cell) -> usize {
+    match cell {
+        Cell::Int(value) => {
+            let digits = value
+                .unsigned_abs()
+                .checked_ilog10()
+                .map_or(1, |log| log as usize + 1);
+            digits + usize::from(*value < 0)
+        }
+        other => width_of(&shown(other)),
     }
 }
 
