@@ -140,13 +140,13 @@ fn chips(results: &Results) -> Vec<(&'static str, &'static str)> {
     if results.source().is_some() {
         chips.push(("Copy", "y"));
     } else {
-        if !results.columns().is_empty() {
+        if !results.columns().is_empty() && !results.running() {
             chips.push(("Export", "e"));
         }
         if results.truncated() {
             chips.push(("+10k", "m"));
         }
-        if results.sets() > 1 {
+        if results.pages() > 1 {
             chips.extend([("◀", "["), ("▶", "]")]);
         }
     }

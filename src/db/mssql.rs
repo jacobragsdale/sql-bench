@@ -113,6 +113,11 @@ impl Backend {
         outcome
     }
 
+    /// Drop the session, mid-answer or not; the next query connects again.
+    pub(super) fn reset(&mut self) {
+        self.client = None;
+    }
+
     fn connect(&mut self) -> Result<(), DbError> {
         let Self {
             config,
@@ -154,6 +159,10 @@ async fn open_driver(config: &tiberius::Config) -> Result<Driver, DbError> {
             TiberiusError::Server(token) => {
                 DbError::Connect(format!("{} (error {})", token.message(), token.code()))
             }
+            // A dev box's own certificate, which the server made itself.
+            why @ TiberiusError::Tls(_) => DbError::Connect(format!(
+                "{why}; a server with a self-signed certificate wants trust_cert = true"
+            )),
             why => DbError::Connect(why.to_string()),
         })
 }
@@ -164,21 +173,41 @@ async fn stream(driver: &mut Driver, sql: &str, sink: &mut Sink) -> Result<(), D
     let sets = {
         let mut query = driver.simple_query(sql).await.map_err(failure)?;
         let mut sets = 0usize;
+        // The rows of a `for json` or `for xml` set so far, which are pieces
+        // of one value and not rows of anything.
+        let mut pieces: Option<Vec<String>> = None;
         while let Some(item) = query.try_next().await.map_err(failure)? {
             let flow = match item {
                 QueryItem::Metadata(metadata) => {
                     sets += 1;
-                    sink.columns(metadata.columns().iter().map(column).collect())
+                    let columns: Vec<Column> = metadata.columns().iter().map(column).collect();
+                    if whole(sink, pieces.take()) == Flow::Stop {
+                        return Ok(());
+                    }
+                    pieces = in_pieces(&columns).then(Vec::new);
+                    sink.columns(columns)
                 }
-                QueryItem::Row(row) => sink.row(
-                    row.cells()
-                        .map(|(column, data)| cell(column.column_type(), data))
-                        .collect(),
-                ),
+                QueryItem::Row(row) => match pieces.as_mut() {
+                    Some(pieces) => {
+                        pieces.extend(row.into_iter().filter_map(|data| match data {
+                            ColumnData::String(Some(piece)) => Some(piece.into_owned()),
+                            _ => None,
+                        }));
+                        Flow::Go
+                    }
+                    None => sink.row(
+                        row.cells()
+                            .map(|(column, data)| cell(column.column_type(), data))
+                            .collect(),
+                    ),
+                },
             };
             if flow == Flow::Stop {
                 return Ok(());
             }
+        }
+        if whole(sink, pieces) == Flow::Stop {
+            return Ok(());
         }
         sets
     };
@@ -202,6 +231,23 @@ async fn stream(driver: &mut Driver, sql: &str, sink: &mut Sink) -> Result<(), D
     Ok(())
 }
 
+/// Whether a set is the one column SQL Server answers `for json` and `for
+/// xml` in, cutting the text into rows of 2,033 characters that a grid, a
+/// CSV or a copy would each hand over as pieces of a document.
+fn in_pieces(columns: &[Column]) -> bool {
+    matches!(columns, [only] if ["JSON", "XML"].iter().any(|kind| {
+        only.name.strip_prefix(kind) == Some("_F52E2B61-18A1-11d1-B105-00805F49916B")
+    }))
+}
+
+/// A `for json` or `for xml` set's pieces as the one row they are.
+fn whole(sink: &mut Sink, pieces: Option<Vec<String>>) -> Flow {
+    match pieces {
+        Some(pieces) if !pieces.is_empty() => sink.row(vec![Cell::Text(pieces.concat())]),
+        _ => Flow::Go,
+    }
+}
+
 /// Finishes once the handle has asked for a cancel.
 async fn wanted_cancelled(flag: &AtomicBool) {
     while !flag.load(Ordering::SeqCst) {
@@ -216,9 +262,8 @@ fn column(column: &tiberius::Column) -> Column {
     }
 }
 
-/// What the server would call the column. tiberius reports the wire type,
-/// which lumps every width of an integer into `Intn`; the row data says which
-/// one it really was, so this is the name the catalog and the grid show.
+/// What the server would call the column, as near as the wire type says:
+/// a `smalldatetime` that is nullable arrives as a `datetime`.
 fn type_name(column_type: ColumnType) -> &'static str {
     match column_type {
         ColumnType::Null => "null",
@@ -230,7 +275,8 @@ fn type_name(column_type: ColumnType) -> &'static str {
         ColumnType::Datetime4 => "smalldatetime",
         ColumnType::Float4 => "real",
         ColumnType::Float8 | ColumnType::Floatn => "float",
-        ColumnType::Money | ColumnType::Money4 => "money",
+        ColumnType::Money => "money",
+        ColumnType::Money4 => "smallmoney",
         ColumnType::Datetime | ColumnType::Datetimen => "datetime",
         ColumnType::Guid => "uniqueidentifier",
         ColumnType::Decimaln => "decimal",
@@ -268,9 +314,9 @@ fn cell(column_type: ColumnType, data: &ColumnData<'static>) -> Cell {
             // money is a fixed four places, and rounding it into a float for
             // display is how money goes missing.
             // ponytail: tiberius has already decoded it through an f64, so
-            // past about 9e11 the last cent is the float's guess. Its public
-            // API has no raw money; read the column as decimal(19,4) if that
-            // range ever matters.
+            // past 2^39 (about 5.5e11) the last places are the float's guess
+            // (-700000000000.0003 reads …0002). Its public API has no raw
+            // money; read the column as decimal(19,4) if that range matters.
             ColumnType::Money | ColumnType::Money4 => Cell::Decimal(format!("{value:.4}")),
             _ => Cell::Float(*value),
         },
@@ -391,6 +437,16 @@ fn failure(why: TiberiusError) -> DbError {
         TiberiusError::Server(token) if token.class() >= FATAL_CLASS => {
             DbError::Lost(token.message().to_owned())
         }
+        // A procedure's line is of its own text, which is not in the batch.
+        TiberiusError::Server(token) if !token.procedure().is_empty() => DbError::Query {
+            message: format!(
+                "{}, line {}: {}",
+                token.procedure(),
+                token.line(),
+                token.message()
+            ),
+            line: None,
+        },
         TiberiusError::Server(token) => DbError::Query {
             message: token.message().to_owned(),
             line: Some(token.line()),
@@ -398,9 +454,26 @@ fn failure(why: TiberiusError) -> DbError {
         // Not the server saying no but the socket, the handshake or the
         // protocol going wrong — a database stopped under a running query
         // arrives here — and none of those leave anything to run on.
-        why @ (TiberiusError::Io { .. } | TiberiusError::Protocol(_) | TiberiusError::Tls(_)) => {
+        // tiberius says what an I/O error is twice over before saying what
+        // it was: `unexpected end of file` is a killed session.
+        TiberiusError::Io { message, .. } => DbError::Lost(
+            message
+                .trim_start_matches("An error occured during the attempt of performing I/O: ")
+                .to_owned(),
+        ),
+        why @ (TiberiusError::Protocol(_) | TiberiusError::Tls(_)) => {
             DbError::Lost(why.to_string())
         }
+        // The driver reads every nchar and nvarchar strictly, and `left`,
+        // `substring` or a cast in a non-`_SC` collation can leave half an
+        // emoji in one: the whole result goes, so say which way round it.
+        TiberiusError::Utf16 => DbError::Query {
+            message: "a value is not whole UTF-16 — half of a surrogate pair, as `left` or \
+                      `substring` can leave of an emoji — and the driver reads none of the \
+                      result past it; cast that column to varbinary to see its bytes"
+                .to_owned(),
+            line: None,
+        },
         other => DbError::Query {
             message: other.to_string(),
             line: None,
@@ -414,6 +487,22 @@ mod tests {
     use tiberius::time::{Date, DateTime, DateTime2, DateTimeOffset, Time};
 
     use super::*;
+
+    /// A killed session read `An error occured during the attempt of
+    /// performing I/O:` twice before it said what happened.
+    #[test]
+    fn a_session_the_server_ended_says_so_once() {
+        let why = TiberiusError::Io {
+            kind: std::io::ErrorKind::UnexpectedEof,
+            message:
+                "An error occured during the attempt of performing I/O: unexpected end of file"
+                    .to_owned(),
+        };
+        assert_eq!(
+            failure(why).to_string(),
+            "connection lost: unexpected end of file; the next run connects again"
+        );
+    }
 
     #[test]
     fn a_date_counts_from_year_one() {

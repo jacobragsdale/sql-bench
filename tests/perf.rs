@@ -466,3 +466,169 @@ fn a_copy_of_ten_thousand_rows_by_twenty_columns_is_inside_the_key_budget() {
         "a copy of 10,000 x 20 cells took {took:?}, and the budget is {KEY_TO_FRAME:?}"
     );
 }
+
+/// `/` over the default cap's worth of a wide result, 10,000 rows by 300
+/// columns, typed a letter at a time: the first letter looks at every
+/// cell, and every letter after it only at the rows still showing.
+#[test]
+#[ignore = "a timing: cargo test --release -- --ignored"]
+fn a_filter_keystroke_over_ten_thousand_rows_of_three_hundred_columns_is_inside_the_budget() {
+    let mut app = App::new(&config());
+    app.shell.focus = Focus::Results;
+    let results = &mut app.tabs.first_mut().expect("a tab").results;
+    results.start(Instant::now(), 0, 1, false);
+    results.apply(QueryEvent::Columns(
+        (0..300)
+            .map(|column| Column {
+                name: format!("column_{column}"),
+                type_name: "nvarchar(64)".to_owned(),
+            })
+            .collect(),
+    ));
+    results.apply(QueryEvent::Rows(
+        (0..10_000)
+            .map(|row| {
+                (0..300)
+                    .map(|column| match column % 3 {
+                        0 => Cell::Int(row * 300 + column),
+                        1 => Cell::Text(format!("Value {row} of column {column}")),
+                        _ => Cell::Decimal(format!("{row}.{column:02}")),
+                    })
+                    .collect()
+            })
+            .collect(),
+    ));
+    results.apply(QueryEvent::Done {
+        rows: 10_000,
+        truncated: false,
+        reset: false,
+        connect_ms: 0,
+        first_row_ms: 0,
+        total_ms: 0,
+    });
+    let press = |app: &mut App, code: KeyCode| {
+        app.handle(Event::Key(KeyEvent::new(code, KeyModifiers::NONE)))
+    };
+    press(&mut app, KeyCode::Char('/'));
+    let mut samples = Vec::new();
+    for letter in "nothing".chars() {
+        let at = Instant::now();
+        press(&mut app, KeyCode::Char(letter));
+        samples.push(at.elapsed());
+    }
+    assert!(
+        app.tabs[0].results.rows().is_empty(),
+        "nothing is `nothing`"
+    );
+    let slowest = samples.iter().max().copied().unwrap_or_default();
+    eprintln!("filter over 10,000 x 300: the slowest key {slowest:?} of {samples:?}");
+    assert!(
+        slowest < KEY_TO_FRAME * MARGIN,
+        "a key took {slowest:?}, and the budget is {KEY_TO_FRAME:?}"
+    );
+}
+
+/// The index landing on a tree whose every branch is open, the way `/`
+/// then Esc leaves it and `r` asks for it again: two hundred schemas and
+/// sixty thousand objects, refilled in one pass.
+#[test]
+#[ignore = "a timing: cargo test --release -- --ignored"]
+fn an_index_landing_on_a_tree_with_every_branch_open_is_one_pass() {
+    let objects: Vec<DbObject> = (0..60_000)
+        .map(|n| DbObject {
+            schema: format!("schema_{:03}", n % 200),
+            name: format!("table_{n:06}"),
+            kind: [ObjectKind::Table, ObjectKind::View, ObjectKind::Procedure][n % 3],
+            modified: None,
+        })
+        .collect();
+    let mut app = App::new(&config());
+    let tree = &mut app.tabs[0].objects;
+    let schemas = (0..200).map(|n| format!("schema_{n:03}")).collect();
+    tree.answer(
+        &CatalogRequest::Schemas,
+        &Ok(CatalogAnswer::Schemas(schemas)),
+    );
+    tree.answer(
+        &CatalogRequest::Index,
+        &Ok(CatalogAnswer::Index(objects.clone())),
+    );
+    // `/` fills and opens every branch, and Esc keeps them open.
+    tree.key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+    tree.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(tree.nodes().len() > 60_000);
+    let at = Instant::now();
+    tree.answer(&CatalogRequest::Index, &Ok(CatalogAnswer::Index(objects)));
+    let took = at.elapsed();
+    eprintln!("an index over 60,000 objects and 1,200 open branches: {took:?}");
+    assert!(
+        took < Duration::from_millis(50) * MARGIN,
+        "the index took {took:?} to land"
+    );
+}
+
+/// Fifty thousand lines pasted above a pad of fifty thousand more: one
+/// splice, not a shift of every line below for each line pasted.
+#[test]
+#[ignore = "a timing: cargo test --release -- --ignored"]
+fn a_paste_of_fifty_thousand_lines_above_as_many_is_inside_the_budget() {
+    let mut app = App::new(&config());
+    let text: String = (0..50_000).map(|n| format!("select {n} as n;\n")).collect();
+    app.tabs[0].scratch.set_text(&text);
+    let at = Instant::now();
+    app.handle(Event::Paste(text));
+    let took = at.elapsed();
+    eprintln!("a 50,000-line paste above 50,000 lines: {took:?}");
+    assert_eq!(app.tabs[0].scratch.lines().len(), 100_000);
+    assert!(took < KEY_TO_FRAME * MARGIN * 3, "the paste took {took:?}");
+}
+
+/// The rows a run replaces are a million allocations to give back, which
+/// the loop used to do itself: F5 over a million rows froze for a third of
+/// a second before its first frame.
+#[test]
+#[ignore = "a timing: cargo test --release -- --ignored"]
+fn a_run_over_a_million_rows_reaches_its_frame_inside_the_budget() {
+    let config = config();
+    let mut app = app_with_rows(1_000_000);
+    let mut driver = driver(&config);
+    let mut terminal = terminal();
+    let trace = Trace::new(None);
+    let at = Instant::now();
+    app.apply(sql_bench::app::RuntimeEvent::QueryStarted {
+        tab: 0,
+        at,
+        statement: 0,
+        of: 1,
+        keep_view: false,
+    });
+    driver
+        .turn(
+            &mut terminal,
+            &mut app,
+            &mut Keys::of(KeyCode::Null, 0),
+            &trace,
+        )
+        .expect("a turn");
+    let took = at.elapsed();
+    eprintln!("a run's start and frame over a million rows: {took:?}");
+    assert!(
+        took < KEY_TO_FRAME * MARGIN,
+        "the start and its frame took {took:?}"
+    );
+}
+
+/// A pad line is drawn as far as the window reaches, and a pasted
+/// ten-megabyte JSON on one line used to be decoded whole every frame.
+#[test]
+#[ignore = "a timing: cargo test --release -- --ignored"]
+fn a_draw_of_a_ten_megabyte_pad_line_costs_its_window() {
+    let mut app = App::new(&config());
+    app.shell.focus = Focus::Scratch;
+    app.tabs[0]
+        .scratch
+        .set_text(&format!("select '{}' as blob", "é".repeat(5_000_000)));
+    let draw = median(draws(&app, 21));
+    eprintln!("a draw of a ten-megabyte pad line: {draw:?}");
+    assert!(draw < KEY_TO_FRAME * MARGIN / 4, "the draw took {draw:?}");
+}

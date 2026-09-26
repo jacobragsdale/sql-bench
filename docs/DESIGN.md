@@ -105,7 +105,9 @@ one of them connects after the first frame is on screen and never before: a
 connect takes up to ten seconds and nobody should watch a blank terminal for
 it. A replay connects only what those flags name, so its frames never depend
 on a server being up. Opening a disconnected tab (`Ctrl-T`, a digit, a click)
-connects it; a failed one waits for `c`, so its error stays up. Quitting
+connects it; a failed one waits for `c`, so its error stays up. More tabs
+than the bar is wide start the bar late enough to show the active one, with
+`…` for those left off. Quitting
 closes every connection before the terminal is given back: the driver owns
 them, and dropping one cancels its query and joins its worker.
 
@@ -182,7 +184,7 @@ pub enum QueryEvent {
     Error(DbError),
 }
 
-pub enum DbError { Connect(String), Query { message: String, line: Option<u32> }, Cancelled, Timeout, Unsupported(String) }
+pub enum DbError { Connect(String), Lost(String), Config(String), Query { message: String, line: Option<u32> }, Cancelled, Timeout, Unsupported(String) }
 
 pub struct QueryOptions { pub batch_size: usize /* 500 */, pub max_rows: Option<usize> /* Some(10_000) */ }
 ```
@@ -233,7 +235,12 @@ pad. Both go through `Scratch::statements`, which walks the lines once:
   cut at every `;` that is not in a quote or a comment — `select 1 from dual;
   select 2 from dual` on one line is two. Both keep that line's range, so
   `Ctrl-R` there runs the first.
-- A statement is trimmed, and an empty one is never emitted.
+- A statement is trimmed, and an empty one is never emitted — nor is one
+  that is only comments and semicolons: a note on lines of its own is not a
+  statement, and Oracle would stop a run with ORA-00900 over it. A note in
+  front of a statement is read past, so `/* why */ begin` opens a block, and
+  the Oracle driver keeps the `end;` of a block or a stored program whatever
+  comment comes before it.
 
 Each statement carries the range of lines it came from, which is what lets a
 failure paint those lines in the pad and what `statement_at_cursor` searches.
@@ -253,7 +260,10 @@ back (`answer(backend, rows)`). That split is what lets the same question be
 asked two ways: the `objects` and `source` subcommands run it blocking, and
 the object tree sends it down the tab's own query channel and is polled once a
 turn, so the loop waits for neither. A tab already loading something queues the
-next request rather than opening a second connection.
+next request rather than opening a second connection, and a query and a load
+take turns rather than both going to the worker: a cancel is one flag per
+connection, so Esc on a query with the index queued behind it would have
+cancelled the index too.
 
 The tree (`src/app/objects.rs`, `src/ui/objects.rs`) is a flat `Vec<Node>`
 with a depth per row: schemas, the kinds under them, the objects under those,
@@ -297,7 +307,10 @@ gives the keys back. Esc clears it and opens the branches above the cursor,
 so the row the filter found stays under it.
 Enter on a table or a view writes `select top 100 * from schema.name` —
 `select * from schema.name fetch first 100 rows only` on Oracle — into the pad
-on a line of its own and moves the focus there. `i` puts a table's columns in
+on a line of its own, after the line the cursor is in, and moves the focus
+there. A name is quoted where it has to be — `dbo.[order details]`,
+`[user]`, `BENCH."MixedCase"` — and left alone where it reads back the same;
+`y` copies it the same way. `i` puts a table's columns in
 the results pane as a grid, `s` puts an object's source there as numbered
 lines that the pane's own movement keys scroll — for a table, a `CREATE
 TABLE` written from its columns and primary key — and `y` copies the
@@ -318,9 +331,16 @@ characters, through `unicode-width`, because a CJK glyph is drawn two cells
 wide and a grid that counted `char`s would lean.
 
 The fetch cap is `--max-rows` (default 10,000). When it stopped the scan the
-title says `(truncated)` — `Results · 10,000 rows (truncated) · 1,234 ms` —
-and `m` runs the same statement again with another 10,000 allowed, keeping the
-cell cursor where it was. Esc while a query is running cancels it: the
+title of that set says `(truncated)` — `Results · 10,000 rows (truncated) ·
+1,234 ms`, and on an earlier set of an Oracle run, which goes on past one —
+and `m` runs the last statement again with another 10,000 allowed, keeping the
+cell cursor where it was; the next statement run is capped at `--max-rows`
+again. On SQL Server a cap that stops a scan ends the session, because the
+driver has no attention packet and dropping the socket is the only way to
+stop the server: the statement and any open transaction roll back and
+`#temp` tables go, so a run stops there rather than go on in a session its
+statements were not written for, and the footer says so (`row cap: statement
+2 of 3 reset the session, so the 1 after it did not run`). Esc while a query is running cancels it: the
 receiver ends in `Cancelled`, the rows that did arrive stay on screen and the
 title reads `cancelled after 1.2 s, 4,500 rows`.
 
@@ -333,8 +353,14 @@ count is once a later select is on screen. **A statement the server says no to s
 the statements after it were written to follow it, so they are dropped rather
 than run against whatever state the failure left. The footer says which one it
 was (`statement 2 of 3 failed`), the pane shows the driver's own message with
-the line number when it gave one, and the scratch pad paints that statement's
-lines in the error background until the next edit.
+the line number when it gave one — the pad's, as its gutter numbers it — and
+the scratch pad paints that statement's lines in the error background until
+the next edit. An edit made while the statement ran moves its lines, so then
+neither happens and the line is the statement's own. The message is a page
+after the sets the run did produce: `[` goes back to them and `]` round to it.
+A query that replaces the sets hands the old ones to the run loop, which
+frees them on a thread of their own: a million rows are a million
+allocations, and giving them back used to hold F5's first frame for 70 ms.
 
 `/` filters the set on screen to the rows with what is typed in any cell,
 case-insensitively and as the grid draws it (`null` finds a NULL), and the
@@ -353,7 +379,9 @@ bytes for a `Bytes`. Text is wrapped at the overlay's width with its own line
 breaks kept, a `Bytes` is a hex dump of sixteen bytes a line with the
 printable ones beside it, and a NULL is the word. j k, the arrows and
 PageUp/PageDown scroll it, which the grid under it does not see; Esc closes
-it, after the help and before a running query.
+it, after the help and before a running query, and so does anything that
+takes the grid from under it — another pane or tab focused, `/`, or a run
+that leaves no cell.
 
 The grid selects a range of cells: the rectangle between an anchor and the
 cursor, painted in the selection colour and counted in the title, `Results ·
@@ -402,10 +430,12 @@ the tool route does not care. A replay never runs a tool: `clipboard <text>`
 sets its fake, and a copy writes the fake, so copy and paste round-trip
 headlessly.
 
-`e` opens a one-line prompt in the footer, `Export to: ` prefilled with
-`~/sql-bench-<connection>-<YYYYmmdd-HHMMSS>.csv`, which takes every key while
-it is open — insert, Backspace, Left, Right, Home, End and Ctrl-U, and Esc to
-give up. Enter writes every fetched row of the set on screen: JSON for a
+`e` opens a one-line prompt in the footer — once the last row is here, and
+not over a pane with nothing to write — `Export to: ` prefilled with
+`~/sql-bench-<connection>-<YYYYmmdd-HHMMSS>.csv` (the time in UTC, with any
+`/` in the name a `_`), which takes every key while it is open — insert,
+Backspace, Left, Right, Home, End and Ctrl-U, and Esc to give up; a path
+wider than the footer scrolls to keep the cursor on it. Enter writes every fetched row of the set on screen: JSON for a
 `.json` name and CSV for anything else, through the same `src/export.rs` the
 headless subcommands use, so a file is the same bytes whichever door it left
 by. The footer says `exported 1,234 rows to <path>`, or what stopped it.
@@ -432,9 +462,10 @@ The four rules hold because the hits flow back as data and nothing else does.
 The renderer still only reads the app; it returns the hits, and the run loop
 keeps the last frame's and hands them to `App::pointer` with each mouse event
 and `Instant::now()`, so the app sees no terminal and reads no clock. After
-every draw the loop also hands them to `App::drawn`, which copies the pad's
-drawn window into the pad's scroll hint (see The pad), because only the
-renderer knows how tall the pad is. The number of hits is bounded by the
+every draw the loop also hands them to `App::drawn`, which copies the pad's,
+the tree's and the grid's drawn windows into their scroll hints (see The
+pad), because only the renderer knows how tall a pane is: a key moves the
+cursor, and the next frame moves the view only as far as it has to. The number of hits is bounded by the
 screen and not by the rows fetched, so drawing them costs what a frame
 costs. Replay drives the same `App::pointer` through its mouse verbs against
 the same hits, which is how every gesture below is checked without a
@@ -478,7 +509,9 @@ terminal (`scripts/replay/qa/mouse.keys`).
   viewport, track)`, places the thumb for the painter, and its inverse
   `pointer::offset` turns a dragged thumb back into a row, so what is drawn is
   what is hit, in O(1). The track above and below the thumb is a PageUp and a
-  PageDown button for the pane. A `Target::Thumb` carries the content, the
+  PageDown button for the pane; a page moves the view as far as the cursor,
+  so the cursor keeps its row on the screen and a click on the track always
+  scrolls. A `Target::Thumb` carries the content, the
   viewport and the track it was drawn on; dragging it moves the view through
   the pane's wheel function, which pulls the cursor along the same way, and
   like the wheel it leaves the focus alone. Pressing it and letting go does
@@ -496,10 +529,8 @@ terminal (`scripts/replay/qa/mouse.keys`).
 - A click never moves the view. `Tree`, `Cells`, `Header` and `Source`
   carry the window they were drawn from (`top`, and the grid's `left`), and
   `Objects::click` and `Results::click` set the scroll hint from that and
-  the cursor directly. The keys' `at_row` and `scroll_to` would move a
-  window whose bottom row was clicked, by their page of 10, and a column
-  hint `h` and `l` leave behind would pull the columns back left. The first
-  `j` after a click ten rows below the top still moves the view once.
+  the cursor directly, or a column hint `h` and `l` left behind would pull
+  the columns back left.
 - A click beside the help, the inspector, the export prompt or a menu closes
   the one on top, the way Esc does, and reaches nothing under it.
 - What the pointer rests on is painted in the theme's hover style, restyled
@@ -602,7 +633,11 @@ tall the pad is; this is how the app follows it without asking.
 
 ## The scratch pad
 
-One pad per connection, kept in `<state dir>/scratch/<connection>.sql`. The
+One pad per connection, kept in `<state dir>/scratch/<connection>.sql`, where
+a `/`, a `\` or a leading `.` in the name is written as its `%xx` so the file
+stays in that directory. A pad is written beside its file and renamed over
+it, and one that is not UTF-8 is loaded with `�` for what is not rather than
+left empty to be saved over. The
 state directory is `$SQL_BENCH_STATE_DIR`, else `$XDG_STATE_HOME/sql-bench`,
 else `~/.local/state/sql-bench`. A pad is written 500 ms after the last edit
 and on the way out, and is loaded before the first frame. The same pause ends

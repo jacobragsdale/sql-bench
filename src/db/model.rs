@@ -34,13 +34,26 @@ impl Cell {
             Self::Null => Cow::Borrowed(""),
             Self::Bool(value) => Cow::Borrowed(if *value { "true" } else { "false" }),
             Self::Int(value) => Cow::Owned(value.to_string()),
-            Self::Float(value) => Cow::Owned(value.to_string()),
+            Self::Float(value) => Cow::Owned(float(*value)),
             Self::Decimal(text) | Self::Text(text) | Self::DateTime(text) => Cow::Borrowed(text),
             // ponytail: the whole blob is formatted, so a megabyte of bytes
             // is two megabytes of hex. Cap it here if a BLOB column ever
             // shows up in a profile.
             Self::Bytes(bytes) => Cow::Owned(hex(bytes)),
         }
+    }
+}
+
+/// A float the way a person reads one: written out while that is short, in
+/// exponent form where it is not — `1e-300` written out is a zero once it is
+/// cut to a column, and `1.79e308` is three hundred digits nobody counts.
+/// JavaScript's own bounds, so a JSON reader writes it back the same.
+fn float(value: f64) -> String {
+    let magnitude = value.abs();
+    if magnitude != 0.0 && !(1e-6..1e21).contains(&magnitude) {
+        format!("{value:e}")
+    } else {
+        value.to_string()
     }
 }
 
@@ -110,7 +123,7 @@ impl std::fmt::Display for DbError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Connect(why) => write!(f, "cannot connect: {why}"),
-            Self::Lost(why) => write!(f, "connection lost: {why}"),
+            Self::Lost(why) => write!(f, "connection lost: {why}; the next run connects again"),
             Self::Config(why) => f.write_str(why),
             Self::Query {
                 message,
@@ -158,6 +171,10 @@ mod tests {
         assert_eq!(Cell::Bool(false).display(), "false");
         assert_eq!(Cell::Int(-42).display(), "-42");
         assert_eq!(Cell::Float(1.5).display(), "1.5");
+        assert_eq!(Cell::Float(12_345.678).display(), "12345.678");
+        assert_eq!(Cell::Float(1e-300).display(), "1e-300");
+        assert_eq!(Cell::Float(-1.79e308).display(), "-1.79e308");
+        assert_eq!(Cell::Float(f64::NAN).display(), "NaN");
         assert_eq!(Cell::Decimal("10.2500".to_owned()).display(), "10.2500");
         assert_eq!(Cell::Text("hello".to_owned()).display(), "hello");
         assert_eq!(Cell::Bytes(vec![0x00, 0x0f, 0xff]).display(), "0x000fff");
@@ -197,7 +214,7 @@ mod tests {
         );
         assert_eq!(
             DbError::Lost("Connection reset by peer".to_owned()).to_string(),
-            "connection lost: Connection reset by peer"
+            "connection lost: Connection reset by peer; the next run connects again"
         );
         assert_eq!(
             DbError::Config("reading $NOPE".to_owned()).to_string(),

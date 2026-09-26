@@ -93,9 +93,17 @@ struct Start {
 
 /// One query in flight: where its events arrive, what is still to run after
 /// it, and what it has cost so far.
+///
+/// A tab's worker holds one request at a time. A query and a catalog load
+/// are never both with it: a cancel is one flag per connection, so Esc
+/// would stop whatever was queued behind the query too — the index a
+/// connect asked for, say — and a load sent while Esc's flag was still up
+/// would clear it before the query saw it.
 #[derive(Debug)]
 struct Running {
-    events: Receiver<QueryEvent>,
+    /// `None` while the catalog load ahead of it has the worker.
+    events: Option<Receiver<QueryEvent>>,
+    sql: String,
     /// The statements of a run-all still to come, in order.
     rest: Vec<String>,
     statement: usize,
@@ -242,8 +250,27 @@ impl Runtime {
     pub fn run(&mut self, app: &mut App, tab: usize, request: Pending) {
         if self.connection(tab).is_some() {
             self.start(app, tab, request);
-        } else {
-            self.connect(app, tab);
+            return;
+        }
+        self.connect(app, tab);
+        if self
+            .tabs
+            .get(tab)
+            .is_some_and(|runtime| runtime.pending.is_some())
+        {
+            // Running from the key on, so that Esc has something to cancel
+            // while the connection it waits for comes up.
+            let of = match &request {
+                Pending::Statement(_) => 1,
+                Pending::All(statements) => statements.len(),
+            };
+            app.apply(RuntimeEvent::QueryStarted {
+                tab,
+                at: Instant::now(),
+                statement: 0,
+                of,
+                keep_view: false,
+            });
             self.queue(app, tab, request);
         }
     }
@@ -284,6 +311,7 @@ impl Runtime {
             of,
             keep_view,
         } = start;
+        let max_rows = self.max_rows;
         let Some(runtime) = self.tabs.get_mut(tab) else {
             return;
         };
@@ -292,6 +320,11 @@ impl Runtime {
             // behind the first, and the first's rows would be taken for its.
             app.shell.status = "Esc cancels the running query".to_owned();
             return;
+        }
+        // `m` raised the cap for the statement it ran again, not for every
+        // statement after it.
+        if statement == 0 && !keep_view {
+            runtime.cap = max_rows;
         }
         let Some(connection) = runtime.connection.as_ref() else {
             // Disconnected between the key and the turn: say so rather than
@@ -302,17 +335,15 @@ impl Runtime {
             });
             return;
         };
-        let events = connection.query(
-            &sql,
-            QueryOptions {
-                batch_size: BATCH,
-                max_rows: Some(runtime.cap),
-            },
-        );
+        let events = runtime
+            .catalog
+            .is_none()
+            .then(|| send(connection, &sql, runtime.cap));
         let started = Instant::now();
-        runtime.last = Some(sql);
+        runtime.last = Some(sql.clone());
         runtime.running = Some(Running {
             events,
+            sql,
             rest,
             statement,
             of,
@@ -339,9 +370,10 @@ impl Runtime {
             let mut finished = false;
             if let Some(runtime) = self.tabs.get_mut(tab)
                 && let Some(running) = runtime.running.as_mut()
+                && let Some(events) = running.events.as_ref()
             {
                 loop {
-                    let event = match running.events.try_recv() {
+                    let event = match events.try_recv() {
                         Ok(event) => event,
                         Err(TryRecvError::Empty) => break,
                         // Only a panicked worker ends the channel without
@@ -360,7 +392,16 @@ impl Runtime {
                             running.first_batch =
                                 running.first_batch.or(Some(running.started.elapsed()));
                         }
-                        QueryEvent::Done { .. } => finished = true,
+                        QueryEvent::Done { reset, .. } => {
+                            finished = true;
+                            // The row cap ended the session: what came after
+                            // was written for the one that is gone — its
+                            // `use`, its transaction — so it is not run in a
+                            // new one.
+                            if *reset {
+                                running.rest.clear();
+                            }
+                        }
                         QueryEvent::Error(_) => {
                             finished = true;
                             // A statement that failed stops the run: the
@@ -406,8 +447,11 @@ impl Runtime {
             if finished && let Some(runtime) = self.tabs.get_mut(tab) {
                 runtime.running = None;
             }
-            if let Some(start) = next {
-                self.begin(app, tab, start);
+            match next {
+                Some(start) => self.begin(app, tab, start),
+                // The tree's loads waited for the run; the worker is theirs.
+                None if finished => self.next_load(tab),
+                None => {}
             }
         }
         dirty
@@ -431,11 +475,22 @@ impl Runtime {
             return;
         }
         app.catalog_started(tab, &request);
-        if runtime.catalog.is_some() {
-            runtime.waiting.push_back(request);
+        runtime.waiting.push_back(request);
+        self.next_load(tab);
+    }
+
+    /// The next catalog load that is waiting, if the worker has nothing:
+    /// see [`Running`] for why a load never goes to it beside a query.
+    fn next_load(&mut self, tab: usize) {
+        let Some(runtime) = self.tabs.get_mut(tab) else {
             return;
+        };
+        if runtime.catalog.is_none()
+            && runtime.running.is_none()
+            && let Some(request) = runtime.waiting.pop_front()
+        {
+            self.begin_load(tab, request);
         }
-        self.begin_load(tab, request);
     }
 
     /// Hand one catalog query to the driver.
@@ -505,7 +560,14 @@ impl Runtime {
             };
             dirty = true;
             let request = runtime.catalog.take().map(|loading| loading.request);
-            let next = runtime.waiting.pop_front();
+            // A query that waited for this load goes next, ahead of the
+            // loads behind it.
+            if let (Some(running), Some(connection)) =
+                (runtime.running.as_mut(), runtime.connection.as_ref())
+                && running.events.is_none()
+            {
+                running.events = Some(send(connection, &running.sql, runtime.cap));
+            }
             if let Some(request) = request {
                 app.apply(RuntimeEvent::Catalog {
                     tab,
@@ -513,22 +575,45 @@ impl Runtime {
                     result,
                 });
             }
-            if let Some(next) = next {
-                self.begin_load(tab, next);
-            }
+            self.next_load(tab);
         }
         dirty
     }
 
     /// Esc: stop the query this tab is running. The driver answers with
     /// [`db::model::DbError::Cancelled`] through the channel it is already
-    /// reporting on, so nothing else has to be unwound here.
-    pub fn cancel(&mut self, tab: usize) {
-        if let Some(runtime) = self.tabs.get(tab)
-            && runtime.running.is_some()
-            && let Some(connection) = runtime.connection.as_ref()
+    /// reporting on, so nothing else has to be unwound here — unless the
+    /// query is still waiting for its turn, and then nothing was sent.
+    pub fn cancel(&mut self, app: &mut App, tab: usize) {
+        let Some(runtime) = self.tabs.get_mut(tab) else {
+            return;
+        };
+        // Still waiting for its connection: it is simply not run.
+        if runtime.queued.take().is_some() {
+            app.apply(RuntimeEvent::Query {
+                tab,
+                event: QueryEvent::Error(db::model::DbError::Cancelled),
+            });
+            return;
+        }
+        match runtime
+            .running
+            .as_ref()
+            .map(|running| running.events.is_some())
         {
-            connection.cancel();
+            Some(true) => {
+                if let Some(connection) = runtime.connection.as_ref() {
+                    connection.cancel();
+                }
+            }
+            Some(false) => {
+                runtime.running = None;
+                app.apply(RuntimeEvent::Query {
+                    tab,
+                    event: QueryEvent::Error(db::model::DbError::Cancelled),
+                });
+            }
+            None => {}
         }
     }
 
@@ -621,6 +706,17 @@ impl Drop for Runtime {
             close(tab.connection.take());
         }
     }
+}
+
+/// A statement to the worker, fetched to the tab's row cap.
+fn send(connection: &Connection, sql: &str, cap: usize) -> Receiver<QueryEvent> {
+    connection.query(
+        sql,
+        QueryOptions {
+            batch_size: BATCH,
+            max_rows: Some(cap),
+        },
+    )
 }
 
 /// Drops a connection on a thread of its own. Dropping one cancels its query
@@ -750,6 +846,33 @@ mod tests {
             assert_eq!(app.tabs[0].state, TabState::Disconnected);
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    /// Esc on a statement that is still waiting for its connection is that
+    /// statement never running — not running the moment the login lands.
+    #[test]
+    fn esc_drops_a_statement_still_waiting_for_its_connection() {
+        let mut config = refused("s3cret");
+        config.connections[0].password = Some(Password::Command("sleep 1".to_owned()));
+        let mut app = App::new(&config);
+        let mut runtime = Runtime::new(&config);
+        runtime.run(&mut app, 0, Pending::Statement("delete from t".to_owned()));
+        assert!(app.tabs[0].results.running(), "Esc has something to cancel");
+        assert_eq!(app.shell.status, "connecting… then running");
+        runtime.cancel(&mut app, 0);
+        assert_eq!(runtime.queued(0), None);
+        assert!(
+            matches!(
+                app.tabs[0].results.status,
+                crate::app::results::Status::Failed {
+                    error: crate::db::model::DbError::Cancelled,
+                    ..
+                }
+            ),
+            "{:?}",
+            app.tabs[0].results.status
+        );
+        settle(&mut runtime, &mut app);
     }
 
     #[test]

@@ -93,6 +93,8 @@ pub fn export_path(connection: &str) -> String {
     let now = time::OffsetDateTime::now_utc()
         .format(&stamp)
         .unwrap_or_default();
+    // A connection called `prod/reporting` is a name, not a directory.
+    let connection = connection.replace(['/', '\\'], "_");
     format!("~/sql-bench-{connection}-{now}.csv")
 }
 
@@ -156,6 +158,12 @@ mod tests {
         assert_eq!(prompt.cursor, 2);
         prompt.place(40);
         assert_eq!(prompt.cursor, 6, "past the end is the end");
+    }
+
+    #[test]
+    fn a_connection_named_like_a_path_is_one_file_name_in_the_prefill() {
+        let path = export_path("prod/reporting");
+        assert!(path.starts_with("~/sql-bench-prod_reporting-"), "{path}");
     }
 
     #[test]

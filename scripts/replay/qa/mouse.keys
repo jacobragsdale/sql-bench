@@ -208,11 +208,13 @@ resize 100x30
 expect ╭ Objects ──────── / Filter ─╮╭ Scratch
 expect │   1  Zo
 
-# The track below the thumb is PageDown; dragging the thumb to the bottom
-# shows the last row.
+# The track below the thumb is PageDown, which moves the view a page with
+# the cursor; dragging the thumb, now rows 18-20, to the bottom shows the
+# last row.
 click 99 25
 expect-not │   1  Zo
-drag 99 16 99 27
+expect │  11  Zo
+drag 99 19 99 27
 expect customer50@example.com
 
 # Dragging a seam moves the border between the panes; a double-click puts

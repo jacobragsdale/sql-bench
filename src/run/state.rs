@@ -59,18 +59,32 @@ impl Store {
     }
 
     /// Fill every tab's pad from its file. A pad with no file is empty, and
-    /// a file that cannot be read is not worth stopping a run over: the
-    /// message goes to the footer once the app is up.
+    /// a file that cannot be read is not worth stopping a run over: what to
+    /// say about it goes to the footer once the app is up.
     pub fn restore(&self, app: &mut App) -> Option<String> {
         let mut failed = None;
         for tab in &mut app.tabs {
             let Some(path) = self.path(&tab.name) else {
                 continue;
             };
-            match std::fs::read_to_string(&path) {
-                Ok(text) => tab.scratch = Scratch::new(&text),
+            match std::fs::read(&path) {
+                // Bytes that are not UTF-8 come in as `�` rather than
+                // leaving the pad empty, which the next save would write
+                // over everything else in the file with.
+                Ok(bytes) => {
+                    let text = String::from_utf8_lossy(&bytes);
+                    if matches!(text, std::borrow::Cow::Owned(_)) {
+                        failed = Some(format!(
+                            "scratch {} is not UTF-8: what was not reads as �",
+                            path.display()
+                        ));
+                    }
+                    tab.scratch = Scratch::new(&text);
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => failed = Some(format!("{}: {error}", path.display())),
+                Err(error) => {
+                    failed = Some(format!("scratch not loaded: {}: {error}", path.display()));
+                }
             }
         }
         failed
@@ -85,8 +99,12 @@ impl Store {
         std::fs::create_dir_all(directory)
             .with_context(|| format!("creating {}", directory.display()))?;
         let text = tab.scratch.text();
-        std::fs::write(&path, format!("{text}\n"))
-            .with_context(|| format!("writing {}", path.display()))
+        // Beside it and then renamed over it, so a run killed half way
+        // through a save leaves the last whole pad rather than part of this.
+        let partial = path.with_extension("sql.partial");
+        std::fs::write(&partial, format!("{text}\n"))
+            .with_context(|| format!("writing {}", partial.display()))?;
+        std::fs::rename(&partial, &path).with_context(|| format!("writing {}", path.display()))
     }
 }
 
@@ -119,6 +137,24 @@ mod tests {
     }
 
     #[test]
+    fn a_pad_that_is_not_utf8_still_comes_back_rather_than_being_saved_over() {
+        let directory = tempfile::tempdir().expect("a directory");
+        let store = Store::new(Some(directory.path().to_path_buf()));
+        let path = store.path("local-mssql").expect("a path");
+        std::fs::create_dir_all(path.parent().expect("a directory")).expect("the directory");
+        std::fs::write(&path, b"select 'Zo\xeb'\nfrom t\n").expect("a Latin-1 pad");
+        let mut app = two_tabs();
+        let said = store.restore(&mut app).expect("a word about it");
+        assert!(said.contains("not UTF-8"), "{said}");
+        assert_eq!(app.tabs[0].scratch.text(), "select 'Zo\u{fffd}'\nfrom t");
+        store.save(&app.tabs[0]).expect("saved");
+        assert!(
+            !path.with_extension("sql.partial").exists(),
+            "renamed into place"
+        );
+    }
+
+    #[test]
     fn a_connection_named_like_a_path_is_never_saved_outside_the_state_directory() {
         let store = Store::new(Some(PathBuf::from("/state")));
         assert_eq!(
@@ -126,9 +162,18 @@ mod tests {
             Some(PathBuf::from("/state/scratch/local mssql.sql")),
             "a space is part of a name, not a reason to rename the file"
         );
-        for name in ["../../etc/passwd", "a/b", ".hidden", ""] {
-            assert_eq!(store.path(name), None, "{name} is not a file name");
+        for (name, file) in [
+            ("../../etc/passwd", "%2E.%2F..%2Fetc%2Fpasswd.sql"),
+            ("prod/reporting", "prod%2Freporting.sql"),
+            (".hidden", "%2Ehidden.sql"),
+        ] {
+            assert_eq!(
+                store.path(name),
+                Some(PathBuf::from("/state/scratch").join(file)),
+                "{name} is one file in the directory, and still saved"
+            );
         }
+        assert_eq!(store.path(""), None);
         assert_eq!(Store::new(None).path("local-mssql"), None);
     }
 }

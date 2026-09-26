@@ -689,12 +689,86 @@ fn rows(connection: &Connection, sql: &str) -> Result<Vec<Vec<Cell>>, DbError> {
     Ok(rows)
 }
 
+/// `schema.name`, each part quoted where it has to be for the server to
+/// read it back as the object it names.
+#[must_use]
+pub fn qualified(backend: Kind, schema: &str, name: &str) -> String {
+    format!(
+        "{}.{}",
+        identifier(backend, schema),
+        identifier(backend, name)
+    )
+}
+
+/// A name as it has to be written: as it is when it reads back the same,
+/// quoted when a space, a reserved word or — on Oracle, which folds what is
+/// not quoted to upper case — a lower-case letter would change what it
+/// meant. Quoting only then keeps `bench.customers` as a person writes it.
+#[must_use]
+pub fn identifier(backend: Kind, name: &str) -> std::borrow::Cow<'_, str> {
+    let (reserved, others, open, close) = match backend {
+        Kind::Mssql => (MSSQL_RESERVED, "_@$#", '[', ']'),
+        Kind::Oracle => (ORACLE_RESERVED, "_$#", '"', '"'),
+    };
+    let plain = name.starts_with(|first: char| {
+        first.is_alphabetic() || (first == '_' && backend == Kind::Mssql)
+    }) && name
+        .chars()
+        .all(|character| character.is_alphanumeric() || others.contains(character))
+        && (backend == Kind::Mssql || name.to_uppercase() == name)
+        && !reserved
+            .split_whitespace()
+            .any(|word| word.eq_ignore_ascii_case(name));
+    if plain {
+        return std::borrow::Cow::Borrowed(name);
+    }
+    let escaped = name.replace(close, &format!("{close}{close}"));
+    std::borrow::Cow::Owned(format!("{open}{escaped}{close}"))
+}
+
+/// The words `Reserved Keywords (Transact-SQL)` lists: a table called one
+/// of them is `[order]` or a syntax error.
+const MSSQL_RESERVED: &str = "ADD ALL ALTER AND ANY AS ASC AUTHORIZATION BACKUP BEGIN \
+    BETWEEN BREAK BROWSE BULK BY CASCADE CASE CHECK CHECKPOINT CLOSE CLUSTERED COALESCE \
+    COLLATE COLUMN COMMIT COMPUTE CONSTRAINT CONTAINS CONTAINSTABLE CONTINUE CONVERT CREATE \
+    CROSS CURRENT CURRENT_DATE CURRENT_TIME CURRENT_TIMESTAMP CURRENT_USER CURSOR DATABASE \
+    DBCC DEALLOCATE DECLARE DEFAULT DELETE DENY DESC DISK DISTINCT DISTRIBUTED DOUBLE DROP \
+    DUMP ELSE END ERRLVL ESCAPE EXCEPT EXEC EXECUTE EXISTS EXIT EXTERNAL FETCH FILE \
+    FILLFACTOR FOR FOREIGN FREETEXT FREETEXTTABLE FROM FULL FUNCTION GOTO GRANT GROUP HAVING \
+    HOLDLOCK IDENTITY IDENTITY_INSERT IDENTITYCOL IF IN INDEX INNER INSERT INTERSECT INTO IS \
+    JOIN KEY KILL LEFT LIKE LINENO LOAD MERGE NATIONAL NOCHECK NONCLUSTERED NOT NULL NULLIF \
+    OF OFF OFFSETS ON OPEN OPENDATASOURCE OPENQUERY OPENROWSET OPENXML OPTION OR ORDER OUTER \
+    OVER PERCENT PIVOT PLAN PRECISION PRIMARY PRINT PROC PROCEDURE PUBLIC RAISERROR READ \
+    READTEXT RECONFIGURE REFERENCES REPLICATION RESTORE RESTRICT RETURN REVERT REVOKE RIGHT \
+    ROLLBACK ROWCOUNT ROWGUIDCOL RULE SAVE SCHEMA SECURITYAUDIT SELECT \
+    SEMANTICKEYPHRASETABLE SEMANTICSIMILARITYDETAILSTABLE SEMANTICSIMILARITYTABLE \
+    SESSION_USER SET SETUSER SHUTDOWN SOME STATISTICS SYSTEM_USER TABLE TABLESAMPLE TEXTSIZE \
+    THEN TO TOP TRAN TRANSACTION TRIGGER TRUNCATE TRY_CONVERT TSEQUAL UNION UNIQUE UNPIVOT \
+    UPDATE UPDATETEXT USE USER VALUES VARYING VIEW WAITFOR WHEN WHERE WHILE WITH WITHIN \
+    WRITETEXT";
+
+/// Oracle's own list, `Oracle SQL Reserved Words`.
+const ORACLE_RESERVED: &str = "ACCESS ADD ALL ALTER AND ANY AS ASC AUDIT BETWEEN BY CHAR \
+    CHECK CLUSTER COLUMN COLUMN_VALUE COMMENT COMPRESS CONNECT CREATE CURRENT DATE DECIMAL \
+    DEFAULT DELETE DESC DISTINCT DROP ELSE EXCLUSIVE EXISTS FILE FLOAT FOR FROM GRANT GROUP \
+    HAVING IDENTIFIED IMMEDIATE IN INCREMENT INDEX INITIAL INSERT INTEGER INTERSECT INTO IS \
+    LEVEL LIKE LOCK LONG MAXEXTENTS MINUS MLSLABEL MODE MODIFY NESTED_TABLE_ID NOAUDIT \
+    NOCOMPRESS NOT NOWAIT NULL NUMBER OF OFFLINE ON ONLINE OPTION OR ORDER PCTFREE PRIOR \
+    PUBLIC RAW RENAME RESOURCE REVOKE ROW ROWID ROWNUM ROWS SELECT SESSION SET SHARE SIZE \
+    SMALLINT START SUCCESSFUL SYNONYM SYSDATE TABLE THEN TO TRIGGER UID UNION UNIQUE UPDATE \
+    USER VALIDATE VALUES VARCHAR VARCHAR2 VIEW WHENEVER WHERE WITH";
+
 /// A SQL string literal: the only way a quote gets into one is doubled.
 fn quoted(text: &str) -> String {
     format!("'{}'", text.replace('\'', "''"))
 }
 
+/// `'a', 'b'` for an `in (…)`; none at all is `NULL`, which matches
+/// nothing where `in ()` would not even parse — SQL Server has no packages.
 fn list(values: &[&str]) -> String {
+    if values.is_empty() {
+        return "NULL".to_owned();
+    }
     values
         .iter()
         .map(|value| quoted(value))
@@ -788,6 +862,30 @@ mod tests {
         assert_eq!(quoted("bench"), "'bench'");
         assert_eq!(quoted("o'brien"), "'o''brien'");
         assert_eq!(quoted("'; drop table x --"), "'''; drop table x --'");
+    }
+
+    #[test]
+    fn a_kind_sql_server_does_not_have_asks_for_nothing_in_sql_it_can_parse() {
+        let sql = objects_sql(Kind::Mssql, None, Some(ObjectKind::Package));
+        assert!(sql.contains("rtrim(o.type) in (NULL)"), "{sql}");
+    }
+
+    #[test]
+    fn a_name_is_quoted_only_where_it_would_not_read_back_the_same() {
+        let mssql = |schema, name| qualified(Kind::Mssql, schema, name);
+        assert_eq!(mssql("bench", "customers"), "bench.customers");
+        assert_eq!(mssql("dbo", "_Staging2$"), "dbo._Staging2$");
+        assert_eq!(mssql("dbo", "order details"), "dbo.[order details]");
+        assert_eq!(mssql("dbo", "User"), "dbo.[User]", "a reserved word");
+        assert_eq!(mssql("My Schema", "a]b"), "[My Schema].[a]]b]");
+        assert_eq!(mssql("dbo", "2020_sales"), "dbo.[2020_sales]");
+        let oracle = |schema, name| qualified(Kind::Oracle, schema, name);
+        assert_eq!(oracle("BENCH", "CUSTOMERS"), "BENCH.CUSTOMERS");
+        assert_eq!(oracle("BENCH", "ORDER$HIST#1"), "BENCH.ORDER$HIST#1");
+        assert_eq!(oracle("BENCH", "MixedCase"), "BENCH.\"MixedCase\"");
+        assert_eq!(oracle("BENCH", "has space"), "BENCH.\"has space\"");
+        assert_eq!(oracle("BENCH", "ORDER"), "BENCH.\"ORDER\"");
+        assert_eq!(oracle("BENCH", "_X"), "BENCH.\"_X\"");
     }
 
     #[test]

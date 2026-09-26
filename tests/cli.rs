@@ -273,3 +273,70 @@ fn a_source_takes_quoted_names_and_starts_at_its_first_line() {
         &stdout[..stdout.len().min(80)]
     );
 }
+
+/// Like [`sql_bench`], with the statement on stdin.
+fn sql_bench_stdin(arguments: &[&str], stdin: &[u8]) -> Output {
+    use std::io::Write as _;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_sql-bench"))
+        .args(arguments)
+        .env(
+            "SQL_BENCH_CONFIG",
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("config.local.toml"),
+        )
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the binary this test was built alongside");
+    child
+        .stdin
+        .take()
+        .expect("a pipe")
+        .write_all(stdin)
+        .expect("written");
+    child.wait_with_output().expect("an exit")
+}
+
+#[test]
+fn notes_on_their_own_are_no_statement_and_are_refused_before_connecting() {
+    let output = sql_bench_stdin(&["query", "--conn", "local-mssql", "-"], b"-- nothing\n;\n");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr(&output).contains("no statement given"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn the_statement_is_sent_as_written_tabs_in_its_literals_and_all() {
+    if std::env::var_os("SQL_BENCH_TEST_DBS").is_none() {
+        eprintln!("skipped: set SQL_BENCH_TEST_DBS=1 with the containers up");
+        return;
+    }
+    let output = sql_bench_stdin(
+        &["query", "--conn", "local-mssql", "--format", "csv", "-"],
+        b"\xef\xbb\xbfselect len('a\tb') as n",
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "n\n3\n");
+}
+
+#[test]
+fn a_scan_the_cap_cut_short_on_sql_server_stops_the_script_there() {
+    if std::env::var_os("SQL_BENCH_TEST_DBS").is_none() {
+        eprintln!("skipped: set SQL_BENCH_TEST_DBS=1 with the containers up");
+        return;
+    }
+    let output = sql_bench_stdin(
+        &["query", "--conn", "local-mssql", "--max-rows", "1", "-"],
+        b"select name from sys.objects;\nselect db_name() as db;\n",
+    );
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("statement 1: --max-rows cut its scan short"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(output.stdout.is_empty());
+}

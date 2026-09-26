@@ -44,6 +44,30 @@ fn the_tab_showing_is_the_accented_one() {
     assert_eq!(painted(&terminal, 18, 0), theme.accent);
 }
 
+/// A tab past the bar's end used to stay there, even the one showing.
+#[test]
+fn the_bar_starts_late_enough_to_show_the_active_tab() {
+    let mut config = crate::app::tests::two_connections();
+    let first = config.connections[0].clone();
+    config.connections = (1..=10)
+        .map(|n| crate::config::Connection {
+            name: format!("warehouse-{n:02}"),
+            ..first.clone()
+        })
+        .collect();
+    let mut app = App::new(&config);
+    let terminal = frame(60, 20, &app);
+    assert!(line(&terminal, 0).starts_with(" 1 warehouse-01 ○  2 warehouse-02 ○"));
+
+    app.shell.active_tab = 9;
+    let terminal = frame(60, 20, &app);
+    assert_eq!(
+        line(&terminal, 0),
+        "… 8 warehouse-08 ○  9 warehouse-09 ○  10 warehouse-10 ○"
+    );
+    assert_eq!(painted(&terminal, 40, 0), Theme::new(false).accent);
+}
+
 #[test]
 fn the_three_panes_are_titled_placeholders() {
     let terminal = frame(120, 40, &two_tabs());

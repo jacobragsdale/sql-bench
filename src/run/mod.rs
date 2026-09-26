@@ -32,7 +32,7 @@ use ratatui::backend::Backend;
 
 use crate::app::pointer::Hits;
 use crate::app::results::counted;
-use crate::app::{Action, App, SPIN_EVERY};
+use crate::app::{Action, App};
 use crate::cli::Cli;
 use crate::config::Config;
 use crate::export;
@@ -48,7 +48,7 @@ use crate::ui::theme::Theme;
 const DRAIN_LIMIT: Duration = Duration::from_millis(50);
 
 /// How long the loop waits for input before taking a turn with none. While
-/// something is connecting the wait is [`SPIN_EVERY`] instead, because the
+/// something is connecting the wait is [`BUSY_POLL`] instead, because the
 /// spinner has to move even when nobody is typing.
 const IDLE_TIMEOUT: Duration = Duration::from_millis(250);
 
@@ -61,6 +61,12 @@ const SETTLE_POLL: Duration = Duration::from_millis(100);
 /// How long the loop waits for input while a paste is being read: the
 /// answer is a few milliseconds away and is drawn as soon as it lands.
 const PASTE_POLL: Duration = Duration::from_millis(10);
+
+/// How long the loop waits for input while a query, a load or a connect is
+/// out. Their answers come over channels this wait cannot see, so it is how
+/// late one can be drawn — and how long a run-all waits between statements.
+/// The spinner still moves at [`SPIN_EVERY`]; this only wakes the loop.
+const BUSY_POLL: Duration = Duration::from_millis(5);
 
 /// How long the input thread waits for the terminal before it looks again at
 /// whether the editor wants it, which is how long Ctrl-E can take to start.
@@ -318,13 +324,15 @@ pub fn run(config: &Config, args: &Cli, panic_after: Option<Duration>) -> Result
     )
 }
 
-/// Narrows the panic hook `try_init` installed to the loop's own thread.
+/// Narrows the panic hook — `try_init`'s, or the default printing one when
+/// there is no terminal to give back — to the main thread.
 ///
-/// A worker that panics is already an error the loop shows — the channel it
-/// was answering on ends — so giving the terminal back for it would leave the
-/// loop drawing over the shell. Its panic goes to the trace instead, because
-/// a message printed over the screen is one nobody can read.
-fn restore_only_from_main() {
+/// A worker that panics is already an error the app shows: the query it was
+/// running fails, or the channel it was answering on ends. Giving the
+/// terminal back for it would leave the loop drawing over the shell, and
+/// printing it would put a driver's source path in front of that error. Its
+/// panic goes to the trace instead.
+pub fn restore_only_from_main() {
     let restoring = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let thread = std::thread::current();
@@ -520,7 +528,7 @@ impl Driver {
     /// Fill every tab's pad from its file, before the first frame.
     pub fn restore_scratch(&self, app: &mut App) {
         if let Some(why) = self.store.restore(app) {
-            app.shell.error = Some(format!("scratch not loaded: {why}"));
+            app.shell.error = Some(why);
         }
     }
 
@@ -567,6 +575,12 @@ impl Driver {
         for action in app.settle(Instant::now()) {
             self.act(terminal, app, action)?;
         }
+        for tab in &mut app.tabs {
+            let old = tab.results.discarded();
+            if !old.is_empty() {
+                std::thread::spawn(move || drop(old));
+            }
+        }
         // A running query animates its title the way a connecting tab
         // animates its mark, so both keep the loop ticking.
         let spinning = app.busy();
@@ -574,7 +588,10 @@ impl Driver {
         let mut drew = Duration::ZERO;
         if self.dirty {
             let at = Instant::now();
-            terminal.draw(|frame| self.hits = ui::render(frame, app, &self.theme))?;
+            let area = terminal
+                .draw(|frame| self.hits = ui::render(frame, app, &self.theme))?
+                .area;
+            app.shell.size = area.as_size();
             app.drawn(&self.hits);
             self.dirty = false;
             drew = at.elapsed();
@@ -590,10 +607,12 @@ impl Driver {
         // A pad that owes the disk a save keeps the loop turning too, because
         // the save is due half a second after a key and not at the next one;
         // so does a paste still being read, whose answer nobody types for.
+        // Busy is asked again: the connects just started are busy too.
+        let spinning = app.busy();
         let settling = app.settling() || self.pasting > 0;
         let timeout = match (spinning, settling) {
+            (true, _) => BUSY_POLL,
             (_, true) if self.pasting > 0 => PASTE_POLL,
-            (true, _) => SPIN_EVERY,
             (false, true) => SETTLE_POLL,
             (false, false) => IDLE_TIMEOUT,
         };
@@ -732,7 +751,7 @@ impl Driver {
             Action::RunAll { tab, statements } => {
                 self.runtime.run(app, tab, Pending::All(statements));
             }
-            Action::Cancel(tab) => self.runtime.cancel(tab),
+            Action::Cancel(tab) => self.runtime.cancel(app, tab),
             Action::MoreRows { tab } => self.runtime.more_rows(app, tab),
             Action::OpenEditor { tab } => self.open_editor(terminal, app, tab)?,
             Action::SaveScratch { tab } => self.save_scratch(app, tab),
@@ -823,6 +842,9 @@ impl Driver {
     ///
     /// Every row that was fetched goes, not the ones on screen — and the cap
     /// that stopped the scan is still the cap, which is what the title says.
+    // ponytail: the file is built whole and written on the loop — 130 ms
+    // (CSV) to 280 ms (JSON) and as many MB at a million rows, 1-3 ms at the
+    // default cap. A worker over shared rows if exports that size are usual.
     fn export(&mut self, app: &mut App, tab: usize, path: &str) {
         let Some(open) = app.tabs.get(tab) else {
             return;

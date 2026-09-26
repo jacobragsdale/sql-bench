@@ -68,7 +68,13 @@ impl Backend {
             password: password.unwrap_or_default(),
             connect_string: format!(
                 "//{}:{}/{}?connect_timeout={CONNECT_TIMEOUT_SECS}",
-                spec.host,
+                // `::1` would read as a host and two ports; brackets are how
+                // Easy Connect takes an IPv6 address.
+                if spec.host.contains(':') && !spec.host.starts_with('[') {
+                    format!("[{}]", spec.host)
+                } else {
+                    spec.host.clone()
+                },
                 spec.port,
                 spec.service.as_deref().unwrap_or_default(),
             ),
@@ -88,9 +94,20 @@ impl Backend {
         }
         sink.connected(super::millis(connecting));
 
+        // `select … for update` locks the rows it reads, and the commit an
+        // autocommit execute makes at once would end the cursor they are
+        // read through: ORA-01002 past the first batch. So it commits once
+        // it has been read, which lets the locks go all the same.
+        let locking = locks_rows(sql);
+        if locking && let Some(driver) = self.driver.as_mut().and_then(Arc::get_mut) {
+            driver.set_autocommit(false);
+        }
         let driver = Arc::clone(self.driver.as_ref().expect("a connect leaves a driver"));
         let watch = Watch::start(&driver, sink.flag());
-        let outcome = execute(&driver, sql, sink);
+        let mut outcome = execute(&driver, sql, sink);
+        if locking {
+            outcome = outcome.and_then(|()| driver.commit().map_err(|why| failure(&why, sql)));
+        }
         if watch.stop() {
             // The break lands in the middle of a round trip, and where OCI
             // leaves the session afterwards is its business, not ours.
@@ -108,10 +125,28 @@ impl Backend {
             Err(DbError::Query { .. }) => driver.ping().is_ok(),
             Err(_) => false,
         };
+        drop(driver);
         if !good {
             self.driver = None;
+            // Then the complaint was the session ending, not the statement's:
+            // no line of it is to blame.
+            if let Err(DbError::Query { message, .. }) = outcome {
+                outcome = Err(DbError::Lost(message));
+            }
+        } else if locking && let Some(driver) = self.driver.as_mut().and_then(Arc::get_mut) {
+            // A failed one leaves its locks to this rollback, not to the
+            // next statement's commit.
+            if outcome.is_err() {
+                let _ = driver.rollback();
+            }
+            driver.set_autocommit(true);
         }
         outcome
+    }
+
+    /// Drop the session, mid-answer or not; the next query connects again.
+    pub(super) fn reset(&mut self) {
+        self.driver = None;
     }
 
     fn connect(&mut self) -> Result<(), DbError> {
@@ -148,21 +183,28 @@ fn init(dir: Option<PathBuf>) -> Result<(), DbError> {
 
 fn load(dir: Option<PathBuf>) -> Result<(), DbError> {
     let mut params = InitParams::new();
+    let looked = dir.as_ref().map(|dir| dir.display().to_string());
     if let Some(dir) = dir {
-        params.oracle_client_lib_dir(dir).map_err(|_| no_client())?;
+        params
+            .oracle_client_lib_dir(dir)
+            .map_err(|_| no_client(looked.as_deref()))?;
     }
-    params.init().map_err(|_| no_client())?;
+    params.init().map_err(|_| no_client(looked.as_deref()))?;
     Ok(())
 }
 
 /// ODPI-C's own complaint names a C header and a documentation URL, neither
 /// of which tells anyone here what to do about it.
-fn no_client() -> DbError {
-    DbError::Connect(
-        "Oracle client library not found; set [oracle] client_lib_dir or \
-         SQL_BENCH_ORACLE_CLIENT_DIR (see README)"
+fn no_client(looked: Option<&str>) -> DbError {
+    DbError::Connect(match looked {
+        Some(dir) => format!(
+            "Oracle client library not found in {dir}; set [oracle] client_lib_dir or \
+             SQL_BENCH_ORACLE_CLIENT_DIR to where it is (see README)"
+        ),
+        None => "Oracle client library not found; set [oracle] client_lib_dir or \
+                 SQL_BENCH_ORACLE_CLIENT_DIR (see README)"
             .to_owned(),
-    )
+    })
 }
 
 /// The cancel flag turned into an OCI break. The worker thread is blocked
@@ -262,6 +304,15 @@ fn execute(driver: &Driver, sql: &str, sink: &mut Sink) -> Result<(), DbError> {
     Ok(())
 }
 
+/// Whether a query takes locks as it reads: `for update`, whatever follows.
+fn locks_rows(sql: &str) -> bool {
+    let lower = sql.to_ascii_lowercase();
+    let words: Vec<&str> = lower.split_whitespace().collect();
+    words
+        .windows(2)
+        .any(|pair| pair[0] == "for" && pair[1].starts_with("update"))
+}
+
 /// Oracle takes one statement and no terminator: a `;` after it is ORA-00933
 /// on 19c and earlier, and 23ai only tolerates it. Editors write one anyway,
 /// so one comes off — but not off PL/SQL, a block or a `CREATE` of a stored
@@ -276,7 +327,10 @@ fn statement(sql: &str) -> &str {
 }
 
 fn is_plsql(sql: &str) -> bool {
-    let first = sql.split_whitespace().next().unwrap_or_default();
+    let first = super::code_start(sql)
+        .split_whitespace()
+        .next()
+        .unwrap_or_default();
     first.eq_ignore_ascii_case("begin")
         || first.eq_ignore_ascii_case("declare")
         || created(sql).is_some()
@@ -285,7 +339,7 @@ fn is_plsql(sql: &str) -> bool {
 /// What a `CREATE` of stored PL/SQL makes: its type as `ALL_ERRORS` spells
 /// it, where in `sql` that type's keyword starts, and the word that names it.
 fn created(sql: &str) -> Option<(&'static str, usize, &str)> {
-    let mut words = sql.split_whitespace();
+    let mut words = super::code_start(sql).split_whitespace();
     if !words.next()?.eq_ignore_ascii_case("create") {
         return None;
     }
@@ -386,30 +440,38 @@ fn cell(column_type: &OracleType, value: &SqlValue<'_>) -> Result<Cell, DbError>
         OracleType::Int64 => Cell::Int(get(value)?),
         OracleType::Number(..) | OracleType::Float(_) => Cell::Decimal(get(value)?),
         OracleType::BinaryFloat => Cell::Float(super::widen(get(value)?)),
+        // 23ai's BOOLEAN, which reads the way SQL Server's `bit` does.
+        OracleType::Boolean => Cell::Bool(get(value)?),
         OracleType::BinaryDouble => Cell::Float(get(value)?),
         OracleType::Date
         | OracleType::Timestamp(_)
         | OracleType::TimestampTZ(_)
-        | OracleType::TimestampLTZ(_) => Cell::DateTime(get(value)?),
+        | OracleType::TimestampLTZ(_) => Cell::DateTime(year_of_four(get(value)?)),
         OracleType::Raw(_) | OracleType::LongRaw => Cell::Bytes(get(value)?),
         OracleType::CLOB => {
             let mut clob = get::<Clob>(value)?;
             let size = size(&clob)?;
-            text(lob(&mut clob, size, |clob| {
-                clob.seek_in_chars(SeekFrom::Current(0))
-            })?)
+            text(lob(
+                &mut clob,
+                size,
+                |clob| clob.seek_in_chars(SeekFrom::Current(0)),
+                Some(|clob| clob.seek_in_chars(SeekFrom::Current(2))),
+            )?)
         }
         OracleType::NCLOB => {
             let mut nclob = get::<Nclob>(value)?;
             let size = size(&nclob)?;
-            text(lob(&mut nclob, size, |nclob| {
-                nclob.seek_in_chars(SeekFrom::Current(0))
-            })?)
+            text(lob(
+                &mut nclob,
+                size,
+                |nclob| nclob.seek_in_chars(SeekFrom::Current(0)),
+                Some(|nclob| nclob.seek_in_chars(SeekFrom::Current(2))),
+            )?)
         }
         OracleType::BLOB => {
             let mut blob = get::<Blob>(value)?;
             let size = size(&blob)?;
-            Cell::Bytes(lob(&mut blob, size, Seek::stream_position)?.0)
+            Cell::Bytes(lob(&mut blob, size, Seek::stream_position, None)?.0)
         }
         // CHAR, VARCHAR2, NCHAR, NVARCHAR2, LONG, the intervals, ROWID, XML,
         // JSON: the driver's own text, which is the value as the server wrote
@@ -417,6 +479,18 @@ fn cell(column_type: &OracleType, value: &SqlValue<'_>) -> Result<Cell, DbError>
         _ => Cell::Text(get(value)?),
     };
     Ok(cell)
+}
+
+/// The driver writes the year 5 as `5-03-04`: four digits, the way SQL
+/// Server writes it and the way a date sorts as text.
+fn year_of_four(date: String) -> String {
+    let (sign, rest) = date
+        .strip_prefix('-')
+        .map_or(("", date.as_str()), |rest| ("-", rest));
+    match rest.find('-') {
+        Some(digits) if digits < 4 => format!("{sign}{}{rest}", "0".repeat(4 - digits)),
+        _ => date,
+    }
 }
 
 fn get<T: oracle::sql_type::FromSql>(value: &SqlValue<'_>) -> Result<T, DbError> {
@@ -447,27 +521,68 @@ fn text((mut bytes, truncated): (Vec<u8>, bool)) -> Cell {
 /// saves the empty read that would otherwise find the end, a round trip per
 /// cell. A short read is no sign of the end, since a CLOB read stops at
 /// 16,384 characters whatever the buffer.
+///
+/// `past_pair`, a CLOB's, steps over the one character no read can get back.
+/// The prefetch that brought the first [`LOB_PREFETCH`] characters with the
+/// row ends on the first half of an emoji when one straddles its end, and
+/// every read that touches that half fails with ORA-22831. So the first read
+/// stops short of it — a CLOB shorter than that never notices — and when the
+/// next one fails that way the character reads `�` rather than the whole
+/// result being lost to it.
 fn lob<R: Read>(
     locator: &mut R,
     size: u64,
     at: impl Fn(&mut R) -> std::io::Result<u64>,
+    past_pair: Option<fn(&mut R) -> std::io::Result<u64>>,
 ) -> Result<(Vec<u8>, bool), DbError> {
-    let broke = |why: std::io::Error| DbError::Query {
-        message: why.to_string(),
-        line: None,
-    };
     let mut bytes = Vec::new();
     let mut chunk = vec![0u8; 64 * 1024];
-    while bytes.len() <= LOB_LIMIT && at(locator).map_err(broke)? < size {
-        let read = locator.read(&mut chunk).map_err(broke)?;
-        if read == 0 {
-            break;
+    // A character is at most four bytes, so this holds every one before
+    // the prefetch's last.
+    let mut room = match past_pair {
+        Some(_) => 4 * (LOB_PREFETCH as usize - 1),
+        None => chunk.len(),
+    };
+    let mut stepped = false;
+    while bytes.len() <= LOB_LIMIT && at(locator).map_err(broken)? < size {
+        match locator.read(&mut chunk[..room]) {
+            Ok(0) => break,
+            Ok(read) => bytes.extend_from_slice(&chunk[..read]),
+            Err(why) if !stepped && code(&why) == Some(22831) && past_pair.is_some() => {
+                bytes.extend_from_slice("\u{fffd}".as_bytes());
+                past_pair
+                    .map_or(Ok(0), |step| step(locator))
+                    .map_err(broken)?;
+                stepped = true;
+            }
+            Err(why) => return Err(broken(why)),
         }
-        bytes.extend_from_slice(&chunk[..read]);
+        room = chunk.len();
     }
     let truncated = bytes.len() > LOB_LIMIT;
     bytes.truncate(LOB_LIMIT);
     Ok((bytes, truncated))
+}
+
+/// The ORA- number inside what a LOB read failed with.
+fn code(why: &std::io::Error) -> Option<i32> {
+    let inner = why.get_ref()?.downcast_ref::<oracle::Error>()?;
+    inner.db_error().map(oracle::DbError::code)
+}
+
+/// A LOB read that failed, said the way every other failure is: without
+/// `OCI Error:` in front or the documentation link behind.
+fn broken(why: std::io::Error) -> DbError {
+    DbError::Query {
+        message: match why
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<oracle::Error>())
+        {
+            Some(inner) => complaint(inner),
+            None => why.to_string(),
+        },
+        line: None,
+    }
 }
 
 /// A LOB's length, which the prefetch brought along with the row.
@@ -479,26 +594,55 @@ fn size(locator: &impl Lob) -> Result<u64, DbError> {
 }
 
 /// What the server said, on the line of the statement it said it about:
-/// Oracle reports a character offset and the scratch pad shows lines.
+/// Oracle reports where parsing stopped and the scratch pad shows lines.
+/// An error with no such place — a block that raised, a divide by zero —
+/// has offset 0, and saying `line 1` for it would point at the wrong line;
+/// PL/SQL's own `ORA-06512: at line 3` is in the message instead.
 fn failure(why: &oracle::Error, sql: &str) -> DbError {
     DbError::Query {
         message: complaint(why),
         line: why
             .db_error()
-            .map(|complaint| line_of(sql, complaint.offset() as usize)),
+            .map(|complaint| complaint.offset() as usize)
+            .filter(|offset| *offset > 0)
+            .map(|offset| line_of(sql, offset)),
     }
 }
 
+/// ODPI-C counts the offset in bytes, so a `é` before the error is two.
 fn line_of(sql: &str, offset: usize) -> u32 {
-    let lines = sql.chars().take(offset).filter(|c| *c == '\n').count() + 1;
+    let before = sql.as_bytes().get(..offset).unwrap_or(sql.as_bytes());
+    let lines = before.iter().filter(|byte| **byte == b'\n').count() + 1;
     u32::try_from(lines).unwrap_or(1)
 }
 
 /// `ORA-00933: SQL command not properly ended` rather than the crate's
 /// `OCI Error: ORA-00933: ...`, and without the newline OCI ends it with.
 fn complaint(why: &oracle::Error) -> String {
-    why.db_error()
-        .map_or_else(|| why.to_string(), |db| unhelped(db.message()))
+    match why.db_error() {
+        // A string the driver fetches XMLTYPE into holds 4,000 bytes.
+        Some(db) if db.code() == 19011 => format!(
+            "{} An XMLTYPE past 4,000 bytes reads as xmlserialize(document … as clob).",
+            unhelped(db.message())
+        ),
+        Some(db) => unhelped(db.message()),
+        None => unreadable(why.to_string()),
+    }
+}
+
+/// A column of a type the driver cannot fetch fails the whole query, so
+/// what to select instead is the half of the message worth reading.
+fn unreadable(message: String) -> String {
+    let (what, instead) = if message.ends_with("Oracle type JSON") {
+        ("JSON", "json_serialize(… returning clob)")
+    } else if message.ends_with("Oracle type number 2033") {
+        ("VECTOR", "vector_serialize(… returning clob)")
+    } else if message.starts_with("unknown Oracle type number") {
+        ("REF or other", "reftohex(…) for a REF, or any cast to text")
+    } else {
+        return message;
+    };
+    format!("a {what} column the driver cannot read ({message}): select {instead} instead")
 }
 
 /// 23ai ends every message with `Help: https://docs.oracle.com/…` on a line
@@ -531,6 +675,41 @@ mod tests {
     }
 
     #[test]
+    fn a_year_before_1000_is_four_digits() {
+        assert_eq!(
+            year_of_four("5-03-04 00:00:00".to_owned()),
+            "0005-03-04 00:00:00"
+        );
+        assert_eq!(
+            year_of_four("-5-01-01 00:00:00".to_owned()),
+            "-0005-01-01 00:00:00"
+        );
+        assert_eq!(
+            year_of_four("2026-09-25 12:00:00".to_owned()),
+            "2026-09-25 12:00:00"
+        );
+        assert_eq!(
+            year_of_four("-4712-01-01 00:00:00".to_owned()),
+            "-4712-01-01 00:00:00"
+        );
+    }
+
+    /// The driver's own words for a JSON or VECTOR column were all a query
+    /// that selected one got, and not what to select instead.
+    #[test]
+    fn a_column_the_driver_cannot_read_says_what_to_select_instead() {
+        assert_eq!(
+            unreadable("unsupported Oracle type JSON".to_owned()),
+            "a JSON column the driver cannot read (unsupported Oracle type JSON): \
+             select json_serialize(… returning clob) instead"
+        );
+        assert!(
+            unreadable("unknown Oracle type number 2033".to_owned()).contains("vector_serialize")
+        );
+        assert_eq!(unreadable("ORA-1".to_owned()), "ORA-1");
+    }
+
+    #[test]
     fn the_config_names_the_client_before_the_environment_does() {
         assert_eq!(
             client_dir(&config(Some("/opt/ic")), Some("/elsewhere/ic".into())),
@@ -556,11 +735,14 @@ mod tests {
     fn a_missing_client_says_what_to_set() {
         let empty = tempfile::tempdir().unwrap();
         let failure = load(Some(empty.path().to_path_buf())).unwrap_err();
-        assert_eq!(failure, no_client());
         assert_eq!(
             failure.to_string(),
-            "cannot connect: Oracle client library not found; set [oracle] \
-             client_lib_dir or SQL_BENCH_ORACLE_CLIENT_DIR (see README)"
+            format!(
+                "cannot connect: Oracle client library not found in {}; set [oracle] \
+                 client_lib_dir or SQL_BENCH_ORACLE_CLIENT_DIR to where it is (see README)",
+                empty.path().display()
+            ),
+            "and where it was looked for"
         );
     }
 
@@ -645,6 +827,25 @@ mod tests {
     }
 
     #[test]
+    fn a_note_in_front_of_a_block_or_a_program_keeps_its_terminator() {
+        for sql in [
+            "-- run it\nbegin\n  null;\nend;",
+            "/* why */ declare n number; begin null; end;",
+            "-- mine\n-- really\ncreate or replace procedure p is begin null; end;",
+        ] {
+            assert_eq!(statement(sql), sql);
+        }
+        assert_eq!(
+            statement("-- all of them\nselect 1 from dual;"),
+            "-- all of them\nselect 1 from dual"
+        );
+        // The keyword's place is counted in the text as sent, note and all,
+        // which is what puts a compile error on the line it is on.
+        let sql = "-- mine\ncreate procedure p is begin nope; end;";
+        assert_eq!(created(sql), Some(("PROCEDURE", 15, "p")));
+    }
+
+    #[test]
     fn a_word_that_only_starts_with_begin_is_not_a_block() {
         assert!(!is_plsql("beginning_balance"));
         assert!(!is_plsql("select * from beginnings"));
@@ -657,12 +858,22 @@ mod tests {
         assert_eq!(line_of(sql, 0), 1);
         assert_eq!(line_of(sql, 9), 2);
         assert_eq!(line_of(sql, 15), 3);
+        // Bytes, not characters: the error is on line 2 after all of them.
+        let wide = "select '李李李李李李' a,\n  nope b,\n  1 c\nfrom dual";
+        assert_eq!(line_of(wide, wide.find("nope").unwrap()), 2);
+        assert_eq!(line_of(wide, 10_000), 4, "past the end is the last line");
     }
 
     /// A LOB read the way a locator is: up to the size it reports.
     fn read(data: &[u8]) -> (Vec<u8>, bool) {
         let size = data.len() as u64;
-        lob(&mut std::io::Cursor::new(data), size, Seek::stream_position).unwrap()
+        lob(
+            &mut std::io::Cursor::new(data),
+            size,
+            Seek::stream_position,
+            None,
+        )
+        .unwrap()
     }
 
     #[test]
@@ -670,9 +881,76 @@ mod tests {
         // The reader has more than the locator's size: only an empty read
         // could have found that end, and the size saves making it.
         let mut reader = std::io::Cursor::new(b"abcdef".to_vec());
-        let read = lob(&mut reader, 3, |_| Ok(3)).unwrap();
+        let read = lob(&mut reader, 3, |_| Ok(3), None).unwrap();
         assert_eq!(read, (Vec::new(), false));
         assert_eq!(reader.position(), 0, "nothing read past the size");
+    }
+
+    /// A CLOB whose prefetch ended on the first half of a pair, the way OCI
+    /// has it: a read from before the half stops short of it, and one that
+    /// starts on it fails with ORA-22831.
+    struct Straddle {
+        data: Vec<u8>,
+        at: usize,
+        half: usize,
+    }
+
+    impl Read for Straddle {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.at == self.half {
+                #[allow(deprecated)]
+                let why = oracle::Error::OciError(oracle::DbError::new(
+                    22831,
+                    0,
+                    "ORA-22831: Offset or offset+amount does not land on character boundary",
+                    "",
+                    "",
+                ));
+                return Err(std::io::Error::other(why));
+            }
+            let end = if self.at < self.half {
+                self.half
+            } else {
+                self.data.len()
+            };
+            let read = buf.len().min(end - self.at);
+            buf[..read].copy_from_slice(&self.data[self.at..self.at + read]);
+            self.at += read;
+            Ok(read)
+        }
+    }
+
+    #[test]
+    fn an_emoji_the_prefetch_cut_in_half_is_one_replacement_and_not_a_lost_result() {
+        let mut clob = Straddle {
+            data: b"aaaaXXtail".to_vec(),
+            at: 0,
+            half: 4,
+        };
+        let (bytes, truncated) = lob(
+            &mut clob,
+            10,
+            |clob| Ok(clob.at as u64),
+            Some(|clob| {
+                clob.at += 2;
+                Ok(clob.at as u64)
+            }),
+        )
+        .expect("the rest of it");
+        assert_eq!(String::from_utf8(bytes).unwrap(), "aaaa\u{fffd}tail");
+        assert!(!truncated);
+
+        // A BLOB has no characters to step over: the failure is the answer.
+        let mut blob = Straddle {
+            data: b"aaaaXXtail".to_vec(),
+            at: 0,
+            half: 4,
+        };
+        let failed = lob(&mut blob, 10, |blob| Ok(blob.at as u64), None).unwrap_err();
+        assert_eq!(
+            failed.to_string(),
+            "ORA-22831: Offset or offset+amount does not land on character boundary"
+        );
     }
 
     #[test]

@@ -102,8 +102,9 @@ pub enum Target {
     Seam { seam: Seam, area: Rect },
     /// Entry `n` of the open context menu.
     MenuItem(usize),
-    /// The text of the export prompt, starting at the region's left edge.
-    PromptText,
+    /// The text of the export prompt, starting at the region's left edge
+    /// `left` cells into it: the rest is scrolled off to the left.
+    PromptText { left: usize },
     /// The body of the open help, inspector or menu, whichever is on top.
     Overlay,
     /// The whole frame, pushed under an overlay so that a click beside it
@@ -514,9 +515,9 @@ impl App {
                     tab.scratch.select_word();
                 }
             }
-            Target::PromptText => {
+            Target::PromptText { left } => {
                 if let Some(prompt) = self.shell.prompt.as_mut() {
-                    prompt.place(usize::from(column));
+                    prompt.place(left + usize::from(column));
                 }
             }
             Target::MenuItem(item) => return self.pick(item),
@@ -833,6 +834,8 @@ impl App {
             let tab = self.tabs.get_mut(self.shell.active_tab);
             match (target, tab) {
                 (Target::Pad { top, left, .. }, Some(tab)) => tab.scratch.show_from(top, left),
+                (Target::Tree { top }, Some(tab)) => tab.objects.show_from(top),
+                (Target::Cells { top, left, .. }, Some(tab)) => tab.results.show_from(top, left),
                 (Target::Source { top }, Some(tab)) => tab.results.source_from(top),
                 (Target::Overlay, _) => overlay = Some(rect),
                 _ => {}
@@ -849,7 +852,8 @@ impl App {
         if self.shell.help {
             let last = keys_for(self.shell.focus).count().saturating_sub(showing);
             self.shell.help_scroll = self.shell.help_scroll.min(last);
-        } else if self.shell.inspector.is_some() {
+        } else if let Some(inspector) = self.shell.inspector.as_mut() {
+            inspector.width = usize::from(overlay.width.saturating_sub(4));
             let last = self.inspect_height().saturating_sub(showing);
             if let Some(inspector) = self.shell.inspector.as_mut() {
                 inspector.scroll = inspector.scroll.min(last);

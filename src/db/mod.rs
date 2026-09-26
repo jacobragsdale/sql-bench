@@ -180,7 +180,11 @@ fn work(
     if let Some(connecting) = connecting {
         trace.event(
             "connect",
-            &[("conn", name), ("ms", &millis(connecting).to_string())],
+            &[
+                ("conn", name),
+                ("ms", &millis(connecting).to_string()),
+                ("ok", if opened.is_ok() { "true" } else { "false" }),
+            ],
         );
     }
     let mut backend = match opened {
@@ -202,7 +206,22 @@ fn work(
                 reply,
             } => {
                 let mut sink = Sink::new(reply, Arc::clone(cancel), options);
-                let timing = match backend.run(&sql, &mut sink) {
+                // A driver that panics on a value it cannot read — tiberius
+                // on a `sql_variant` — would take this thread, and the tab's
+                // connection, with it. It is that query failing instead, and
+                // the session it was half way through is let go.
+                let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    backend.run(&sql, &mut sink)
+                }))
+                .unwrap_or_else(|panic| {
+                    backend.reset();
+                    Err(DbError::Unsupported(format!(
+                        "a column the driver cannot read ({}); cast it in the query to a \
+                         type it can, such as text",
+                        panic_message(panic.as_ref())
+                    )))
+                });
+                let timing = match ran {
                     // A backend that saw the flag between batches stops the
                     // way it stops at the cap, and says nothing; the flag is
                     // what makes it a cancel rather than a short result.
@@ -260,6 +279,25 @@ impl Backend {
             Self::Fake(backend) => backend.run(sql, sink),
         }
     }
+
+    /// Let go of the session, which the next query opens again.
+    fn reset(&mut self) {
+        match self {
+            Self::Mssql(backend) => backend.reset(),
+            Self::Oracle(backend) => backend.reset(),
+            #[cfg(test)]
+            Self::Fake(_) => {}
+        }
+    }
+}
+
+/// What a panic said, when it said it in words.
+fn panic_message(panic: &(dyn std::any::Any + Send)) -> &str {
+    panic
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("it panicked")
 }
 
 /// What a backend reports through: it batches rows, counts them against the
@@ -442,6 +480,24 @@ fn millis(since: Instant) -> u32 {
     u32::try_from(since.elapsed().as_millis()).unwrap_or(u32::MAX)
 }
 
+/// `sql` from its first word of code on, past the whitespace, `--` lines and
+/// `/* */` comments in front of it: the word that says what kind of statement
+/// it is, whatever note somebody wrote above it.
+#[must_use]
+pub fn code_start(sql: &str) -> &str {
+    let mut rest = sql.trim_start();
+    loop {
+        rest = if let Some(comment) = rest.strip_prefix("--") {
+            comment.split_once('\n').map_or("", |(_, after)| after)
+        } else if let Some(comment) = rest.strip_prefix("/*") {
+            comment.split_once("*/").map_or("", |(_, after)| after)
+        } else {
+            return rest;
+        }
+        .trim_start();
+    }
+}
+
 /// A backend that answers from a one word script, so the worker protocol, the
 /// row cap and cancel can be tested without a server.
 #[cfg(test)]
@@ -473,6 +529,7 @@ mod fake {
                     Ok(())
                 }
                 "sleep" => self.sleep(sink),
+                "panic" => panic!("not yet implemented for SSVariant"),
                 "boom" => Err(DbError::Query {
                     message: "fake: boom".to_owned(),
                     line: Some(1),
@@ -815,6 +872,31 @@ mod tests {
             .skip(2)
             .collect();
         assert_eq!(failed[..3], ["conn=fake", "rows=0", "truncated=false"]);
+    }
+
+    #[test]
+    fn the_code_starts_after_the_notes_in_front_of_it() {
+        assert_eq!(code_start("  select 1"), "select 1");
+        assert_eq!(code_start("-- a\n  -- b\nbegin"), "begin");
+        assert_eq!(code_start("/* a\n b */ /**/declare x"), "declare x");
+        assert_eq!(code_start("-- only a note"), "");
+        assert_eq!(code_start("/* never closed"), "");
+        assert_eq!(code_start("select 1 -- after"), "select 1 -- after");
+    }
+
+    #[test]
+    fn a_driver_that_panics_fails_the_query_and_the_connection_goes_on() {
+        let (connection, _) = fake();
+        let events = collect(&connection.query("panic", QueryOptions::default()));
+        let [QueryEvent::Error(DbError::Unsupported(why))] = events.as_slice() else {
+            panic!("{events:?}");
+        };
+        assert!(why.contains("not yet implemented for SSVariant"), "{why}");
+        let after = collect(&connection.query("rows:1", QueryOptions::default()));
+        assert!(
+            matches!(after.last(), Some(QueryEvent::Done { rows: 1, .. })),
+            "{after:?}"
+        );
     }
 
     #[test]

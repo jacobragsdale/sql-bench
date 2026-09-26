@@ -18,15 +18,12 @@ use unicode_width::UnicodeWidthStr;
 use crate::app::finder::Finder;
 use crate::app::pointer::{Hits, Menu, Seam, Target, menu, thumb};
 use crate::app::prompt::Prompt;
-use crate::app::results::{INSPECT_WIDTH, Inspector, inspect_title};
+use crate::app::results::{INSPECT_WIDTH, Inspector, inspect_height, inspect_lines, inspect_title};
 use crate::app::scratch::{Scratch, char_width};
 use crate::app::{App, Focus, TabState, key_named, keys_for};
 use theme::Theme;
 
-/// Smaller than this and the three panes are narrower than their own titles,
-/// so one message is more use than a layout nobody can read.
-pub const MIN_WIDTH: u16 = 60;
-pub const MIN_HEIGHT: u16 = 15;
+pub use crate::app::{MIN_HEIGHT, MIN_WIDTH};
 
 /// What a first run is told, when `config.toml` names no connection.
 const NO_CONNECTIONS: &[&str] = &[
@@ -181,14 +178,39 @@ fn tab_bar(frame: &mut Frame, app: &App, theme: &Theme, bar: Rect, hits: &mut Hi
 }
 
 /// The tab labels, drawn. Each is a click target, cut to the bar where it
-/// runs off the end.
+/// runs off the end. When the active tab would be past the end, the bar
+/// starts late enough to show it, with `…` for the tabs left off.
 fn tabs(app: &App, theme: &Theme, bar: Rect, hits: &mut Hits) -> Vec<Span<'static>> {
+    let labels: Vec<String> = app
+        .tabs
+        .iter()
+        .enumerate()
+        .map(|(index, tab)| format!("{} {} {}", index + 1, tab.name, app.shell.mark(&tab.state)))
+        .collect();
+    let active = app.shell.active_tab.min(labels.len().saturating_sub(1));
+    let reach = |first: usize| -> usize {
+        labels[first..=active]
+            .iter()
+            .enumerate()
+            .map(|(at, label)| {
+                usize::from(first + at > 0) + 1 + UnicodeWidthStr::width(label.as_str())
+            })
+            .sum()
+    };
+    let mut first = 0;
+    while first < active && reach(first) > usize::from(bar.width) {
+        first += 1;
+    }
     let mut spans = Vec::with_capacity(app.tabs.len() * 2);
     let mut x = bar.x;
-    for (index, tab) in app.tabs.iter().enumerate() {
-        let gap = Span::raw(if index == 0 { " " } else { "  " });
+    for (index, label) in labels.into_iter().enumerate().skip(first) {
+        let gap = Span::raw(match index {
+            0 => " ",
+            _ if index == first => "… ",
+            _ => "  ",
+        });
         let label = Span::styled(
-            format!("{} {} {}", index + 1, tab.name, app.shell.mark(&tab.state)),
+            label,
             if index == app.shell.active_tab {
                 theme.accent
             } else {
@@ -414,21 +436,23 @@ fn scratch_lines(
         .skip(top)
         .take(height)
         .map(|(number, text)| {
-            let characters: Vec<char> = text.chars().collect();
-            // Only as far as there is something to paint: a cursor past the
-            // end of the line, the end of the selection, or the text.
-            let mut last = characters.len();
+            // Past the end of the text, only as far as there is something to
+            // paint: a cursor, the end of the selection, or a flag's colour.
+            // The text itself is read only as far as the window reaches, so a
+            // line of ten megabytes draws what a word does.
+            let mut past = 0;
             if focused && number == cursor_line {
-                last = last.max(cursor_column + 1);
+                past = past.max(cursor_column + 1);
             }
             if flagged.is_some_and(|lines| lines.contains(&number)) {
-                last = last.max(characters.len() + left + width);
+                past = usize::MAX;
             }
             if let Some((_, (end_line, end_column))) = selection
                 && number == end_line
             {
-                last = last.max(end_column);
+                past = past.max(end_column);
             }
+            let mut characters = text.chars();
             let mut spans = vec![Span::styled(
                 format!("{:>digits$} ", number + 1, digits = digits),
                 theme.dim,
@@ -438,8 +462,12 @@ fn scratch_lines(
             // `left` and `width` are terminal columns and `column` is a
             // character, so a wide one moves `cell` on by two.
             let mut cell = 0;
-            for column in 0..last {
-                let character = characters.get(column).copied().unwrap_or(' ');
+            for column in 0.. {
+                let character = match characters.next() {
+                    Some(character) => character,
+                    None if column < past => ' ',
+                    None => break,
+                };
                 let start = cell;
                 cell += char_width(character);
                 if cell <= left {
@@ -546,15 +574,18 @@ fn footer_line(frame: &mut Frame, app: &App, theme: &Theme, area: Rect, hits: &m
         x = x.saturating_add(width(span));
     }
     if let Some(prompt) = &app.shell.prompt {
-        // The text and the cell past its end, where a click puts the cursor
-        // back at the end.
+        // The text showing and the cell past its end, where a click puts the
+        // cursor back at the end.
+        let (spans, left) = typed(prompt, PROMPT, theme, budget);
+        let showing = spans[1..].iter().map(Span::width).sum::<usize>()
+            + usize::from(prompt.cursor < prompt.text.chars().count());
         let text = Rect::new(
             area.x + cells(PROMPT),
             area.y,
-            cells(&prompt.text).saturating_add(1),
+            u16::try_from(showing).unwrap_or(u16::MAX),
             1,
         );
-        hits.push(text.intersection(area), Target::PromptText);
+        hits.push(text.intersection(area), Target::PromptText { left });
     }
     let spans: Vec<Span> = parts.into_iter().map(|(span, _)| span).collect();
     frame.render_widget(Line::from(spans), area);
@@ -588,11 +619,32 @@ const PROMPT: &str = " Export to: ";
 /// `label` and the line being typed, the cursor painted the way the scratch
 /// pad's is — a `TestBackend` has no terminal cursor, so a prompt whose
 /// cursor were the real one could not be tested at all.
-fn typed(prompt: &Prompt, label: &str, theme: &Theme) -> Vec<Span<'static>> {
+///
+/// A line wider than `room` shows the part of it that ends at the cursor,
+/// and says how many cells of it are off to the left, where a click on it
+/// has to count from.
+fn typed(prompt: &Prompt, label: &str, theme: &Theme, room: usize) -> (Vec<Span<'static>>, usize) {
     let characters: Vec<char> = prompt.text.chars().collect();
-    vec![
+    let wide = |character: &char| crate::export::cells(*character);
+    let room = room.saturating_sub(usize::from(cells(label))).max(1);
+    let under = characters.get(prompt.cursor).map_or(1, wide);
+    let mut from = prompt.cursor;
+    let mut used = under;
+    while from > 0 && used + wide(&characters[from - 1]) <= room {
+        from -= 1;
+        used += wide(&characters[from]);
+    }
+    let after: String = characters
+        .iter()
+        .skip(prompt.cursor + 1)
+        .take_while(|character| {
+            used += wide(character);
+            used <= room
+        })
+        .collect();
+    let spans = vec![
         Span::styled(label.to_owned(), theme.accent),
-        Span::raw(characters.iter().take(prompt.cursor).collect::<String>()),
+        Span::raw(characters[from..prompt.cursor].iter().collect::<String>()),
         Span::styled(
             characters
                 .get(prompt.cursor)
@@ -601,13 +653,9 @@ fn typed(prompt: &Prompt, label: &str, theme: &Theme) -> Vec<Span<'static>> {
                 .to_string(),
             theme.cursor,
         ),
-        Span::raw(
-            characters
-                .iter()
-                .skip(prompt.cursor + 1)
-                .collect::<String>(),
-        ),
-    ]
+        Span::raw(after),
+    ];
+    (spans, characters[..from].iter().map(wide).sum())
 }
 
 /// ` Export to: ` and the path being typed, then Enter and Esc as buttons,
@@ -618,7 +666,8 @@ fn prompt_spans(
     theme: &Theme,
     budget: usize,
 ) -> Vec<(Span<'static>, Option<Target>)> {
-    let mut parts: Vec<(Span<'static>, Option<Target>)> = typed(prompt, PROMPT, theme)
+    let mut parts: Vec<(Span<'static>, Option<Target>)> = typed(prompt, PROMPT, theme, budget)
+        .0
         .into_iter()
         .map(|span| (span, None))
         .collect();
@@ -745,16 +794,20 @@ fn render_inspector(
     let (Some(column), Some(cell)) = (results.column(), results.cell()) else {
         return;
     };
-    let total = app.inspect_height();
+    // Wrapped at the inside of the overlay as it fits this screen, which
+    // `App::drawn` hands back for the scroll keys to count with.
+    #[allow(clippy::cast_possible_truncation)]
+    let width = (INSPECT_WIDTH as u16 + 4).min(area.width);
+    let inside = usize::from(width.saturating_sub(4));
+    let total = inspect_height(cell, inside);
     let height = u16::try_from(total)
         .unwrap_or(u16::MAX)
         .saturating_add(2)
         .min(area.height.saturating_sub(2));
-    let overlay = centered(area, INSPECT_WIDTH as u16 + 4, height);
+    let overlay = centered(area, width, height);
     let showing = usize::from(height.saturating_sub(2));
     let top = inspector.scroll.min(total.saturating_sub(showing));
-    let body: Vec<Line> = app
-        .inspect_lines(top, showing)
+    let body: Vec<Line> = inspect_lines(cell, top, showing, inside)
         .into_iter()
         .map(Line::raw)
         .collect();
@@ -864,7 +917,7 @@ fn render_finder(
         0
     };
     let inner = usize::from(width.saturating_sub(4));
-    let mut lines = vec![Line::from(typed(&finder.query, "> ", theme))];
+    let mut lines = vec![Line::from(typed(&finder.query, "> ", theme, inner).0)];
     if matches.is_empty() {
         let message = if finder.indexed() == 0 {
             "nothing indexed yet: c connects a tab"
@@ -881,18 +934,24 @@ fn render_finder(
         .iter()
         .skip(top)
         .take(showing)
-        .map(|found| found.object.schema.chars().count() + 1 + found.object.name.chars().count())
+        .map(|found| {
+            crate::export::width(&found.object.schema)
+                + 1
+                + crate::export::width(&found.object.name)
+        })
         .max()
         .unwrap_or(0)
         .min(inner.saturating_sub(22));
     for (at, found) in matches.iter().enumerate().skip(top).take(showing) {
         let qualified = format!("{}.{}", found.object.schema, found.object.name);
-        let name = crate::app::results::cut(&qualified, name_width);
-        let tab = app.tabs.get(found.tab).map_or("", |tab| tab.name.as_str());
-        let text = format!(
-            "{name:<name_width$}  {:<9}  {tab}",
-            found.object.kind.as_str()
+        // In terminal columns, so a CJK name lines up with the rest.
+        let name = crate::export::pad(
+            &crate::app::results::cut(&qualified, name_width),
+            name_width,
+            false,
         );
+        let tab = app.tabs.get(found.tab).map_or("", |tab| tab.name.as_str());
+        let text = format!("{name}  {:<9}  {tab}", found.object.kind.as_str());
         lines.push(Line::from(Span::styled(
             crate::app::results::cut(&text, inner).into_owned(),
             if at == finder.cursor {

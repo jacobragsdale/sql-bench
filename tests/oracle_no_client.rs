@@ -47,11 +47,11 @@ fn an_empty_client_directory_says_what_to_set() {
     let failure = Connection::open(&ledger(), &config).expect_err("the directory is empty");
     assert_eq!(
         failure,
-        DbError::Connect(
-            "Oracle client library not found; set [oracle] client_lib_dir or \
-             SQL_BENCH_ORACLE_CLIENT_DIR (see README)"
-                .to_owned()
-        )
+        DbError::Connect(format!(
+            "Oracle client library not found in {}; set [oracle] client_lib_dir or \
+             SQL_BENCH_ORACLE_CLIENT_DIR to where it is (see README)",
+            empty.path().display()
+        ))
     );
 
     // And once the process has decided, it has decided: a second connection

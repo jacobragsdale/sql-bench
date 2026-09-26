@@ -64,7 +64,7 @@ grep -q '<!-- frame:start -->' README.md ||
 # shrank to make room for it.
 clock() {
     sed -E 's/[0-9][0-9,]* ?ms/N ms/g
-            /N ms/ { s/─+/─/g; s/ {2,}/ /g }' "$1"
+            /N ms/ { s/(─)+/─/g; s/ {2,}/ /g }' "$1"
 }
 
 # The mask is blind to the clock's width or this check is a coin toss: the

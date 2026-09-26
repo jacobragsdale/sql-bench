@@ -13,7 +13,7 @@ use super::theme::Theme;
 use super::{buttons, placeholder, placeholder_button, scrollbar, titled};
 use crate::app::objects::{INDENT, Objects};
 use crate::app::pointer::{Hits, Target};
-use crate::app::{App, Focus};
+use crate::app::{App, Focus, TabState};
 
 pub(super) fn render(frame: &mut Frame, app: &App, theme: &Theme, area: Rect, hits: &mut Hits) {
     let focused = app.shell.focus == Focus::Objects;
@@ -40,7 +40,11 @@ pub(super) fn render(frame: &mut Frame, app: &App, theme: &Theme, area: Rect, hi
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if objects.is_empty() {
-        placeholder_button(frame, inner, "Connect", (Focus::Objects, "c"), theme, hits);
+        if tab.state == TabState::Connecting {
+            frame.render_widget(Paragraph::new(placeholder("connecting…", theme)), inner);
+        } else {
+            placeholder_button(frame, inner, "Connect", (Focus::Objects, "c"), theme, hits);
+        }
         return;
     }
     let mut chips = vec![("⟳ Reload", "r")];

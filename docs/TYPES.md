@@ -50,9 +50,14 @@ in `tests/mssql.rs` and `tests/oracle.rs` assert against the same row.
 | `xml` | `Text` | `<root><a id="1">x</a></root>` |
 
 The grid's own column header shows the type the wire reports, which is the
-declared type without its width: `decimal`, `time`, `varbinary`. TDS lumps
-every width of an integer into one wire type, so `tinyint`, `smallint` and
-`int` all arrive as `int` there and only the value says which it was.
+declared type without its width: `decimal`, `time`, `varbinary`. A nullable
+`smalldatetime` arrives as a `datetime`, and a nullable `smallmoney` as a
+`money`: the wire says no more.
+
+`select … for json` and `for xml` come back as one value, the way SQL Server
+Management Studio shows them, though the server sends the text cut into rows
+of 2,033 characters: a grid row, a CSV line or a copy of one piece would be
+no document at all.
 
 ## Oracle
 
@@ -66,13 +71,16 @@ every width of an integer into one wire type, so `tinyint`, `smallint` and
 | `CHAR(5 BYTE)` | `Text` | `abcde` |
 | `VARCHAR2(20 BYTE)` | `Text` | `varchar2 value` |
 | `NVARCHAR2(20)` | `Text` | `nvarchar2 value` |
-| `DATE` | `DateTime` | `2024-05-17 00:00:00` |
+| `DATE` | `DateTime` | `2024-05-17 00:00:00`; the year 5 is `0005`, as SQL Server writes it and a date sorts |
 | `TIMESTAMP(6)` | `DateTime` | `2024-05-17 13:45:30.123456` |
 | `TIMESTAMP(6) WITH TIME ZONE` | `DateTime` | `2024-05-17 13:45:30.123456 +02:00` |
 | `INTERVAL DAY(2) TO SECOND(6)` | `Text` | `+02 03:04:05.600000` |
 | `RAW(8)` | `Bytes` | `0x0102030405060708` |
 | `CLOB` | `Text` | `clob value` |
 | `BLOB` | `Bytes` | `0xaabbcc` |
+
+23ai's `BOOLEAN` is a `Bool`, as SQL Server's `bit` is, and reads `true`
+and `false`.
 
 A `NUMBER` of 1 to 18 digits and no scale is an `Int`; anything wider, or
 with a scale, is a `Decimal` carrying the server's own digits. An unqualified
@@ -92,7 +100,8 @@ of its own:
 | | `--format table` | `--format csv` | `--format json` |
 |---|---|---|---|
 | `Null` | `NULL` | *(empty field)* | `null` |
-| `Int`, `Float` | the digits | the digits | a JSON number |
+| `Int` | the digits | the digits | a JSON number — past 2^53 a **string**, which a double would round |
+| `Float` | the digits; below 1e-6 or from 1e21 up, `1e-300` | the same | a JSON number |
 | `Decimal` | the digits | the digits | a **string**, so no digit is rounded away — unless it is a whole number a double holds exactly (up to 2^53), like Oracle's `count(*)`, which is a JSON number |
 | `Bool` | `true` | `true` | `true`, a JSON boolean |
 | `Bytes` | `0x…` | `0x…` | `"0x…"` |
@@ -100,7 +109,9 @@ of its own:
 
 Without `--full` a cell is cut at 60 terminal columns and the last of them
 is `…`. Columns and not characters, because a CJK glyph is drawn two cells
-wide: `李雷` is four columns in a table and in the grid alike *(T5.4)*.
+wide: `李雷` is four columns in a table and in the grid alike *(T5.4)*. A
+string is measured whole, the way the terminal draws it, so `❤️` (a heart and
+VS16) is two columns and a family joined by ZWJs two as well.
 
 ## Ceilings
 
@@ -111,3 +122,24 @@ come down the wire whole, so a row holding a gigabyte would be a gigabyte in
 this process. Nothing in the seed is near either ceiling — the 100 KB body in
 `bench.big_text` arrives whole on both — and raising the SQL Server side
 would mean a memory budget, not just a constant.
+
+SQL Server's `money` reaches the app through the driver's double, so past
+2^39 (about 550 billion) its last places are a float's guess:
+`-700000000000.0003` reads `-700000000000.0002`. Cast it to `decimal(19,4)`
+to see every digit.
+
+Some columns the drivers cannot read at all, and a query selecting one fails
+as a whole, with a message saying what to select instead:
+
+| column | what the message suggests |
+|---|---|
+| SQL Server `sql_variant`, `hierarchyid`, `geography`, `geometry`, a CLR type, a `decimal(p, 38)` | a cast to a type the driver reads, such as text |
+| SQL Server `nvarchar` holding half of a surrogate pair (`left` of an emoji) | a cast to `varbinary`, to see its bytes |
+| Oracle `JSON` | `json_serialize(… returning clob)` |
+| Oracle `VECTOR` | `vector_serialize(… returning clob)` |
+| Oracle `REF` | `reftohex(…)` |
+| Oracle `XMLTYPE` past 4,000 bytes | `xmlserialize(document … as clob)` |
+
+An Oracle `CLOB` whose 8,192nd character is the first half of an emoji is a
+LOB the driver's read-ahead cannot cross: that one character reads as `�`
+and the rest arrives.

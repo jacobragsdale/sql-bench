@@ -185,6 +185,46 @@ fn unicode_survives_the_wire() {
     );
 }
 
+/// SQL Server cuts `for json` into rows of 2,033 characters, and each was a
+/// row of the grid, of a CSV and of a copy: pieces, none of them JSON.
+#[test]
+fn for_json_is_one_value_and_not_rows_of_pieces() {
+    let connection = connection!();
+    let events = run(
+        &connection,
+        "select top 300 name from sys.all_objects for json path",
+    );
+    let rows = rows(&events);
+    let [row] = rows.as_slice() else {
+        panic!("{} rows", rows.len());
+    };
+    let [Cell::Text(json)] = row.as_slice() else {
+        panic!("{row:?}");
+    };
+    assert!(json.len() > 2_033, "{}", json.len());
+    assert!(json.starts_with("[{") && json.ends_with("}]"));
+}
+
+/// The line of an error raised in a procedure is of the procedure's text,
+/// and it used to be given as the batch's: `line 3` of a one-line `exec`.
+#[test]
+fn an_error_inside_a_procedure_names_it_and_leaves_the_batch_line_out() {
+    let connection = connection!();
+    run(
+        &connection,
+        "create procedure #boom as\nselect 1 as one\nraiserror('raised', 16, 1)",
+    );
+    let events = run(&connection, "exec #boom");
+    let Some(QueryEvent::Error(DbError::Query { message, line })) = events.last() else {
+        panic!("{events:?}");
+    };
+    assert!(
+        message.starts_with("#boom") && message.ends_with(", line 3: raised"),
+        "{message}"
+    );
+    assert_eq!(*line, None);
+}
+
 #[test]
 fn a_syntax_error_is_the_servers_own_complaint() {
     let connection = connection!();

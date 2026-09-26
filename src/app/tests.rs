@@ -320,7 +320,13 @@ fn no_connections_is_an_app_with_no_tabs_that_still_takes_keys() {
     press(&mut app, "1-9");
     press(&mut app, "Ctrl-T");
     assert_eq!(app.shell.active_tab, 0);
+    // Nothing opens where nothing would draw it, so `q` still quits.
+    for spec in ["Ctrl-P", "?", "F1", "Ctrl-V"] {
+        press(&mut app, spec);
+    }
+    assert!(app.shell.finder.is_none() && !app.shell.help);
     assert_eq!(press(&mut app, "q"), vec![Action::Quit]);
+    assert_eq!(press(&mut app, "Ctrl-Q"), vec![Action::Quit]);
 }
 
 #[test]
@@ -462,6 +468,36 @@ fn the_keys_of_a_pane_are_its_own_and_the_ones_that_work_anywhere() {
     );
 }
 
+/// A set an earlier statement of the run cut short: `m` used to say every
+/// row was here, and runs only the last statement again.
+#[test]
+fn m_on_a_set_an_earlier_statement_cut_short_says_what_it_can_fetch() {
+    let mut app = ready(Focus::Results);
+    let results = &mut app.tabs[1].results;
+    for (statement, truncated) in [(0, true), (1, false)] {
+        results.start(Instant::now(), statement, 2, false);
+        results.apply(QueryEvent::Columns(vec![Column {
+            name: "n".to_owned(),
+            type_name: "int".to_owned(),
+        }]));
+        results.apply(QueryEvent::Rows(vec![vec![Cell::Int(1)]]));
+        results.apply(QueryEvent::Done {
+            rows: 1,
+            truncated,
+            reset: false,
+            connect_ms: 1,
+            first_row_ms: 2,
+            total_ms: 3,
+        });
+    }
+    results.key(key("["));
+    assert_eq!(press(&mut app, "m"), vec![]);
+    assert_eq!(
+        app.shell.status,
+        "m fetches more of the last statement only: run this one on its own"
+    );
+}
+
 #[test]
 fn the_grids_keys_move_the_cell_cursor_and_ask_for_what_the_app_cannot_do() {
     let mut app = ready(Focus::Results);
@@ -553,9 +589,45 @@ fn a_statement_the_server_said_no_to_is_flagged_in_the_pad_until_the_next_edit()
         Some(&(2..3)),
         "the lines the statement was on"
     );
+    assert_eq!(
+        app.tabs[0].results.failure().map(ToString::to_string),
+        Some("line 3: Invalid object name 'nope'.".to_owned()),
+        "its first line is the pad's third, as the gutter numbers it"
+    );
 
     press(&mut app, "x");
     assert_eq!(app.tabs[0].scratch.flagged(), None, "an edit clears it");
+}
+
+/// Typing in the pad while a statement runs moves its lines: flagging
+/// the ones it was split from used to paint whatever was there now.
+#[test]
+fn a_statement_that_fails_after_the_pad_was_edited_flags_nothing() {
+    let mut app = two_tabs();
+    app.shell.focus = Focus::Scratch;
+    app.tabs[0].scratch.set_text("select * from nope;");
+    press(&mut app, "Ctrl-R");
+    app.apply(RuntimeEvent::QueryStarted {
+        tab: 0,
+        at: Instant::now(),
+        statement: 0,
+        of: 1,
+        keep_view: false,
+    });
+    press(&mut app, "Enter");
+    app.apply(RuntimeEvent::Query {
+        tab: 0,
+        event: QueryEvent::Error(crate::db::model::DbError::Query {
+            message: "Invalid object name 'nope'.".to_owned(),
+            line: Some(1),
+        }),
+    });
+    assert_eq!(app.tabs[0].scratch.flagged(), None);
+    assert_eq!(
+        app.tabs[0].results.failure().map(ToString::to_string),
+        Some("line 1: Invalid object name 'nope'.".to_owned()),
+        "the statement's line, which is all there is to go on"
+    );
 }
 
 #[test]
@@ -619,7 +691,32 @@ fn a_query_that_cost_the_session_says_so_in_the_footer() {
     });
     assert_eq!(
         app.shell.status,
-        "row cap: session reset (open transaction rolled back, #temp tables gone)"
+        "row cap: session reset (the statement and any open transaction rolled back, \
+         #temp tables gone)"
+    );
+
+    // Half way through a run, the run stops there, and says so.
+    app.apply(RuntimeEvent::QueryStarted {
+        tab: 0,
+        at: Instant::now(),
+        statement: 0,
+        of: 3,
+        keep_view: false,
+    });
+    app.apply(RuntimeEvent::Query {
+        tab: 0,
+        event: QueryEvent::Done {
+            rows: 10_000,
+            truncated: true,
+            reset: true,
+            connect_ms: 0,
+            first_row_ms: 0,
+            total_ms: 0,
+        },
+    });
+    assert_eq!(
+        app.shell.status,
+        "row cap: statement 1 of 3 reset the session, so the 2 after it did not run"
     );
 }
 
@@ -1329,7 +1426,8 @@ fn enter_on_a_table_puts_a_select_in_the_pad_and_moves_the_focus_to_it() {
     assert_eq!(press(&mut app, "Enter"), vec![]);
     assert_eq!(
         app.tabs[1].scratch.text(),
-        "select * from dbo.customers fetch first 100 rows only;\n"
+        "select * from \"dbo\".\"customers\" fetch first 100 rows only;\n",
+        "Oracle folds an unquoted name to upper case, so one stored in lower case is quoted"
     );
     assert_eq!(app.shell.focus, Focus::Scratch);
 
@@ -1459,11 +1557,10 @@ fn s_on_a_procedure_shows_its_source_in_the_results_pane() {
 #[test]
 fn y_copies_the_qualified_name_of_whatever_the_cursor_is_on() {
     let mut app = browsing();
-    assert_eq!(
-        press(&mut app, "y"),
-        vec![Action::Copy("dbo.customers".to_owned())]
-    );
-    assert_eq!(app.shell.clipboard, "dbo.customers");
+    // An Oracle tab, where a name stored in lower case has to be quoted.
+    let copied = "\"dbo\".\"customers\"";
+    assert_eq!(press(&mut app, "y"), vec![Action::Copy(copied.to_owned())]);
+    assert_eq!(app.shell.clipboard, copied);
     go_to(&mut app.tabs[1].objects, "dbo");
     assert_eq!(press(&mut app, "y"), vec![Action::Copy("dbo".to_owned())]);
 }
@@ -2072,4 +2169,408 @@ fn run_all_keeps_every_statements_sets_and_says_what_they_did() {
             .title()
             .starts_with("Results · set 1/2 · 12 rows · ")
     );
+}
+
+#[test]
+fn enter_on_a_table_puts_its_select_after_the_line_and_leaves_the_line_whole() {
+    let mut app = two_tabs();
+    app.tabs[0].objects = browsed(Kind::Mssql);
+    app.tabs[0].scratch.set_text("select 1 as abc\nselect 2");
+    app.tabs[0].scratch.place((0, 12), false);
+    press(&mut app, "Enter");
+    assert_eq!(
+        app.tabs[0].scratch.text(),
+        "select 1 as abc\nselect top 100 * from dbo.customers;\n\nselect 2",
+        "the cursor was inside `abc`, which stays where it was"
+    );
+
+    // A selection in the pad is not what the select replaces.
+    let mut app = two_tabs();
+    app.tabs[0].objects = browsed(Kind::Mssql);
+    app.tabs[0].scratch.set_text("keep this\nnext");
+    app.tabs[0].scratch.place((0, 0), false);
+    app.tabs[0].scratch.place((1, 0), true);
+    assert!(app.tabs[0].scratch.selection().is_some());
+    press(&mut app, "Enter");
+    assert_eq!(
+        app.tabs[0].scratch.text(),
+        "keep this\nselect top 100 * from dbo.customers;\nnext"
+    );
+}
+
+#[test]
+fn a_name_that_needs_quoting_is_quoted_in_the_select_and_the_copy() {
+    let mut app = two_tabs();
+    let mut objects = Objects::new(Kind::Mssql, "sa");
+    objects.answer(
+        &CatalogRequest::Schemas,
+        &Ok(CatalogAnswer::Schemas(vec!["My Schema".to_owned()])),
+    );
+    objects.key(key("j"));
+    objects.key(key("l"));
+    let listing = CatalogAnswer::Objects(vec![object("My Schema", "order", ObjectKind::Table)]);
+    let request = CatalogRequest::Objects {
+        schema: "My Schema".to_owned(),
+        kind: ObjectKind::Table,
+    };
+    objects.answer(&request, &Ok(listing));
+    objects.key(key("j"));
+    app.tabs[0].objects = objects;
+    assert_eq!(
+        press(&mut app, "y"),
+        vec![Action::Copy("[My Schema].[order]".to_owned())]
+    );
+    press(&mut app, "Enter");
+    assert_eq!(
+        app.tabs[0].scratch.text(),
+        "select top 100 * from [My Schema].[order];\n"
+    );
+}
+
+#[test]
+fn the_inspector_goes_with_the_grid_it_was_open_over() {
+    // Another tab: the overlay would be over a grid it is not showing.
+    let mut app = ready(Focus::Results);
+    press(&mut app, "Enter");
+    assert!(app.shell.inspector.is_some());
+    press(&mut app, "1");
+    assert!(
+        app.shell.inspector.is_none(),
+        "closed with the tab it was on"
+    );
+
+    // Another pane: j is the pad's again, typed rather than scrolled.
+    let mut app = ready(Focus::Results);
+    press(&mut app, "Enter");
+    press(&mut app, "Shift-Tab");
+    assert!(app.shell.inspector.is_none());
+    let before = app.tabs[1].scratch.text();
+    press(&mut app, "j");
+    assert_ne!(app.tabs[1].scratch.text(), before, "j was typed");
+
+    // A filter being typed takes the letters the inspector would scroll by.
+    let mut app = ready(Focus::Results);
+    press(&mut app, "Enter");
+    press(&mut app, "/");
+    press(&mut app, "j");
+    press(&mut app, "k");
+    assert!(app.shell.inspector.is_none());
+    assert_eq!(app.tabs[1].results.filter(), "jk");
+
+    // A cell that went away under it — a new run — takes it too.
+    let mut app = ready(Focus::Results);
+    press(&mut app, "Enter");
+    app.apply(RuntimeEvent::QueryStarted {
+        tab: 1,
+        at: Instant::now(),
+        statement: 0,
+        of: 1,
+        keep_view: false,
+    });
+    press(&mut app, "j");
+    assert!(app.shell.inspector.is_none());
+}
+
+#[test]
+fn ctrl_v_in_the_finder_or_the_prompt_reads_the_clipboard_onto_their_line() {
+    let mut app = two_tabs();
+    press(&mut app, "Ctrl-P");
+    assert_eq!(
+        press(&mut app, "Ctrl-V"),
+        vec![Action::ReadClipboard { tab: 0 }]
+    );
+    app.pasted(0, Some("cust\n".to_owned()));
+    assert_eq!(
+        app.shell
+            .finder
+            .as_ref()
+            .map(|finder| finder.query.text.as_str()),
+        Some("cust")
+    );
+    assert_eq!(app.tabs[0].scratch.text(), "", "not the pad behind it");
+
+    let mut app = ready(Focus::Results);
+    press(&mut app, "e");
+    press(&mut app, "Ctrl-U");
+    assert_eq!(
+        press(&mut app, "Ctrl-V"),
+        vec![Action::ReadClipboard { tab: 1 }]
+    );
+    app.pasted(1, Some("/tmp/out.csv".to_owned()));
+    assert_eq!(
+        app.shell.prompt.as_ref().map(|prompt| prompt.text.as_str()),
+        Some("/tmp/out.csv")
+    );
+}
+
+#[test]
+fn a_run_ending_in_an_update_titles_the_set_on_screen_with_its_own_rows() {
+    let mut app = two_tabs();
+    let apply = |app: &mut App, event: QueryEvent| app.apply(RuntimeEvent::Query { tab: 0, event });
+    for (statement, events) in [
+        (
+            0,
+            vec![
+                QueryEvent::Columns(vec![Column {
+                    name: "id".to_owned(),
+                    type_name: "int".to_owned(),
+                }]),
+                QueryEvent::Rows((0..5).map(|row| vec![Cell::Int(row)]).collect()),
+            ],
+        ),
+        (1, vec![QueryEvent::RowsAffected(3)]),
+    ] {
+        app.apply(RuntimeEvent::QueryStarted {
+            tab: 0,
+            at: Instant::now(),
+            statement,
+            of: 2,
+            keep_view: false,
+        });
+        for event in events {
+            apply(&mut app, event);
+        }
+        apply(
+            &mut app,
+            QueryEvent::Done {
+                rows: if statement == 0 { 5 } else { 0 },
+                truncated: false,
+                reset: false,
+                connect_ms: 0,
+                first_row_ms: 0,
+                total_ms: 1,
+            },
+        );
+    }
+    assert!(
+        app.tabs[0]
+            .results
+            .title()
+            .starts_with("Results · 5 rows · "),
+        "{}",
+        app.tabs[0].results.title()
+    );
+    assert_eq!(
+        app.shell.status,
+        "2 statements, 1 result set, 3 rows affected"
+    );
+}
+
+#[test]
+fn e_has_nothing_to_write_before_a_run_and_waits_for_the_last_row() {
+    let mut app = two_tabs();
+    app.shell.focus = Focus::Results;
+    assert_eq!(press(&mut app, "e"), vec![]);
+    assert!(app.shell.prompt.is_none(), "an empty file is no export");
+    assert_eq!(app.shell.status, "nothing to export");
+
+    app.apply(RuntimeEvent::QueryStarted {
+        tab: 0,
+        at: Instant::now(),
+        statement: 0,
+        of: 1,
+        keep_view: false,
+    });
+    app.apply(RuntimeEvent::Query {
+        tab: 0,
+        event: QueryEvent::Columns(vec![Column {
+            name: "id".to_owned(),
+            type_name: "int".to_owned(),
+        }]),
+    });
+    press(&mut app, "e");
+    assert!(
+        app.shell.prompt.is_none(),
+        "the rows so far are not all of them"
+    );
+    assert_eq!(app.shell.status, "export once every row is here");
+}
+
+#[test]
+fn the_finder_opens_a_view_on_its_source_the_way_the_readme_says() {
+    let mut app = two_tabs();
+    app.tabs[0].objects = indexed(
+        Kind::Mssql,
+        &["dbo", "bench"],
+        vec![object("bench", "v_customer_totals", ObjectKind::View)],
+    );
+    press(&mut app, "Ctrl-P");
+    for character in "v_customer".chars() {
+        press(&mut app, &character.to_string());
+    }
+    assert_eq!(
+        press(&mut app, "Enter"),
+        vec![Action::LoadObjects {
+            tab: 0,
+            request: CatalogRequest::Source {
+                schema: "bench".to_owned(),
+                name: "v_customer_totals".to_owned(),
+                kind: ObjectKind::View,
+            },
+        }]
+    );
+}
+
+#[test]
+fn a_tables_source_leaves_its_columns_still_to_fetch() {
+    let mut app = browsing();
+    let table = CatalogRequest::Source {
+        schema: "dbo".to_owned(),
+        name: "customers".to_owned(),
+        kind: ObjectKind::Table,
+    };
+    assert_eq!(
+        press(&mut app, "s"),
+        vec![Action::LoadObjects {
+            tab: 1,
+            request: table.clone()
+        }]
+    );
+    app.catalog_started(1, &table);
+    app.apply(RuntimeEvent::Catalog {
+        tab: 1,
+        request: table,
+        result: Ok(CatalogAnswer::Source(
+            "CREATE TABLE dbo.customers (\n)".to_owned(),
+        )),
+    });
+    assert_eq!(
+        press(&mut app, "l"),
+        vec![Action::LoadObjects {
+            tab: 1,
+            request: CatalogRequest::Columns {
+                schema: "dbo".to_owned(),
+                table: "customers".to_owned(),
+                show: false,
+            },
+        }],
+        "opening it asks for the columns the source did not bring"
+    );
+}
+
+#[test]
+fn a_listing_that_lands_under_a_running_query_leaves_the_pane_to_the_query() {
+    let mut app = browsing();
+    let source = CatalogRequest::Source {
+        schema: "dbo".to_owned(),
+        name: "customers".to_owned(),
+        kind: ObjectKind::Table,
+    };
+    app.catalog_started(1, &source);
+    app.apply(RuntimeEvent::QueryStarted {
+        tab: 1,
+        at: Instant::now(),
+        statement: 0,
+        of: 1,
+        keep_view: false,
+    });
+    app.apply(RuntimeEvent::Catalog {
+        tab: 1,
+        request: source,
+        result: Ok(CatalogAnswer::Source("CREATE TABLE x (\n)".to_owned())),
+    });
+    let results = &app.tabs[1].results;
+    assert!(results.running(), "Esc can still cancel it");
+    assert!(results.source().is_none(), "and its rows are not hidden");
+
+    let columns = CatalogRequest::Columns {
+        schema: "dbo".to_owned(),
+        table: "customers".to_owned(),
+        show: true,
+    };
+    app.apply(RuntimeEvent::Catalog {
+        tab: 1,
+        request: columns,
+        result: Ok(CatalogAnswer::Columns(Vec::new())),
+    });
+    assert!(app.tabs[1].results.running());
+}
+
+#[test]
+fn ctrl_q_quits_from_a_menu_and_from_the_export_prompt_too() {
+    let mut app = ready(Focus::Results);
+    press(&mut app, "e");
+    assert!(app.shell.prompt.is_some());
+    assert_eq!(press(&mut app, "Ctrl-Q"), vec![Action::Quit]);
+
+    let mut app = ready(Focus::Results);
+    app.shell.mouse.menu = Some(pointer::Menu {
+        pane: Focus::Results,
+        at: ratatui::layout::Position::new(10, 10),
+        item: 0,
+    });
+    assert_eq!(press(&mut app, "Ctrl-Q"), vec![Action::Quit]);
+}
+
+#[test]
+fn a_screen_too_small_to_draw_on_takes_no_keys_but_ctrl_q() {
+    let mut app = ready(Focus::Scratch);
+    app.handle(Event::Resize(40, 10));
+    let before = app.clone();
+    for spec in ["x", "Ctrl-R", "F5", "Enter", "Tab", "?"] {
+        assert_eq!(press(&mut app, spec), vec![], "{spec}");
+    }
+    app.handle(Event::Paste("select 1".to_owned()));
+    assert_eq!(app, before, "nothing it cannot show was done");
+    assert_eq!(press(&mut app, "Ctrl-Q"), vec![Action::Quit]);
+    app.handle(Event::Resize(60, 15));
+    press(&mut app, "y");
+    assert_ne!(
+        app.tabs[1].scratch.text(),
+        before.tabs[1].scratch.text(),
+        "and at the smallest it can draw, the keys are back"
+    );
+}
+
+#[test]
+fn m_while_the_rows_are_still_coming_says_to_wait_for_them() {
+    let mut app = two_tabs();
+    app.shell.focus = Focus::Results;
+    app.apply(RuntimeEvent::QueryStarted {
+        tab: 0,
+        at: Instant::now(),
+        statement: 0,
+        of: 1,
+        keep_view: false,
+    });
+    assert_eq!(press(&mut app, "m"), vec![]);
+    assert_eq!(app.shell.status, "more rows once this query is done");
+}
+
+#[test]
+fn with_nothing_matching_the_tree_keys_act_on_no_hidden_row() {
+    let mut app = browsing();
+    app.shell.focus = Focus::Objects;
+    press(&mut app, "/");
+    for character in ["z", "z", "z"] {
+        press(&mut app, character);
+    }
+    press(&mut app, "Enter");
+    let before = app.clone();
+    for spec in ["y", "Enter", "Space", "s", "i", "r", "l", "h"] {
+        assert_eq!(press(&mut app, spec), vec![], "{spec}");
+    }
+    assert_eq!(app, before);
+    press(&mut app, "Esc");
+    assert!(
+        app.tabs[1].objects.filter().is_empty(),
+        "Esc still clears it"
+    );
+}
+
+#[test]
+fn a_filter_typed_while_the_tab_connects_is_still_there_when_it_has() {
+    let mut app = two_tabs();
+    app.shell.focus = Focus::Objects;
+    app.apply(RuntimeEvent::Connecting { tab: 0 });
+    press(&mut app, "/");
+    for character in ["c", "u", "s", "t"] {
+        press(&mut app, character);
+    }
+    app.apply(RuntimeEvent::Connected {
+        tab: 0,
+        connect_ms: 3,
+    });
+    assert_eq!(app.tabs[0].objects.filter(), "cust");
+    assert!(app.tabs[0].objects.filtering());
 }

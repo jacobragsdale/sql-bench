@@ -185,6 +185,25 @@ impl RawConnection {
             "oracle" => Kind::Oracle,
             other => bail!("unknown kind {other:?}; kind is \"mssql\" or \"oracle\""),
         };
+        if self.name.trim().is_empty() {
+            bail!("name is empty; a connection is picked by its name");
+        }
+        if self.host.trim().is_empty() {
+            bail!("host is empty");
+        }
+        // A key the other kind reads, here, would be a setting that looks
+        // like it does something and does nothing.
+        let foreign = match kind {
+            Kind::Mssql => vec![("service", self.service.is_some())],
+            Kind::Oracle => vec![
+                ("database", self.database.is_some()),
+                ("trust_cert", self.trust_cert.is_some()),
+                ("encrypt", self.encrypt.is_some()),
+            ],
+        };
+        if let Some((key, _)) = foreign.iter().find(|(_, set)| *set) {
+            bail!("{key} is not a setting of kind {:?}", self.kind);
+        }
         match kind {
             Kind::Mssql if self.database.is_none() => {
                 bail!("kind is \"mssql\", which needs a database");
@@ -250,6 +269,12 @@ fn resolve_path(named: Option<OsString>, home: Option<OsString>) -> PathBuf {
             .join("sql-bench")
             .join("config.toml"),
     }
+}
+
+/// A path a person typed, a leading `~` their home directory.
+#[must_use]
+pub fn expand(path: &Path) -> PathBuf {
+    expand_home(path, std::env::var_os("HOME").map(PathBuf::from).as_deref())
 }
 
 /// A leading `~/` — or a bare `~` — is the home directory. Nothing else is
@@ -482,6 +507,32 @@ user = "bench"
 "#
             ),
             "connection \"ledger\": kind is \"oracle\", which needs a service"
+        );
+    }
+
+    #[test]
+    fn a_setting_of_the_other_kind_or_an_empty_name_is_an_error_not_ignored() {
+        let oracle = "[[connection]]\nname = \"o\"\nkind = \"oracle\"\nhost = \"h\"\n\
+                      service = \"s\"\nuser = \"u\"\n";
+        assert_eq!(
+            failure(&format!("{oracle}trust_cert = true\n")),
+            "connection \"o\": trust_cert is not a setting of kind \"oracle\""
+        );
+        assert_eq!(
+            failure(&format!("{oracle}database = \"d\"\n")),
+            "connection \"o\": database is not a setting of kind \"oracle\""
+        );
+        assert_eq!(
+            failure(&LOCAL_MSSQL.replace("user = ", "service = \"s\"\nuser = ")),
+            "connection \"local-mssql\": service is not a setting of kind \"mssql\""
+        );
+        assert_eq!(
+            failure(&LOCAL_MSSQL.replace("\"local-mssql\"", "\"\"")),
+            "connection \"\": name is empty; a connection is picked by its name"
+        );
+        assert_eq!(
+            failure(&LOCAL_MSSQL.replace("\"localhost\"", "\" \"")),
+            "connection \"local-mssql\": host is empty"
         );
     }
 

@@ -20,7 +20,7 @@ use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::Size;
 
 use crate::config::{Config, Kind};
-use crate::db::catalog::{CatalogAnswer, CatalogRequest, ObjectKind};
+use crate::db::catalog::{CatalogAnswer, CatalogRequest, ObjectKind, qualified};
 use crate::db::model::{DbError, QueryEvent};
 use finder::Finder;
 use objects::Objects;
@@ -111,6 +111,12 @@ pub const KEYS: &[(&str, &str, &str)] = &[
     ("PageDown", OBJECTS, "page down"),
     ("PageUp", OBJECTS, "page up"),
 ];
+
+/// Smaller than this and the three panes are narrower than their own titles,
+/// so one message is more use than a layout nobody can read — and the keys
+/// wait for a screen that shows what they do.
+pub const MIN_WIDTH: u16 = 60;
+pub const MIN_HEIGHT: u16 = 15;
 
 pub const ANYWHERE: &str = "anywhere";
 
@@ -616,16 +622,22 @@ impl App {
         }
         let (ran, of) = open.results.progress();
         if open.results.failure().is_some() {
-            let lines = open.results.statement_lines();
+            let lines = open.results.failed_lines(open.scratch.revision());
             open.scratch.flag(lines);
             self.shell.status = if of > 1 {
                 format!("statement {ran} of {of} failed")
             } else {
                 String::new()
             };
+        } else if reset && ran < of {
+            self.shell.status = format!(
+                "row cap: statement {ran} of {of} reset the session, so the {} after it did not run",
+                of - ran
+            );
         } else if reset {
             self.shell.status =
-                "row cap: session reset (open transaction rolled back, #temp tables gone)"
+                "row cap: session reset (the statement and any open transaction rolled back, \
+                 #temp tables gone)"
                     .to_owned();
         } else {
             // What the statements before the last did is not on screen, and
@@ -638,9 +650,22 @@ impl App {
     /// outside the app.
     pub fn handle(&mut self, event: Event) -> Vec<Action> {
         match event {
-            Event::Key(key) if key.kind == KeyEventKind::Press => self.key(key),
+            Event::Key(key) if key.kind == KeyEventKind::Press => {
+                let tab = self.shell.active_tab;
+                if !self.inspecting() {
+                    self.shell.inspector = None;
+                }
+                let actions = self.key(key);
+                if !self.inspecting() || self.shell.active_tab != tab {
+                    self.shell.inspector = None;
+                }
+                actions
+            }
             Event::Paste(text) => {
-                self.paste(&text);
+                let Size { width, height } = self.shell.size;
+                if width == 0 || width >= MIN_WIDTH && height >= MIN_HEIGHT {
+                    self.paste(&text);
+                }
                 Vec::new()
             }
             Event::Resize(columns, rows) => {
@@ -671,6 +696,26 @@ impl App {
     }
 
     fn key(&mut self, key: KeyEvent) -> Vec<Action> {
+        let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        // Ctrl-Q is the way out from anywhere, a menu or a prompt included.
+        if control && matches!(key.code, KeyCode::Char('q' | 'Q')) {
+            return vec![Action::Quit];
+        }
+        // A screen too small for the layout shows one line saying so, and a
+        // key pressed at it would act on panes nobody can see.
+        let Size { width, height } = self.shell.size;
+        if width > 0 && (width < MIN_WIDTH || height < MIN_HEIGHT) {
+            return Vec::new();
+        }
+        // With no connections the screen is the note on where they go, which
+        // says `q quits`: a finder or a help opened there would be drawn
+        // nowhere and take that `q` for itself.
+        if self.tabs.is_empty() {
+            return match key.code {
+                KeyCode::Char('q') if !chord(key) => vec![Action::Quit],
+                _ => Vec::new(),
+            };
+        }
         // A menu is only ever open on its own, and it is what the keys were
         // aimed at, so it takes every one — Esc before anything else Esc does.
         if self.shell.mouse.menu.is_some() {
@@ -681,9 +726,7 @@ impl App {
         if self.shell.prompt.is_some() {
             return self.prompt_key(key);
         }
-        let control = key.modifiers.contains(KeyModifiers::CONTROL);
-        if self.shell.finder.is_some() && !(control && matches!(key.code, KeyCode::Char('q' | 'Q')))
-        {
+        if self.shell.finder.is_some() {
             return self.finder_key(key);
         }
         if self.shell.help {
@@ -699,7 +742,6 @@ impl App {
         // of a table's name there and not a connect key.
         let filtering = self.filtering();
         match key.code {
-            KeyCode::Char('q' | 'Q') if control => return vec![Action::Quit],
             KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Esc | KeyCode::Enter
                 if filtering && !control =>
             {
@@ -793,10 +835,47 @@ impl App {
         Vec::new()
     }
 
+    /// Whether the inspector has a cell to be open on: the focused grid's,
+    /// with no source over it. Without one it is an overlay nobody can see,
+    /// taking the scroll keys of the pane that has them.
+    fn inspecting(&self) -> bool {
+        self.shell.focus == Focus::Results
+            && self
+                .tab()
+                .is_some_and(|tab| tab.results.source().is_none() && tab.results.cell().is_some())
+    }
+
     /// Whether an overlay the pad would be hidden behind is open. Text pasted
     /// there would land where nobody can see it.
     fn overlaid(&self) -> bool {
         self.shell.help || self.shell.inspector.is_some() || self.shell.mouse.menu.is_some()
+    }
+
+    /// Ctrl-V in the one-line prompt or the finder, which take every other
+    /// key for themselves: the clipboard, read for them. [`App::pasted`]
+    /// puts it on their line.
+    fn clipboard_key(&self, key: KeyEvent) -> Option<Vec<Action>> {
+        (key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char('v' | 'V')))
+        .then(|| {
+            vec![Action::ReadClipboard {
+                tab: self.shell.active_tab,
+            }]
+        })
+    }
+
+    /// Text into the prompt or the finder, as one line, if one is open.
+    fn paste_line(&mut self, text: &str) -> bool {
+        let line = || text.split_whitespace().collect::<Vec<_>>().join(" ");
+        if let Some(prompt) = self.shell.prompt.as_mut() {
+            prompt.insert(&line());
+        } else if let Some(finder) = self.shell.finder.as_mut() {
+            finder.query.insert(&line());
+            finder.search(&self.tabs);
+        } else {
+            return false;
+        }
+        true
     }
 
     /// A bracketed paste. The finder, the footer prompt and the tree's
@@ -804,13 +883,8 @@ impl App {
     /// anywhere else it goes into the pad, which takes the focus, because
     /// that is the only place text can be put.
     fn paste(&mut self, text: &str) {
-        let line = || text.split_whitespace().collect::<Vec<_>>().join(" ");
-        if let Some(prompt) = self.shell.prompt.as_mut() {
-            prompt.insert(&line());
-        } else if let Some(finder) = self.shell.finder.as_mut() {
-            finder.query.insert(&line());
-            finder.search(&self.tabs);
-        } else if !self.paste_filter(text)
+        if !self.paste_line(text)
+            && !self.paste_filter(text)
             && !self.overlaid()
             && let Some(tab) = self.tabs.get_mut(self.shell.active_tab)
         {
@@ -833,14 +907,19 @@ impl App {
                 return;
             }
         };
-        if tab == self.shell.active_tab && self.paste_filter(&text) {
+        if self.paste_line(&text) || tab == self.shell.active_tab && self.paste_filter(&text) {
             return;
         }
         let Some(open) = self.tabs.get_mut(tab) else {
             return;
         };
         open.scratch.paste(&text);
-        let lines = text.lines().count().max(1);
+        let lines = text
+            .replace("\r\n", "\n")
+            .split(['\n', '\r'])
+            .filter(|line| !line.is_empty())
+            .count()
+            .max(1);
         let noun = if lines == 1 { "line" } else { "lines" };
         self.shell.status = format!("pasted {lines} {noun}{from}");
     }
@@ -886,9 +965,7 @@ impl App {
     /// does: a key it has no use for would otherwise act on the pane hidden
     /// under it. Esc, `?` and F1 close it and Ctrl-Q still quits.
     fn help_key(&mut self, key: KeyEvent) -> Vec<Action> {
-        let control = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
-            KeyCode::Char('q' | 'Q') if control => return vec![Action::Quit],
             KeyCode::Esc | KeyCode::Char('?') | KeyCode::F(1) => self.close_help(),
             _ => {
                 if let Some(by) = scroll_by(key) {
@@ -930,29 +1007,25 @@ impl App {
         }
     }
 
-    /// How many lines the cell the inspector is open on comes to. The
-    /// overlay is sized by this and the scroll keys clamp against it, so
-    /// both agree on how far down the value goes.
+    /// How many lines the cell the inspector is open on comes to, at the
+    /// width it was last drawn: what the scroll keys clamp against.
     #[must_use]
     pub fn inspect_height(&self) -> usize {
+        let width = self
+            .shell
+            .inspector
+            .map_or(results::INSPECT_WIDTH, |inspector| inspector.width);
         self.tab()
             .and_then(|tab| tab.results.cell())
-            .map_or(0, results::inspect_height)
-    }
-
-    /// The `count` lines of it from `top`, which is what the overlay draws
-    /// and all it ever formats.
-    #[must_use]
-    pub fn inspect_lines(&self, top: usize, count: usize) -> Vec<String> {
-        self.tab()
-            .and_then(|tab| tab.results.cell())
-            .map(|cell| results::inspect_lines(cell, top, count))
-            .unwrap_or_default()
+            .map_or(0, |cell| results::inspect_height(cell, width))
     }
 
     /// A key the open finder took. Esc closes it, Enter goes where it
     /// points, and the rest is the finder's own.
     fn finder_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        if let Some(read) = self.clipboard_key(key) {
+            return read;
+        }
         let Some(mut finder) = self.shell.finder.take() else {
             return Vec::new();
         };
@@ -968,8 +1041,8 @@ impl App {
 
     /// The finder chose an object: its tab on screen, the tree open on it,
     /// and what it is made of in the results pane — the source of anything
-    /// that has some, the columns of a table or a view — with the focus
-    /// there, because reading it is what the finder was opened for.
+    /// that has some, a view's included, and the columns of a table — with
+    /// the focus there, because reading it is what the finder was opened for.
     fn go_to(&mut self, found: &finder::Match) -> Vec<Action> {
         let Some(open) = self.tabs.get_mut(found.tab) else {
             return Vec::new();
@@ -983,7 +1056,7 @@ impl App {
         }
         self.shell.status.clear();
         let request = match object.kind {
-            ObjectKind::Table | ObjectKind::View => CatalogRequest::Columns {
+            ObjectKind::Table => CatalogRequest::Columns {
                 schema: object.schema.clone(),
                 table: object.name.clone(),
                 show: true,
@@ -1005,6 +1078,9 @@ impl App {
     /// A key the open prompt is being typed with. Enter is what it was
     /// opened for and Esc is the way out of it; everything else is editing.
     fn prompt_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        if let Some(read) = self.clipboard_key(key) {
+            return read;
+        }
         match key.code {
             KeyCode::Enter => {
                 let path = self.shell.prompt.take().map(|prompt| prompt.text);
@@ -1037,7 +1113,16 @@ impl App {
         };
         match open.results.key(key) {
             Hit::Ignored | Hit::Moved => Vec::new(),
+            Hit::MoreRows if open.results.running() => {
+                self.shell.status = "more rows once this query is done".to_owned();
+                Vec::new()
+            }
             Hit::MoreRows if open.results.truncated() => vec![Action::MoreRows { tab }],
+            Hit::MoreRows if open.results.set().is_some_and(|set| set.truncated) => {
+                self.shell.status =
+                    "m fetches more of the last statement only: run this one on its own".to_owned();
+                Vec::new()
+            }
             Hit::MoreRows => {
                 self.shell.status = "every row is already here".to_owned();
                 Vec::new()
@@ -1078,6 +1163,15 @@ impl App {
                     None => Vec::new(),
                 }
             }
+            // A file of the rows so far would read as all of them.
+            Hit::Export if open.results.running() => {
+                self.shell.status = "export once every row is here".to_owned();
+                Vec::new()
+            }
+            Hit::Export if open.results.columns().is_empty() => {
+                self.shell.status = "nothing to export".to_owned();
+                Vec::new()
+            }
             Hit::Export => {
                 self.shell.prompt = Some(Prompt::new(prompt::export_path(&open.name)));
                 Vec::new()
@@ -1096,8 +1190,11 @@ impl App {
                 self.shell.status = "filter once every row is here".to_owned();
                 Vec::new()
             }
+            // What is typed is the filter's, and the overlay is over the
+            // rows it narrows.
             Hit::Filter => {
                 open.results.search();
+                self.shell.inspector = None;
                 Vec::new()
             }
         }
@@ -1124,6 +1221,10 @@ impl App {
         };
         open.objects.answer(request, result);
         match (request, result) {
+            // A query run since `i` or `s` was pressed is what the pane is
+            // for now: over it, a listing would hide its rows and end its
+            // `Running` with the query still going.
+            _ if open.results.running() => {}
             (
                 CatalogRequest::Columns {
                     schema,
@@ -1180,6 +1281,10 @@ impl App {
                         .lines()
                         .get(line)
                         .is_some_and(|text| text.trim().is_empty());
+                // After the line the cursor is in, never inside it, and
+                // never over a selection it was not typed into.
+                open.scratch
+                    .place((line, if alone { column } else { usize::MAX }), false);
                 open.scratch.paste(&if alone {
                     format!("{sql}\n")
                 } else {
@@ -1216,7 +1321,7 @@ impl App {
             Outcome::Unchanged | Outcome::Edited => Vec::new(),
             Outcome::RunStatement => match open.scratch.statement_at_cursor(kind) {
                 Some((sql, lines)) => {
-                    open.results.expect(vec![lines]);
+                    open.results.expect(vec![lines], open.scratch.revision());
                     vec![Action::RunStatement { tab, sql }]
                 }
                 None => {
@@ -1231,7 +1336,7 @@ impl App {
                     self.shell.status = "the pad is empty".to_owned();
                     return Vec::new();
                 }
-                open.results.expect(lines);
+                open.results.expect(lines, open.scratch.revision());
                 vec![Action::RunAll { tab, statements }]
             }
             Outcome::OpenEditor => vec![Action::OpenEditor { tab }],
@@ -1278,8 +1383,9 @@ fn scroll_by(key: KeyEvent) -> Option<isize> {
 /// backend spells a limit, and terminated so it cannot run into whatever
 /// statement follows it.
 fn select_from(kind: Kind, schema: &str, name: &str) -> String {
+    let table = qualified(kind, schema, name);
     match kind {
-        Kind::Mssql => format!("select top 100 * from {schema}.{name};"),
-        Kind::Oracle => format!("select * from {schema}.{name} fetch first 100 rows only;"),
+        Kind::Mssql => format!("select top 100 * from {table};"),
+        Kind::Oracle => format!("select * from {table} fetch first 100 rows only;"),
     }
 }

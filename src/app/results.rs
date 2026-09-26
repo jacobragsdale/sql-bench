@@ -62,16 +62,28 @@ pub enum Hit {
 /// The cell is read from the grid when the overlay is drawn rather than
 /// copied when it opens, so a hundred kilobyte value costs an overlay and
 /// not a second copy of itself.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Inspector {
     /// The first line of the value that is showing.
     pub scroll: usize,
+    /// The terminal columns the value was last wrapped at, which is how the
+    /// scroll keys count its lines: the overlay is narrower than
+    /// [`INSPECT_WIDTH`] on a screen narrower than it.
+    pub width: usize,
 }
 
-/// How wide the inspector wraps its value, which is the inside of an overlay
-/// four columns wider: two of border, two of padding. The app wraps and the
-/// renderer draws, so both have to mean the same width — and a hex dump line
-/// is what fixes it, being as wide as sixteen bytes make it.
+impl Default for Inspector {
+    fn default() -> Self {
+        Self {
+            scroll: 0,
+            width: INSPECT_WIDTH,
+        }
+    }
+}
+
+/// How wide the inspector wraps its value at most, which is the inside of an
+/// overlay four columns wider: two of border, two of padding — and a hex dump
+/// line is what fixes it, being as wide as sixteen bytes make it.
 pub const INSPECT_WIDTH: usize = 68;
 
 /// Where a query is.
@@ -137,6 +149,9 @@ pub struct Set {
     /// How many rows at the end the filter hides. They are kept rather than
     /// dropped, so clearing the filter costs a sort and not a query.
     hidden: usize,
+    /// Whether the row cap stopped its statement before its last row. Per
+    /// set, because an Oracle run goes on past a statement it cut short.
+    pub truncated: bool,
 }
 
 impl Set {
@@ -145,11 +160,14 @@ impl Set {
     /// [`None`] is exactly the order they came.
     fn arrange(&mut self, filter: &str) {
         let count = self.rows.len();
-        if self.order.is_empty() {
+        let arrived = self.order.is_empty();
+        if arrived {
             self.order = (0..count).collect();
         }
         let mut by: Vec<usize> = (0..count).collect();
         match self.sort {
+            // Already the order they came in, with nothing to undo.
+            None if arrived => {}
             None => by.sort_unstable_by_key(|&at| self.order[at]),
             Some((column, descending)) => {
                 let keys: Vec<Key> = self.rows.iter().map(|row| key(row.get(column))).collect();
@@ -161,9 +179,12 @@ impl Set {
         self.hidden = 0;
         if !filter.is_empty() {
             let wanted = filter.to_lowercase();
-            let hides: Vec<bool> = self.rows.iter().map(|row| !matches(row, &wanted)).collect();
-            by.sort_by_key(|&at| hides[at]);
-            self.hidden = hides.iter().filter(|hides| **hides).count();
+            let (shown, hidden): (Vec<usize>, Vec<usize>) = by
+                .into_iter()
+                .partition(|&at| matches(&self.rows[at], &wanted));
+            self.hidden = hidden.len();
+            by = shown;
+            by.extend(hidden);
         }
         let order = by.iter().map(|&at| self.order[at]).collect();
         self.order = if self.sort.is_some() || self.hidden > 0 {
@@ -177,17 +198,73 @@ impl Set {
             .collect();
         self.rows = by.iter().filter_map(|&at| rows[at].take()).collect();
     }
+
+    /// The filter grew by what was just typed: what it hid stays hidden, so
+    /// only the rows still showing are looked at again, and the ones that
+    /// stop matching go to the end with the rest, in order. Typing a word is
+    /// one pass over the rows and then passes over fewer and fewer.
+    fn narrow(&mut self, filter: &str) {
+        let wanted = filter.to_lowercase();
+        let showing = self.rows.len() - self.hidden;
+        let keeps: Vec<bool> = self.rows[..showing]
+            .iter()
+            .map(|row| matches(row, &wanted))
+            .collect();
+        let dropped = keeps.iter().filter(|keep| !**keep).count();
+        if dropped == 0 {
+            return;
+        }
+        if self.order.is_empty() {
+            self.order = (0..self.rows.len()).collect();
+        }
+        let (mut rows, mut order) = (Vec::with_capacity(showing), Vec::with_capacity(showing));
+        let (mut gone_rows, mut gone_order) = (Vec::with_capacity(dropped), Vec::new());
+        let taken = self.rows.drain(..showing).zip(self.order.drain(..showing));
+        for ((row, arrival), keep) in taken.zip(keeps) {
+            if keep {
+                rows.push(row);
+                order.push(arrival);
+            } else {
+                gone_rows.push(row);
+                gone_order.push(arrival);
+            }
+        }
+        rows.append(&mut gone_rows);
+        order.append(&mut gone_order);
+        self.rows.splice(0..0, rows);
+        self.order.splice(0..0, order);
+        self.hidden += dropped;
+    }
 }
 
 /// Whether any cell of `row` reads as something with `wanted` (lower case)
 /// in it, the way the grid draws it: `null` finds a NULL.
-///
-/// ponytail: every cell is lowered on every key typed, a copy of each value.
-/// Fine to the fetch cap; a LOB-heavy set that makes typing lag wants a
-/// case-insensitive search that does not copy.
 fn matches(row: &[Cell], wanted: &str) -> bool {
-    row.iter()
-        .any(|cell| shown(cell).to_lowercase().contains(wanted))
+    // A number is written in digits, a sign, a point and an exponent, so a
+    // word with any other letter in it is in none — and none is looked at,
+    // or written out, to find that.
+    let numeric = wanted
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || b"-+.e".contains(&byte));
+    row.iter().any(|cell| match cell {
+        Cell::Int(_) | Cell::Decimal(_) if !numeric => false,
+        cell => contains_folded(&shown(cell), wanted),
+    })
+}
+
+/// Whether `text` has `wanted` (lower case) in it, whatever case its letters
+/// are in. An ASCII `wanted` is compared a byte at a time where the text is,
+/// without a lower-cased copy of every cell on every key.
+fn contains_folded(text: &str, wanted: &str) -> bool {
+    if !wanted.is_ascii() {
+        return text.to_lowercase().contains(wanted);
+    }
+    let wanted = wanted.as_bytes();
+    wanted.is_empty()
+        || text
+            .as_bytes()
+            .windows(wanted.len())
+            .any(|window| window.eq_ignore_ascii_case(wanted))
 }
 
 /// What a cell sorts by. Oracle's `NUMBER` and SQL Server's numeric and
@@ -259,8 +336,10 @@ pub struct Results {
     /// `bench.customers columns`.
     label: Option<String>,
     /// The lines of the statements this run was asked for, in order, so the
-    /// pad can flag the one that failed. They never leave the app.
+    /// pad can flag the one that failed, and the pad's revision they are the
+    /// lines of. They never leave the app.
     statements: Vec<Range<usize>>,
+    revision: u64,
     /// The statement running now, as an index into `statements`.
     current: usize,
     /// How many statements of this run have started, how many there are, and
@@ -273,12 +352,19 @@ pub struct Results {
     filter: String,
     /// Whether `/` is still being typed into.
     filtering: bool,
+    /// Sets a new run replaced, for the run loop to free off the loop: a
+    /// million rows are a million allocations to give back.
+    discarded: Vec<Set>,
 }
 
 impl Results {
     /// A statement is starting. `keep_view` is `m` asking for more rows of
     /// the same statement, which keeps the cursor where the person left it.
     pub fn start(&mut self, at: Instant, statement: usize, of: usize, keep_view: bool) {
+        if keep_view {
+            // `m` runs the statement that was running, on its own.
+            self.statements = self.statement_lines().into_iter().collect();
+        }
         if statement == 0 && !keep_view {
             self.ran = 0;
             self.sets_total = 0;
@@ -287,7 +373,7 @@ impl Results {
         // Every statement of a run keeps its sets for `[` and `]`; the first
         // one, and `m`, start from none.
         if statement == 0 {
-            self.sets.clear();
+            self.discarded.append(&mut self.sets);
             self.shown = 0;
         }
         self.rows_affected = None;
@@ -308,16 +394,41 @@ impl Results {
         };
     }
 
-    /// The line ranges of the statements a run was asked for, kept so that a
-    /// failure can say which one it was.
-    pub fn expect(&mut self, statements: Vec<Range<usize>>) {
+    /// The sets a run replaced, to be freed somewhere the loop is not.
+    pub fn discarded(&mut self) -> Vec<Set> {
+        std::mem::take(&mut self.discarded)
+    }
+
+    /// The line ranges of the statements a run was asked for, in the pad at
+    /// `revision`, kept so that a failure can say which one it was.
+    pub fn expect(&mut self, statements: Vec<Range<usize>>, revision: u64) {
         self.statements = statements;
+        self.revision = revision;
     }
 
     /// The lines of the statement that is running, or that just failed.
     #[must_use]
     pub fn statement_lines(&self) -> Option<Range<usize>> {
         self.statements.get(self.current).cloned()
+    }
+
+    /// The lines of the statement that just failed, while the pad is still
+    /// at the revision they were split from — an edit since may have moved
+    /// them — and the driver's line of it made the pad's, the gutter's.
+    pub fn failed_lines(&mut self, revision: u64) -> Option<Range<usize>> {
+        let lines = self
+            .statement_lines()
+            .filter(|_| revision == self.revision)?;
+        if let Status::Failed {
+            error: DbError::Query {
+                line: Some(line), ..
+            },
+            ..
+        } = &mut self.status
+        {
+            *line = line.saturating_add(u32::try_from(lines.start).unwrap_or(u32::MAX));
+        }
+        Some(lines)
     }
 
     /// One event from the running query.
@@ -358,6 +469,11 @@ impl Results {
                 total_ms,
                 ..
             } => {
+                // Only a statement with rows is cut short, so the last set is
+                // its own.
+                if let Some(set) = self.sets.last_mut().filter(|_| truncated) {
+                    set.truncated = true;
+                }
                 self.status = Status::Done {
                     rows,
                     truncated,
@@ -369,6 +485,12 @@ impl Results {
                     Status::Running { since, rows_so_far } => (since.elapsed(), *rows_so_far),
                     _ => (Duration::ZERO, self.rows().len()),
                 };
+                // The message is a page after the sets, which `[` goes back
+                // to; a cancel keeps the rows it cut short on screen.
+                if error != DbError::Cancelled {
+                    self.unfilter();
+                    self.shown = self.sets.len();
+                }
                 self.status = Status::Failed {
                     error,
                     elapsed,
@@ -386,6 +508,13 @@ impl Results {
         let Some(set) = self.sets.last_mut() else {
             return;
         };
+        // Rows landing on a set already put in order — which `o` and `/`
+        // wait for the last row to prevent — are numbered on from the rest,
+        // so the next arrangement has an arrival for every row.
+        if !set.order.is_empty() {
+            let next = set.order.len();
+            set.order.extend(next..next + batch.len());
+        }
         for row in &batch {
             for (index, cell) in row.iter().enumerate() {
                 let Some(width) = set.widths.get_mut(index) else {
@@ -451,14 +580,14 @@ impl Results {
         let page = PAGE as isize;
         match key.code {
             KeyCode::Char('c' | 'C') if control => Hit::CopyCell,
-            KeyCode::Char('d' | 'D') if control => self.by_rows(page / 2),
-            KeyCode::Char('u' | 'U') if control => self.by_rows(-page / 2),
+            KeyCode::Char('d' | 'D') if control => self.by_page(page / 2),
+            KeyCode::Char('u' | 'U') if control => self.by_page(-page / 2),
             KeyCode::Char('j') | KeyCode::Down => self.by_rows(1),
             KeyCode::Char('k') | KeyCode::Up => self.by_rows(-1),
             KeyCode::Char('h') | KeyCode::Left => self.by_columns(-1),
             KeyCode::Char('l') | KeyCode::Right => self.by_columns(1),
-            KeyCode::PageDown => self.by_rows(page),
-            KeyCode::PageUp => self.by_rows(-page),
+            KeyCode::PageDown => self.by_page(page),
+            KeyCode::PageUp => self.by_page(-page),
             KeyCode::Char('g') => self.at_row(0),
             KeyCode::Char('G') => self.at_row(usize::MAX),
             KeyCode::Char('0') => self.at_column(0),
@@ -495,7 +624,7 @@ impl Results {
     /// A paste while the filter is being typed into: one more piece of it.
     pub fn paste_filter(&mut self, text: &str) {
         self.filter.push_str(text);
-        self.refilter();
+        self.refilter(true);
     }
 
     #[must_use]
@@ -513,18 +642,18 @@ impl Results {
         match key.code {
             KeyCode::Char('u' | 'U') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.filter.clear();
-                self.refilter();
+                self.refilter(false);
             }
             KeyCode::Char(_) if chord(key) => return Hit::Ignored,
             KeyCode::Char(character) => {
                 self.filter.push(character);
-                self.refilter();
+                self.refilter(true);
             }
             KeyCode::Backspace => {
                 if self.filter.pop().is_none() {
                     self.filtering = false;
                 }
-                self.refilter();
+                self.refilter(false);
             }
             // Esc clears it; Enter keeps it and gives the keys back.
             KeyCode::Esc => {
@@ -544,18 +673,24 @@ impl Results {
             return false;
         }
         self.filter.clear();
-        self.refilter();
+        self.refilter(false);
         true
     }
 
     /// The set on screen narrowed to the filter anew, the cursor on its
     /// first row: the row it was on may be hidden now.
-    fn refilter(&mut self) {
+    /// `grew` is text added to the end of the filter, which can only hide
+    /// more of what it already showed.
+    fn refilter(&mut self, grew: bool) {
         self.clear_selection();
         self.selected.0 = 0;
         self.scroll.0 = 0;
         if let Some(set) = self.sets.get_mut(self.shown) {
-            set.arrange(&self.filter);
+            if grew {
+                set.narrow(&self.filter);
+            } else {
+                set.arrange(&self.filter);
+            }
         }
     }
 
@@ -649,6 +784,14 @@ impl Results {
         self.drag(from, (row, column), window);
     }
 
+    /// A page, or half of one, for the view as much as the cursor: the row
+    /// the cursor is on stays where it was on the screen, so a click on the
+    /// scrollbar's track scrolls even when the cursor had room to move.
+    fn by_page(&mut self, delta: isize) -> Hit {
+        self.scroll.0 = self.scroll.0.saturating_add_signed(delta);
+        self.by_rows(delta)
+    }
+
     fn by_rows(&mut self, delta: isize) -> Hit {
         self.at_row(self.selected.0.saturating_add_signed(delta))
     }
@@ -658,13 +801,7 @@ impl Results {
     }
 
     fn at_row(&mut self, row: usize) -> Hit {
-        let row = row.min(self.rows().len().saturating_sub(1));
-        self.selected.0 = row;
-        if row < self.scroll.0 {
-            self.scroll.0 = row;
-        } else if row >= self.scroll.0 + PAGE {
-            self.scroll.0 = row + 1 - PAGE;
-        }
+        self.selected.0 = row.min(self.rows().len().saturating_sub(1));
         Hit::Moved
     }
 
@@ -676,14 +813,8 @@ impl Results {
     }
 
     /// A click on cell (`row`, `column`) of a window drawn from `(top,
-    /// left)`. The window is set to what was drawn rather than worked out by
-    /// `at_row`, whose page rule would move a view whose bottom row was
-    /// clicked, or from a column hint that `h` and `l` leave behind the
-    /// view. Whether there was a cell there.
-    ///
-    /// ponytail: the first `j` after a click ten or more rows below `top`
-    /// still moves the view once, by `at_row`'s page rule. A real page
-    /// height in the app would end that.
+    /// left)`, which stays where it was drawn. Whether there was a cell
+    /// there.
     pub fn click(&mut self, row: usize, column: usize, (top, left): (usize, usize)) -> bool {
         if row >= self.rows().len() || column >= self.columns().len() {
             return false;
@@ -692,6 +823,12 @@ impl Results {
         self.selected = (row, column);
         self.scroll = (top, left);
         true
+    }
+
+    /// The grid as a frame just drew it, so what the cursor does next moves
+    /// the view from there and only as far as [`Self::window`] must.
+    pub const fn show_from(&mut self, top: usize, left: usize) {
+        self.scroll = (top, left);
     }
 
     /// A click on a column's header, drawn with `left` at the left edge:
@@ -783,11 +920,11 @@ impl Results {
 
     /// `[` and `]`, wrapping round the way Ctrl-T wraps round the tabs.
     fn switch_set(&mut self, delta: isize) -> Hit {
-        if self.sets.len() < 2 {
+        let count = self.pages();
+        if count < 2 {
             return Hit::Moved;
         }
         self.unfilter();
-        let count = self.sets.len();
         self.shown = (self.shown + count).saturating_add_signed(delta) % count;
         self.clear_selection();
         self.selected = (0, 0);
@@ -845,6 +982,17 @@ impl Results {
         self.sets.len()
     }
 
+    /// The sets, and the failure after them when there is one: what `[`
+    /// and `]` go round.
+    #[must_use]
+    pub fn pages(&self) -> usize {
+        self.sets.len()
+            + usize::from(matches!(
+                &self.status,
+                Status::Failed { error, .. } if *error != DbError::Cancelled
+            ))
+    }
+
     /// Which set is on screen, counting from one, for `set 1/2`.
     #[must_use]
     pub const fn shown(&self) -> usize {
@@ -863,6 +1011,8 @@ impl Results {
         matches!(self.status, Status::Running { .. })
     }
 
+    /// Whether the row cap stopped the last statement, which is the one `m`
+    /// runs again.
     #[must_use]
     pub const fn truncated(&self) -> bool {
         matches!(
@@ -874,12 +1024,17 @@ impl Results {
         )
     }
 
-    /// The failure the pane shows the message of — a cancel is not one,
-    /// because the rows it did fetch are still worth looking at.
+    /// The failure the pane shows the message of, while it is on its page —
+    /// a cancel is not one, because the rows it did fetch are still worth
+    /// looking at.
     #[must_use]
     pub const fn failure(&self) -> Option<&DbError> {
         match &self.status {
-            Status::Failed { error, .. } if !matches!(error, DbError::Cancelled) => Some(error),
+            Status::Failed { error, .. }
+                if !matches!(error, DbError::Cancelled) && self.shown == self.sets.len() =>
+            {
+                Some(error)
+            }
             _ => None,
         }
     }
@@ -936,17 +1091,14 @@ impl Results {
                 truncated,
                 elapsed,
             } => {
-                // With more than one set the title counts the one on screen,
-                // and only the last can have been cut short.
+                // The title counts the set on screen — which may be an
+                // earlier statement's, under an update that returned none.
                 let (rows, truncated) = match self.set() {
-                    Some(set) if self.sets.len() > 1 => (
-                        set.rows.len(),
-                        *truncated && self.shown + 1 == self.sets.len(),
-                    ),
-                    _ => (*rows, *truncated),
+                    Some(set) => (set.rows.len(), set.truncated),
+                    None => (*rows, *truncated),
                 };
-                let what = match (self.rows_affected, rows) {
-                    (Some(affected), 0) => format!("{} affected", counted(affected, "row")),
+                let what = match (self.rows_affected, self.set()) {
+                    (Some(affected), None) => format!("{} affected", counted(affected, "row")),
                     _ => format!(
                         "{}{}",
                         self.of(rows),
@@ -970,7 +1122,11 @@ impl Results {
                 seconds(*elapsed),
                 self.of(*rows)
             ),
-            Status::Failed { .. } => "Results · failed".to_owned(),
+            // The rows of the statements before the one that failed.
+            Status::Failed { .. } => match self.set() {
+                Some(rows) => format!("Results{set} · {} · failed", self.of(rows.rows.len())),
+                None => "Results · failed".to_owned(),
+            },
         }
     }
 
@@ -1172,19 +1328,21 @@ pub fn inspect_title(column: &Column, cell: &Cell) -> String {
     format!("{} · {} · {size}", column.name, column.type_name)
 }
 
-/// How many lines the whole of one cell comes to: text wrapped at
-/// [`INSPECT_WIDTH`] with its own line breaks kept, bytes as a hex dump,
+/// How many lines the whole of one cell comes to at `width` terminal
+/// columns: text wrapped with its own line breaks kept, bytes as a hex dump,
 /// and NULL as the one word the grid shows.
 ///
 /// Counted rather than built, because this is what a scroll key clamps
 /// against and what the overlay is sized by — and the 1 MiB a LOB stops at
 /// would otherwise be 1 MiB formatted per keystroke.
 #[must_use]
-pub fn inspect_height(cell: &Cell) -> usize {
+pub fn inspect_height(cell: &Cell, width: usize) -> usize {
     match cell {
         Cell::Null => 1,
         Cell::Bytes(bytes) => bytes.len().div_ceil(HEX_PER_LINE),
-        other => wrapped_height(&other.display()),
+        other => paragraphs(&other.display())
+            .map(|paragraph| wrap(paragraph, width).count())
+            .sum(),
     }
 }
 
@@ -1192,7 +1350,7 @@ pub fn inspect_height(cell: &Cell) -> usize {
 /// long as a LOB is allowed to be and an overlay is forty lines tall, so
 /// what a frame costs is the overlay and never the value.
 #[must_use]
-pub fn inspect_lines(cell: &Cell, top: usize, count: usize) -> Vec<String> {
+pub fn inspect_lines(cell: &Cell, top: usize, count: usize, width: usize) -> Vec<String> {
     match cell {
         Cell::Null => vec!["NULL".to_owned()],
         Cell::Bytes(bytes) => bytes
@@ -1202,7 +1360,12 @@ pub fn inspect_lines(cell: &Cell, top: usize, count: usize) -> Vec<String> {
             .take(count)
             .map(|(line, chunk)| hex_line(line * HEX_PER_LINE, chunk))
             .collect(),
-        other => wrapped(&other.display(), top, count),
+        other => paragraphs(&other.display())
+            .flat_map(|paragraph| wrap(paragraph, width))
+            .skip(top)
+            .take(count)
+            .map(|line| line.chars().map(crate::export::printable).collect())
+            .collect(),
     }
 }
 
@@ -1238,49 +1401,37 @@ fn hex_line(offset: usize, chunk: &[u8]) -> String {
     text
 }
 
-/// One paragraph of the text, its trailing carriage return dropped, as the
-/// overlay wraps it: the [`INSPECT_WIDTH`] characters of each line.
+/// One paragraph of the text, its trailing carriage return dropped.
 fn paragraphs(text: &str) -> impl Iterator<Item = &str> {
     text.split('\n')
         .map(|paragraph| paragraph.strip_suffix('\r').unwrap_or(paragraph))
 }
 
-/// How many lines the wrapped text comes to. A paragraph exactly as wide as
-/// the overlay is one line and not one line and an empty one, and an empty
-/// paragraph is still a line.
-fn wrapped_height(text: &str) -> usize {
-    paragraphs(text)
-        .map(|paragraph| paragraph.chars().count().div_ceil(INSPECT_WIDTH).max(1))
-        .sum()
-}
-
-/// The `count` wrapped lines from `top`, cut where the text is too long and
-/// broken where it breaks itself. Only those lines are built: the rest of
-/// the value is counted past, not formatted.
-fn wrapped(text: &str, top: usize, count: usize) -> Vec<String> {
-    let mut lines = Vec::with_capacity(count.min(64));
-    let mut line = 0;
-    for paragraph in paragraphs(text) {
-        let height = paragraph.chars().count().div_ceil(INSPECT_WIDTH).max(1);
-        if line + height > top {
-            let skip = top.saturating_sub(line);
-            let mut characters = paragraph.chars().skip(skip * INSPECT_WIDTH);
-            for _ in skip..height {
-                if lines.len() == count {
-                    return lines;
-                }
-                lines.push(
-                    characters
-                        .by_ref()
-                        .take(INSPECT_WIDTH)
-                        .map(crate::export::printable)
-                        .collect(),
-                );
-            }
-        }
-        line += height;
-    }
-    lines
+/// A paragraph in lines of at most `width` terminal columns, each a slice of
+/// it: a CJK character is two of them, so a line of it holds half as many.
+/// An empty paragraph is still a line, and a line always takes a character,
+/// so a glyph wider than the whole overlay cannot stop it.
+fn wrap(paragraph: &str, width: usize) -> impl Iterator<Item = &str> {
+    let width = width.max(1);
+    let ascii = paragraph.bytes().all(|byte| (b' '..=b'~').contains(&byte));
+    let mut rest = Some(paragraph);
+    std::iter::from_fn(move || {
+        let text = rest?;
+        let end = if ascii {
+            width.min(text.len())
+        } else {
+            let mut used = 0;
+            text.char_indices()
+                .find(|&(at, character)| {
+                    used += crate::export::cells(character);
+                    used > width && at > 0
+                })
+                .map_or(text.len(), |(at, _)| at)
+        };
+        let (line, after) = text.split_at(end);
+        rest = (!after.is_empty()).then_some(after);
+        Some(line)
+    })
 }
 
 /// A cell cut to `width` terminal columns, the last of which says there was
@@ -1388,11 +1539,35 @@ mod tests {
         assert_eq!(results.title(), "Results · 2 rows · 42 ms");
     }
 
+    /// Oracle goes on past a statement the cap cut short, and the flag used
+    /// to be the last statement's alone: set 1 read as whole.
+    #[test]
+    fn a_set_the_cap_cut_short_says_so_under_a_later_statement() {
+        let mut results = started();
+        results.apply(columns(&[("id", "int")]));
+        results.apply(Rows((0..5).map(|n| vec![Cell::Int(n)]).collect()));
+        results.apply(done(5, true, 3));
+        results.start(Instant::now(), 1, 2, false);
+        results.apply(columns(&[("n", "int")]));
+        results.apply(Rows(vec![vec![Cell::Int(1)]]));
+        results.apply(done(1, false, 4));
+        assert_eq!(results.title(), "Results · set 2/2 · 1 row · 4 ms");
+        results.key(key("["));
+        assert_eq!(
+            results.title(),
+            "Results · set 1/2 · 5 rows (truncated) · 4 ms"
+        );
+        assert!(
+            !results.truncated(),
+            "`m` runs only the last statement again"
+        );
+    }
+
     #[test]
     fn a_cap_that_stopped_the_scan_says_so_and_offers_more() {
         let mut results = started();
         results.apply(columns(&[("id", "int")]));
-        results.apply(Rows(vec![vec![Cell::Int(1)]]));
+        results.apply(Rows((0..10_000).map(|n| vec![Cell::Int(n)]).collect()));
         results.apply(done(10_000, true, 1_234));
         assert!(results.truncated());
         assert_eq!(
@@ -1429,7 +1604,7 @@ mod tests {
     #[test]
     fn a_failure_is_the_drivers_own_message_and_the_statement_it_was_on() {
         let mut results = Results::default();
-        results.expect(vec![0..1, 2..3]);
+        results.expect(vec![0..1, 2..5], 7);
         results.start(Instant::now(), 1, 2, false);
         results.apply(Error(DbError::Query {
             message: "Invalid object name 'bench.nope'.".to_owned(),
@@ -1439,9 +1614,42 @@ mod tests {
             results.failure().map(ToString::to_string),
             Some("line 3: Invalid object name 'bench.nope'.".to_owned())
         );
-        assert_eq!(results.statement_lines(), Some(2..3), "the one that failed");
+        assert_eq!(results.clone().failed_lines(8), None, "the pad was edited");
+        assert_eq!(results.failed_lines(7), Some(2..5), "the one that failed");
+        assert_eq!(
+            results.failure().map(ToString::to_string),
+            Some("line 5: Invalid object name 'bench.nope'.".to_owned()),
+            "its third line is the pad's fifth"
+        );
         assert_eq!(results.progress(), (2, 2), "the second of two");
         assert_eq!(results.title(), "Results · failed");
+    }
+
+    /// A run that failed at its second statement kept the first one's rows
+    /// behind the message for good, and `e` and the ◀ ▶ chips acted on them
+    /// unseen.
+    #[test]
+    fn the_rows_before_a_failure_are_a_bracket_away_from_its_message() {
+        let mut results = Results::default();
+        results.start(Instant::now(), 0, 2, false);
+        results.apply(columns(&[("n", "int")]));
+        results.apply(Rows(vec![vec![Cell::Int(1)]]));
+        results.apply(done(1, false, 2));
+        results.start(Instant::now(), 1, 2, false);
+        results.apply(Error(DbError::Query {
+            message: "boom".to_owned(),
+            line: None,
+        }));
+        assert!(results.failure().is_some());
+        assert!(results.columns().is_empty(), "nothing for `e` to write");
+        assert_eq!(results.title(), "Results · failed");
+
+        results.key(key("["));
+        assert_eq!(results.failure(), None);
+        assert_eq!(results.rows(), [[Cell::Int(1)]]);
+        assert_eq!(results.title(), "Results · 1 row · failed");
+        results.key(key("]"));
+        assert!(results.failure().is_some(), "and round to the message");
     }
 
     #[test]
@@ -1663,6 +1871,105 @@ mod tests {
         assert_eq!(results.selection_text(), None, "no range is the cell's own");
         results.key(key("v"));
         assert_eq!(results.selection_text(), None, "and so is a range of one");
+    }
+
+    #[test]
+    fn the_inspector_wraps_at_terminal_columns_so_wide_text_is_not_cut_off() {
+        let cjk = Cell::Text("李".repeat(10));
+        assert_eq!(
+            inspect_height(&cjk, 8),
+            3,
+            "four to a line of eight columns"
+        );
+        assert_eq!(
+            inspect_lines(&cjk, 0, 9, 8),
+            ["李李李李", "李李李李", "李李"]
+        );
+        let ascii = Cell::Text("abcdefghij\nxy".to_owned());
+        assert_eq!(inspect_height(&ascii, 4), 4);
+        assert_eq!(inspect_lines(&ascii, 1, 3, 4), ["efgh", "ij", "xy"]);
+        assert_eq!(
+            inspect_height(&Cell::Text(String::new()), 4),
+            1,
+            "an empty value is a line"
+        );
+        assert_eq!(
+            inspect_lines(&Cell::Text("李".to_owned()), 0, 2, 1),
+            ["李"],
+            "a glyph wider than the line still gets one"
+        );
+    }
+
+    #[test]
+    fn rows_landing_on_a_set_already_in_order_are_numbered_on_and_arranged_with_it() {
+        let mut results = filled(10, 2);
+        results.sort();
+        results.apply(Rows((10..15).map(|n| vec![Cell::Int(n)]).collect()));
+        results.sort();
+        results.sort();
+        assert_eq!(results.rows().len(), 15, "and no row out of bounds");
+        assert_eq!(
+            results.rows()[14][0],
+            Cell::Int(14),
+            "back in the order they came"
+        );
+    }
+
+    #[test]
+    fn a_filter_typed_a_letter_at_a_time_shows_what_all_of_it_at_once_does() {
+        let names = [
+            "alpha", "Beta", "gamma", "ALPHABET", "delta", "Zoë", "palpable",
+        ];
+        let make = || {
+            let mut results = started();
+            results.apply(columns(&[("id", "int"), ("name", "text")]));
+            results.apply(Rows(
+                (0..40)
+                    .map(|n| {
+                        vec![
+                            Cell::Int(n * 7 % 40),
+                            Cell::Text(names[n as usize % names.len()].to_owned()),
+                        ]
+                    })
+                    .collect(),
+            ));
+            results.apply(done(40, false, 1));
+            results
+        };
+        let ids = |results: &Results| -> Vec<Cell> {
+            results.rows().iter().map(|row| row[0].clone()).collect()
+        };
+        for sorted in [false, true] {
+            let mut typed = make();
+            if sorted {
+                typed.key(key("l"));
+                typed.key(key("o"));
+                typed.key(key("o"));
+            }
+            typed.search();
+            for letter in ["a", "l", "p"] {
+                typed.key(key(letter));
+            }
+            let mut whole = make();
+            if sorted {
+                whole.key(key("l"));
+                whole.key(key("o"));
+                whole.key(key("o"));
+            }
+            whole.paste_filter("alp");
+            assert_eq!(ids(&typed), ids(&whole), "sorted: {sorted}");
+            assert_eq!(typed.rows().len(), 17, "alpha, ALPHABET, palpable");
+            typed.key(key("Backspace"));
+            typed.key(key("Backspace"));
+            whole.unfilter();
+            whole.paste_filter("a");
+            assert_eq!(ids(&typed), ids(&whole), "and back: sorted {sorted}");
+        }
+
+        // A number is looked for in the numbers, and a word is not.
+        let mut results = make();
+        results.paste_filter("12");
+        assert_eq!(ids(&results), [Cell::Int(12)]);
     }
 
     #[test]

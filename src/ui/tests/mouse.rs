@@ -183,6 +183,7 @@ fn inspecting() -> App {
     results.apply(QueryEvent::Rows(vec![vec![Cell::Text(
         "a line\n".repeat(60),
     )]]));
+    done(results, false);
     app.shell.focus = Focus::Results;
     app.shell.inspector = Some(Inspector::default());
     app
@@ -192,7 +193,7 @@ fn inspecting() -> App {
 fn the_wheel_scrolls_the_inspector_and_a_click_beside_it_closes_it() {
     let mut app = inspecting();
     mouse(&mut app, MouseEventKind::ScrollDown, 60, 20);
-    assert_eq!(app.shell.inspector, Some(Inspector { scroll: 3 }));
+    assert_eq!(app.shell.inspector.map(|open| open.scroll), Some(3));
     assert_eq!(app.shell.focus, Focus::Results);
     click(&mut app, OBJECTS.0, OBJECTS.1);
     assert_eq!(app.shell.inspector, None);
@@ -487,6 +488,8 @@ fn scrolled() -> App {
     for _ in 0..3 {
         app.tabs[0].objects.key(key("PageDown"));
     }
+    // A tree scrolled down under its cursor, as a wheel leaves it.
+    app.tabs[0].objects.show_from(22);
     let text: Vec<String> = (1..=40).map(|n| format!("select {n}")).collect();
     let scratch = &mut app.tabs[0].scratch;
     scratch.set_text(&text.join("\n"));
@@ -591,9 +594,10 @@ fn each_pane_draws_a_button_only_where_its_key_does_what_it_says() {
             "─".repeat(25)
         )
     );
+    // No Export while the rows are still coming: `e` waits for the last.
     assert!(
         row_with(&running, WIDE, "╭ Running")
-            .ends_with(&format!(" 3 rows {} Export ─ ■ Cancel ─╮", "─".repeat(36)))
+            .ends_with(&format!(" 3 rows {} ■ Cancel ─╮", "─".repeat(45)))
     );
     assert_eq!(
         row_with(&running, WIDE, " boom"),
@@ -773,6 +777,34 @@ fn a_click_on_the_prompt_text_puts_the_cursor_there() {
     assert_eq!(app.shell.prompt, None);
 }
 
+/// A path wider than the footer used to run off its end, cursor and all,
+/// and push the connection off with it.
+#[test]
+fn a_path_wider_than_the_footer_shows_the_cursor_and_a_click_counts_what_is_scrolled_off() {
+    let mut app = prompting();
+    let path = format!("~/{}.csv", "x".repeat(200));
+    app.shell.prompt = Some(crate::app::prompt::Prompt::new(path.clone()));
+    let terminal = frame(120, 40, &app);
+    let footer = line(&terminal, 39);
+    assert!(footer.trim_end().ends_with("● connected"), "{footer:?}");
+    let dot = footer.find(".csv").expect("the end of the path");
+    let at = |column: usize| u16::try_from(column).expect("a column");
+    assert_eq!(
+        painted(&terminal, at(dot + 4), 39),
+        Theme::new(false).cursor
+    );
+    click(&mut app, at(dot), 39);
+    assert_eq!(
+        app.shell.prompt.as_ref().map(|prompt| prompt.cursor),
+        Some(path.len() - 4)
+    );
+
+    app.handle(Event::Key(key("Home")));
+    let terminal = frame(120, 40, &app);
+    assert!(line(&terminal, 39).starts_with(" Export to: ~/xxx"));
+    assert_eq!(painted(&terminal, 12, 39), Theme::new(false).cursor);
+}
+
 #[test]
 fn the_pointer_lights_up_a_button_and_nothing_under_an_overlay() {
     let hover = seen(Theme::new(false).hover);
@@ -831,9 +863,17 @@ fn deep() -> App {
     app.tabs[0].results = crate::app::tests::filled(500, 4);
     app.shell.focus = Focus::Results;
     for spec in ["j"; 50].into_iter().chain(["k"; 19]) {
-        app.handle(Event::Key(key(spec)));
+        pressed(&mut app, spec);
     }
     app
+}
+
+/// A key and the frame after it, whose windows the app is told of the way
+/// the run loop tells it: that is where a pane scrolls on from.
+fn pressed(app: &mut App, spec: &str) {
+    app.handle(Event::Key(key(spec)));
+    let hits = hits(app);
+    app.drawn(&hits);
 }
 
 /// A row of `deep()`'s grid, drawn: the long text cut to its forty columns.
@@ -843,6 +883,37 @@ fn grid_row(row: usize) -> String {
         .take(39)
         .collect();
     right(&format!("{row:>8}  {long}…  NULL         c3r{row}"))
+}
+
+/// The grid and the tree used to scroll once the cursor was ten rows down,
+/// however tall the pane: `j` from the top moved the rows, not the cursor.
+#[test]
+fn j_moves_the_cursor_down_a_tall_pane_before_it_moves_the_rows() {
+    let mut app = idle();
+    app.tabs[0].results = crate::app::tests::filled(500, 4);
+    tall_tree(&mut app);
+    for focus in [Focus::Results, Focus::Objects] {
+        app.shell.focus = focus;
+        for _ in 0..15 {
+            pressed(&mut app, "j");
+        }
+    }
+    let terminal = frame(120, 40, &app);
+    assert!(line(&terminal, 19).contains("│        0  row 0 of a value"));
+    assert_eq!(app.tabs[0].results.selected().0, 15);
+    let tree = text(&terminal);
+    assert!(
+        tree.contains("▾ dbo"),
+        "the tree's top row is still on it:\n{tree}"
+    );
+
+    // A page moves the view with the cursor, which keeps its screen row: a
+    // click on the scrollbar's track scrolls, whatever room was left.
+    app.shell.focus = Focus::Results;
+    pressed(&mut app, "PageDown");
+    let terminal = frame(120, 40, &app);
+    assert!(line(&terminal, 19).contains("│       10  row 10 of a value"));
+    assert_eq!(app.tabs[0].results.selected().0, 25);
 }
 
 #[test]

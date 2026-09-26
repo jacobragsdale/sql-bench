@@ -368,6 +368,59 @@ fn a_procedure_from_the_pad_compiles_or_says_why_not() {
 }
 
 #[test]
+fn a_note_above_a_block_or_a_procedure_leaves_its_end_where_it_was() {
+    let connection = connection!();
+    assert_eq!(
+        run(&connection, "-- run it\nbegin\n  null;\nend;")[0],
+        QueryEvent::RowsAffected(0)
+    );
+    let good = run(
+        &connection,
+        "-- mine\ncreate or replace procedure zz_note_p is\nbegin\n  null;\nend;",
+    );
+    assert_eq!(good[0], QueryEvent::RowsAffected(0), "{good:?}");
+    assert_eq!(
+        rows(&run(
+            &connection,
+            "select status from user_objects where object_name = 'ZZ_NOTE_P'"
+        )),
+        [[Cell::Text("VALID".to_owned())]],
+        "created whole, not INVALID for want of its last semicolon"
+    );
+    let bad = run(
+        &connection,
+        "-- mine\ncreate or replace procedure zz_note_p is\nbegin\n  nope;\nend;",
+    );
+    let QueryEvent::Error(DbError::Query { message, line }) = &bad[0] else {
+        panic!("an INVALID procedure is not a success: {bad:?}");
+    };
+    assert!(message.starts_with("PLS-00201"), "{message}");
+    assert_eq!(*line, Some(4), "the line nope is on, the note counted");
+    run(&connection, "drop procedure zz_note_p");
+}
+
+#[test]
+fn a_select_for_update_reads_every_batch_and_lets_its_locks_go() {
+    let connection = connection!();
+    let other = connection!();
+    let locked = run(
+        &connection,
+        "select id from events where id <= 2000 order by id for update",
+    );
+    assert_eq!(rows(&locked).len(), 2000, "past the first batch of 500");
+    assert_eq!(done(&locked), (2000, false));
+    let taken = run(
+        &other,
+        "select id from events where id = 5 for update nowait",
+    );
+    assert_eq!(
+        rows(&taken),
+        [[Cell::Decimal("5".to_owned())]],
+        "another session locks the row at once: {taken:?}"
+    );
+}
+
+#[test]
 fn a_message_ends_where_the_server_stopped_talking_about_it() {
     let connection = connection!();
     let message = complaint(&run(&connection, "select 1/0 from dual"));

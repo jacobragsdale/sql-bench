@@ -28,8 +28,14 @@ fn run() -> Result<ExitCode> {
         cli.config.is_some() || config::named_by_env(),
     )?;
     match cli.command {
-        Some(_) => cli::run(&cli, &config),
-        None if cli.replay.is_some() => run::replay(&config, &cli),
+        Some(_) => {
+            run::restore_only_from_main();
+            cli::run(&cli, &config)
+        }
+        None if cli.replay.is_some() => {
+            run::restore_only_from_main();
+            run::replay(&config, &cli)
+        }
         None => run::run(&config, &cli, panic_after(&cli)).map(|()| ExitCode::SUCCESS),
     }
 }

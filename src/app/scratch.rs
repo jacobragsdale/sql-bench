@@ -14,6 +14,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use unicode_width::UnicodeWidthChar;
 
 use crate::config::Kind;
+use crate::db::code_start;
 
 /// How long after the last edit the pad is written to disk. It is also what
 /// ends an undo burst, so one Ctrl-Z takes back everything typed without a
@@ -87,6 +88,9 @@ pub struct Scratch {
     modified: bool,
     /// The lines of the statement that failed, painted until the next edit.
     flagged: Option<Range<usize>>,
+    /// Counts edits, so a run can tell whether the lines it split are still
+    /// where they were when its statement fails.
+    revision: u64,
 }
 
 impl Default for Scratch {
@@ -103,6 +107,7 @@ impl Default for Scratch {
             dirty_since: None,
             modified: false,
             flagged: None,
+            revision: 0,
         }
     }
 }
@@ -113,6 +118,19 @@ impl Scratch {
     pub fn new(text: &str) -> Self {
         Self {
             lines: split_lines(text),
+            ..Self::default()
+        }
+    }
+
+    /// Text in the pad's lines exactly as it is: no tab turned into spaces
+    /// and no control character dropped, because inside a literal they are
+    /// data. What the command line runs is split through here; what the pad
+    /// shows is not.
+    #[must_use]
+    pub fn verbatim(text: &str) -> Self {
+        let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+        Self {
+            lines: text.split('\n').map(str::to_owned).collect(),
             ..Self::default()
         }
     }
@@ -155,6 +173,7 @@ impl Scratch {
         self.undo = None;
         self.burst = false;
         self.flagged = None;
+        self.revision += 1;
         self.modified = true;
         self.edited = true;
         self.clamp_cursor();
@@ -231,7 +250,9 @@ impl Scratch {
     /// where it last did, moved only as far as it takes to put the cursor on
     /// it, and never so far down that rows are left empty under the last
     /// line. The line is a line and the column a terminal column, because a
-    /// CJK character is two of them.
+    /// CJK character is two of them. A cursor the first screen's width has
+    /// room for puts the view back at the left edge, or a short line gone to
+    /// from the end of a long one would show nothing left of the cursor.
     #[must_use]
     pub fn window(&self, height: usize, width: usize) -> (usize, usize) {
         let (height, width) = (height.max(1), width.max(1));
@@ -253,10 +274,14 @@ impl Scratch {
                 .min(line)
                 .max(line.saturating_sub(height - 1))
                 .min(self.lines.len().saturating_sub(height)),
-            self.scroll
-                .1
-                .min(at)
-                .max((at + under).saturating_sub(width)),
+            if at + under <= width {
+                0
+            } else {
+                self.scroll
+                    .1
+                    .min(at)
+                    .max((at + under).saturating_sub(width))
+            },
         )
     }
 
@@ -389,10 +414,17 @@ impl Scratch {
             }
             KeyCode::Up => self.move_rows(-1, shift),
             KeyCode::Down => self.move_rows(1, shift),
+            // The view goes a page with the cursor, as the grid's does.
             #[allow(clippy::cast_possible_wrap)]
-            KeyCode::PageUp => self.move_rows(-(PAGE as isize), shift),
-            #[allow(clippy::cast_possible_wrap)]
-            KeyCode::PageDown => self.move_rows(PAGE as isize, shift),
+            KeyCode::PageUp | KeyCode::PageDown => {
+                let page = if key.code == KeyCode::PageUp {
+                    -(PAGE as isize)
+                } else {
+                    PAGE as isize
+                };
+                self.scroll.0 = self.scroll.0.saturating_add_signed(page);
+                self.move_rows(page, shift)
+            }
             KeyCode::Home if control => self.move_to((0, 0), shift),
             KeyCode::End if control => {
                 let last = self.lines.len() - 1;
@@ -495,7 +527,16 @@ impl Scratch {
         let mut depth = 0usize;
         let mut block = false;
         let mut batch = false;
+        // A T-SQL procedure, function or trigger: its batch is all of it up
+        // to `GO`, blank lines and all, the way SQL Server reads one.
+        let mut program = false;
+        // Oracle subprograms declared inside a block, whose `end;` is theirs.
+        let mut nested = 0usize;
         let mut opened = false;
+        // A blank line that ends the statement unless the next code line
+        // carries it on, and the first note after that blank line.
+        let mut pending: Option<usize> = None;
+        let mut note: Option<usize> = None;
         let mut flush = |start: &mut Option<usize>, end: usize, opened: bool| {
             if let Some(from) = start.take() {
                 spans.push((from..end, opened));
@@ -503,64 +544,104 @@ impl Scratch {
         };
         for (number, line) in self.lines.iter().enumerate() {
             let trimmed = line.trim();
-            let lower = trimmed.to_ascii_lowercase();
+            let lowered = trimmed.to_ascii_lowercase();
+            // The words that say what a line starts are after any note in
+            // front of them: `/* why */ begin` still opens a block.
+            let lower = code_start(&lowered);
             let terminator = match kind {
                 Kind::Mssql => lower == "go",
                 Kind::Oracle => trimmed == "/",
             };
             if terminator {
-                flush(&mut start, number, opened);
-                (depth, block, batch) = (0, false, false);
+                flush(&mut start, pending.unwrap_or(number), opened);
+                (depth, block, batch, program, nested) = (0, false, false, false, 0);
+                (pending, note) = (None, None);
                 continue;
             }
             if trimmed.is_empty() {
-                if depth == 0 && !block {
-                    flush(&mut start, number, opened);
-                    batch = false;
+                if depth == 0 && !block && !program && start.is_some() {
+                    pending.get_or_insert(number);
                 }
                 continue;
+            }
+            if let Some(blank) = pending {
+                if lower.is_empty() {
+                    // Only a note: which statement it belongs to is for
+                    // the code after it to say.
+                    note.get_or_insert(number);
+                    continue;
+                }
+                if !continues(lower) {
+                    flush(&mut start, blank, opened);
+                    batch = false;
+                    start = Some(note.unwrap_or(number));
+                    opened = false;
+                }
+                (pending, note) = (None, None);
             }
             if start.is_none() {
                 start = Some(number);
                 opened = false;
             }
-            match (kind, program(&lower)) {
+            match (kind, program_of(lower, kind)) {
                 (Kind::Oracle, Some("package" | "type body")) => {
                     // A package or a type body has an `end` and no `begin`.
                     block = true;
                     depth += 1;
                 }
                 (Kind::Oracle, Some("procedure" | "function" | "trigger")) => block = true,
-                (Kind::Mssql, Some("procedure" | "function" | "trigger")) => batch = true,
+                (Kind::Mssql, Some("procedure" | "function" | "trigger")) => program = true,
                 _ => {}
             }
-            if starts_word(&lower, "declare") {
+            if starts_word(lower, "declare") {
                 match kind {
                     Kind::Oracle => block = true,
                     Kind::Mssql => batch = true,
                 }
             }
-            if starts_word(&lower, "begin") && !begins_transaction(&lower) {
+            let code = code_of(lower);
+            // A subprogram declared in a block's declarations, `procedure p
+            // is`, has a `begin` and an `end;` of its own; a forward one
+            // ends in `;` there and then.
+            if kind == Kind::Oracle
+                && block
+                && depth == 0
+                && (starts_word(lower, "procedure") || starts_word(lower, "function"))
+                && !code.ends_with(';')
+            {
+                nested += 1;
+            }
+            // `begin` opens a block at the start of a line, and at the end of
+            // one too: `end else begin`, `if @x = 1 begin`.
+            let begins = starts_word(lower, "begin") && !begins_transaction(lower);
+            if begins || ends_word(code, "begin") {
                 block = true;
                 depth += 1;
             }
-            opened |= block || batch;
-            let code = code_of(&lower);
-            let closing = closes_block(&lower);
+            // A block on one line closes itself: `begin null; end;`.
+            let closing = closes_block(code) || begins && ends_word(code, "end");
             if closing {
                 depth = depth.saturating_sub(1);
+            }
+            opened |= block || batch || program;
+            if closing && depth == 0 {
+                if nested > 0 {
+                    // The declared subprogram's own `end;`.
+                    nested -= 1;
+                    continue;
+                }
                 // T-SQL's `end` needs no `;`, so the block is over either way
                 // and the next blank line may end the statement.
-                block &= depth > 0 || code.ends_with(';');
+                block &= code.ends_with(';');
             }
             // Inside a block only the `end` that closes it ends the
             // statement, however many semicolons the body has.
-            if code.ends_with(';') && depth == 0 && !batch && (!block || closing) {
+            if code.ends_with(';') && depth == 0 && !batch && !program && (!block || closing) {
                 flush(&mut start, number + 1, opened);
                 block = false;
             }
         }
-        flush(&mut start, self.lines.len(), opened);
+        flush(&mut start, pending.unwrap_or(self.lines.len()), opened);
         spans
             .into_iter()
             .flat_map(|(range, opened)| {
@@ -568,12 +649,22 @@ impl Scratch {
                 let pieces = if kind == Kind::Oracle && !opened {
                     split_semicolons(&text)
                 } else {
-                    vec![text]
+                    vec![text.clone()]
                 };
+                // Each piece on its own lines: a driver's `line 2` counts
+                // from the first of them. A span starts on a line with code,
+                // so the trim took no line off the front.
+                let mut from = 0;
                 pieces
                     .into_iter()
-                    .filter(|piece| !piece.is_empty())
-                    .map(move |piece| (piece, range.clone()))
+                    .filter(|piece| has_code(piece))
+                    .map(move |piece| {
+                        let at = text[from..].find(&piece).map_or(from, |at| from + at);
+                        from = at + piece.len();
+                        let first = range.start + text[..at].matches('\n').count();
+                        let lines = first..first + piece.matches('\n').count() + 1;
+                        (piece, lines)
+                    })
             })
             .collect()
     }
@@ -587,6 +678,8 @@ impl Scratch {
         self.selection = None;
         self.goal = None;
         self.burst = false;
+        self.flagged = None;
+        self.revision += 1;
         self.modified = true;
         self.edited = true;
         Outcome::Edited
@@ -603,10 +696,16 @@ impl Scratch {
         self.flagged.as_ref()
     }
 
+    #[must_use]
+    pub const fn revision(&self) -> u64 {
+        self.revision
+    }
+
     /// The bookkeeping every edit does: the snapshot the burst is taken back
     /// to, and the flags the settle reads.
     fn begin_edit(&mut self) {
         self.flagged = None;
+        self.revision += 1;
         if !self.burst {
             self.undo = Some((self.lines.clone(), self.cursor));
             self.burst = true;
@@ -617,17 +716,30 @@ impl Scratch {
         self.edited = true;
     }
 
+    /// `text` at the cursor, line breaks and all, the cursor after it. The
+    /// new lines go in with one splice: a line at a time, every line below
+    /// moved down again for each, a paste of fifty thousand lines above
+    /// others was half a second.
     fn insert(&mut self, text: &str) -> Outcome {
         self.begin_edit();
-        for (index, part) in text.split('\n').enumerate() {
-            if index > 0 {
-                self.break_line();
+        let (line, column) = self.cursor;
+        let at = byte_index(&self.lines[line], column);
+        let tail = self.lines[line].split_off(at);
+        let mut parts = text.split('\n');
+        let first = parts.next().unwrap_or_default();
+        self.lines[line].push_str(first);
+        let mut added: Vec<String> = parts.map(str::to_owned).collect();
+        match added.last_mut() {
+            None => {
+                self.lines[line].push_str(&tail);
+                self.cursor.1 = column + first.chars().count();
             }
-            if !part.is_empty() {
-                let (line, column) = self.cursor;
-                let at = byte_index(&self.lines[line], column);
-                self.lines[line].insert_str(at, part);
-                self.cursor.1 = column + part.chars().count();
+            Some(last) => {
+                let end = last.chars().count();
+                last.push_str(&tail);
+                let count = added.len();
+                self.lines.splice(line + 1..line + 1, added);
+                self.cursor = (line + count, end);
             }
         }
         Outcome::Edited
@@ -826,10 +938,11 @@ impl Scratch {
 /// Text from outside — a paste, the editor, the file a pad was kept in — as
 /// the pad holds it: a tab is [`INDENT`] and the other control characters
 /// go, because the terminal would draw none of them and the cursor would be
-/// a column off for each.
+/// a column off for each. A line break is `\n` whatever it came as: xterm
+/// and the VTE terminals send a pasted one as a lone `\r`.
 fn cleaned(text: &str) -> String {
     let mut cleaned = String::with_capacity(text.len());
-    for character in text.replace("\r\n", "\n").chars() {
+    for character in text.replace("\r\n", "\n").replace('\r', "\n").chars() {
         match character {
             '\n' => cleaned.push('\n'),
             '\t' => cleaned.push_str(INDENT),
@@ -840,9 +953,10 @@ fn cleaned(text: &str) -> String {
     cleaned
 }
 
-/// A file's text as lines, always at least one.
+/// A file's text as lines, always at least one. A byte-order mark is how
+/// an editor said UTF-8, not the first character of the first statement.
 fn split_lines(text: &str) -> Vec<String> {
-    let text = cleaned(text);
+    let text = cleaned(text.strip_prefix('\u{feff}').unwrap_or(text));
     let text = text.strip_suffix('\n').unwrap_or(&text);
     let lines: Vec<String> = text.split('\n').map(str::to_owned).collect();
     if lines.is_empty() {
@@ -866,6 +980,20 @@ fn slice(line: &str, from: usize, to: usize) -> String {
         .collect()
 }
 
+/// Whether a statement holds anything to run: a note on lines of its own,
+/// or a stray `;`, is not a statement, and Oracle says ORA-00900 to one —
+/// which would stop a run of statements that were all fine.
+fn has_code(text: &str) -> bool {
+    let mut rest = text;
+    loop {
+        let code = code_start(rest);
+        match code.strip_prefix(';') {
+            Some(after) => rest = after,
+            None => return !code.is_empty(),
+        }
+    }
+}
+
 /// Whether the lowercased line starts with this word and not merely with
 /// those letters — `beginning` is not a `begin`.
 fn starts_word(lower: &str, word: &str) -> bool {
@@ -878,25 +1006,82 @@ fn starts_word(lower: &str, word: &str) -> bool {
 
 /// What a `create [or replace] [editionable]` line creates, if it is a
 /// program: `procedure`, `function`, `trigger`, `package` (spec or body) or
-/// `type body`.
-fn program(lower: &str) -> Option<&'static str> {
+/// `type body`. SQL Server's `alter` and `create or alter` define one too;
+/// Oracle's `alter procedure … compile` does not, and has no `end` to wait for.
+fn program_of(lower: &str, kind: Kind) -> Option<&'static str> {
+    if !starts_word(lower, "create") && !(kind == Kind::Mssql && starts_word(lower, "alter")) {
+        return None;
+    }
     let mut words = lower
         .split(|character: char| !character.is_alphanumeric() && character != '_')
         .filter(|word| !word.is_empty())
         .skip_while(|word| {
-            ["create", "or", "replace", "editionable", "noneditionable"].contains(word)
+            [
+                "create",
+                "or",
+                "replace",
+                "alter",
+                "editionable",
+                "noneditionable",
+            ]
+            .contains(word)
         });
-    if !starts_word(lower, "create") {
-        return None;
-    }
     match (words.next()?, words.next()) {
-        ("procedure", _) => Some("procedure"),
+        ("procedure" | "proc", _) => Some("procedure"),
         ("function", _) => Some("function"),
         ("trigger", _) => Some("trigger"),
         ("package", _) => Some("package"),
         ("type", Some("body")) => Some("type body"),
         _ => None,
     }
+}
+
+/// Whether a line carries on the statement before it rather than starting
+/// one: a clause no statement begins with, or a leading comma. Across a
+/// blank line it is what keeps a `delete` with its `where`, rather than
+/// running it on its own without one.
+fn continues(lower: &str) -> bool {
+    lower.starts_with([',', ')'])
+        || [
+            "where",
+            "and",
+            "or",
+            "from",
+            "join",
+            "inner",
+            "left",
+            "right",
+            "full",
+            "cross",
+            "outer",
+            "on",
+            "output",
+            "group",
+            "order",
+            "having",
+            "union",
+            "intersect",
+            "except",
+            "minus",
+            "when",
+            "fetch",
+            "offset",
+        ]
+        .iter()
+        .any(|word| starts_word(lower, word))
+}
+
+/// Whether the line's code ends with this word: `end else begin`.
+fn ends_word(code: &str, word: &str) -> bool {
+    code.trim_end_matches(';')
+        .trim_end()
+        .strip_suffix(word)
+        .is_some_and(|before| {
+            before
+                .chars()
+                .next_back()
+                .is_none_or(|character| !character.is_alphanumeric() && character != '_')
+        })
 }
 
 /// `begin tran` and its spellings start a transaction, not a block, and
@@ -946,6 +1131,22 @@ fn split_semicolons(text: &str) -> Vec<String> {
         piece.push(character);
         let next = chars.clone().next();
         match character {
+            // Oracle's other quote, `q'[it's; fine]'`, ends at the delimiter
+            // that closes it and not at the next `'`.
+            '\'' if is_q_quote(&piece[..piece.len() - 1]) => {
+                code = true;
+                if let Some(open) = chars.next() {
+                    piece.push(open);
+                    let close = match open {
+                        '[' => ']',
+                        '(' => ')',
+                        '{' => '}',
+                        '<' => '>',
+                        other => other,
+                    };
+                    until(&mut chars, &mut piece, &format!("{close}'"));
+                }
+            }
             '\'' | '"' => {
                 code = true;
                 until(&mut chars, &mut piece, &character.to_string());
@@ -960,6 +1161,14 @@ fn split_semicolons(text: &str) -> Vec<String> {
                 pieces.push(piece.trim().to_owned());
                 piece.clear();
                 code = false;
+                // A block after it on the line is one statement to its end:
+                // its own semicolons are not where it stops.
+                let rest = chars.as_str();
+                let next = code_start(rest).to_ascii_lowercase();
+                if starts_word(&next, "begin") || starts_word(&next, "declare") {
+                    pieces.push(rest.trim().to_owned());
+                    return pieces;
+                }
             }
             ';' => {}
             character if !character.is_whitespace() => code = true,
@@ -973,11 +1182,25 @@ fn split_semicolons(text: &str) -> Vec<String> {
     pieces
 }
 
-/// Whether this line closes a `begin`. `end if`, `end loop` and `end case`
-/// close something that never opened one, and a block that ended at the
-/// first `end loop;` would be a statement cut in half.
-fn closes_block(lower: &str) -> bool {
-    let Some(rest) = lower.strip_prefix("end") else {
+/// Whether a `'` after `text` opens Oracle's `q'…'` (or `nq'…'`): the `q`
+/// a word of its own and not the end of a name.
+fn is_q_quote(text: &str) -> bool {
+    let Some(before) = text.strip_suffix(['q', 'Q']) else {
+        return false;
+    };
+    let before = before.strip_suffix(['n', 'N']).unwrap_or(before);
+    before
+        .chars()
+        .next_back()
+        .is_none_or(|character| !character.is_alphanumeric() && character != '_')
+}
+
+/// Whether this line's code closes a `begin`. `end if`, `end loop` and `end
+/// case` close something that never opened one, and a block that ended at
+/// the first `end loop;` would be a statement cut in half; so does a `case`
+/// expression's `end` that goes on — `end as total,`, `end)`, `end + 1`.
+fn closes_block(code: &str) -> bool {
+    let Some(rest) = code.strip_prefix("end") else {
         return false;
     };
     if rest
@@ -988,9 +1211,18 @@ fn closes_block(lower: &str) -> bool {
         return false;
     }
     let rest = rest.trim_start();
-    !["if", "loop", "case"]
+    if ["if", "loop", "case", "as"]
         .iter()
         .any(|word| starts_word(rest, word))
+    {
+        return false;
+    }
+    // Nothing, the `;`, a label (`end my_proc;`) or T-SQL's `end else`.
+    rest.is_empty()
+        || rest.starts_with(';')
+        || rest.starts_with(|character: char| {
+            character.is_alphabetic() || character == '_' || character == '"'
+        })
 }
 
 fn byte_index(text: &str, column: usize) -> usize {
@@ -999,15 +1231,27 @@ fn byte_index(text: &str, column: usize) -> usize {
         .map_or(text.len(), |(index, _)| index)
 }
 
-/// The file `<connection>.sql` is saved as, or `None` for a name that is not
-/// one file — a connection may be called anything, including `../../etc`.
+/// The file `<connection>.sql` is saved as, or `None` for no name at all. A
+/// connection may be called anything — `prod/reporting`, `../../etc` — so
+/// what would make the name a path, a slash either way, a NUL or a leading
+/// dot, is written as its `%xx`: the pad stays in its directory and is still
+/// saved, where refusing the name would lose it on every quit.
 #[must_use]
 pub fn file_name(connection: &str) -> Option<String> {
-    let bad = connection.is_empty()
-        || connection.contains(['/', '\\'])
-        || connection.starts_with('.')
-        || connection.contains('\0');
-    (!bad).then(|| format!("{connection}.sql"))
+    if connection.is_empty() {
+        return None;
+    }
+    let mut name = String::with_capacity(connection.len() + ".sql".len());
+    for (at, character) in connection.char_indices() {
+        match character {
+            '/' => name.push_str("%2F"),
+            '\\' => name.push_str("%5C"),
+            '\0' => name.push_str("%00"),
+            '.' if at == 0 => name.push_str("%2E"),
+            character => name.push(character),
+        }
+    }
+    Some(format!("{name}.sql"))
 }
 
 #[cfg(test)]
@@ -1302,6 +1546,16 @@ mod tests {
     }
 
     #[test]
+    fn a_paste_whose_lines_end_in_a_lone_carriage_return_keeps_its_lines() {
+        let mut scratch = Scratch::default();
+        scratch.paste("select 1 as a\rselect 2 as b\r\nselect 3");
+        assert_eq!(
+            scratch.lines(),
+            ["select 1 as a", "select 2 as b", "select 3"]
+        );
+    }
+
+    #[test]
     fn a_paste_is_one_edit_however_many_lines_it_has() {
         let mut scratch = pad();
         assert_eq!(scratch.paste("x\r\ny\tz"), Outcome::Edited);
@@ -1561,8 +1815,121 @@ select v from dual";
     #[test]
     fn a_statement_is_trimmed_and_never_empty() {
         assert_eq!(split("\n\n   \n\n", Kind::Mssql), Vec::<String>::new());
-        assert_eq!(split(";", Kind::Mssql), [";"]);
+        assert_eq!(split(";", Kind::Mssql), Vec::<String>::new());
         assert_eq!(split("  select 1  \n\n\n", Kind::Mssql), ["select 1"]);
+    }
+
+    #[test]
+    fn a_note_on_its_own_is_not_a_statement_and_one_in_front_of_a_block_is_read_past() {
+        for kind in [Kind::Mssql, Kind::Oracle] {
+            assert_eq!(
+                split(
+                    "-- setup\n\nselect 1 from dual;\n-- done\n/* really */\n\n;",
+                    kind
+                ),
+                ["select 1 from dual;"],
+                "{kind:?}"
+            );
+        }
+        assert_eq!(
+            split(
+                "/* why */ begin\n  null;\nend;\nselect 2 from dual;",
+                Kind::Oracle
+            ),
+            ["/* why */ begin\n  null;\nend;", "select 2 from dual;"],
+            "the block is opened by the begin after the note"
+        );
+        assert_eq!(
+            split(
+                "-- note\ndeclare @x int = 1;\nselect @x;\n\nselect 2;",
+                Kind::Mssql
+            ),
+            ["-- note\ndeclare @x int = 1;\nselect @x;", "select 2;"]
+        );
+    }
+
+    #[test]
+    fn a_tsql_procedure_runs_to_go_blank_lines_and_all() {
+        let procedure = "create or alter procedure dbo.purge as\n  set nocount on;\n\n  \
+                         delete from dbo.t where old = 1;";
+        assert_eq!(
+            split(&format!("{procedure}\nGO\nselect 1;"), Kind::Mssql),
+            [procedure, "select 1;"],
+            "the delete is the procedure's, not a statement run on its own"
+        );
+        let altered = "alter procedure p as\n  select 1;\n\n  select 2;";
+        assert_eq!(split(altered, Kind::Mssql), [altered]);
+    }
+
+    #[test]
+    fn a_blank_line_before_a_clause_does_not_cut_the_statement_it_belongs_to() {
+        for kind in [Kind::Mssql, Kind::Oracle] {
+            assert_eq!(
+                split("delete from t\n\nwhere a = 999;", kind),
+                ["delete from t\n\nwhere a = 999;"],
+                "{kind:?}: never a delete without its where"
+            );
+            assert_eq!(
+                split("delete from t\n\n-- only the old ones\nwhere x < 5;", kind),
+                ["delete from t\n\n-- only the old ones\nwhere x < 5;"],
+                "{kind:?}"
+            );
+            assert_eq!(
+                split("select 1 from t\n\n-- next\nselect 2 from t", kind),
+                ["select 1 from t", "-- next\nselect 2 from t"],
+                "{kind:?}: a new statement still starts after a blank line"
+            );
+        }
+    }
+
+    #[test]
+    fn a_case_expressions_end_and_an_end_else_begin_keep_a_tsql_block_whole() {
+        let case = "if 1 = 1\nbegin\n  select case\n    when 1 = 1 then 'a'\n  end as w;\nend";
+        assert_eq!(
+            split(&format!("{case}\n\nselect 2;"), Kind::Mssql),
+            [case, "select 2;"]
+        );
+        let branches = "if 1 = 1\nbegin\n  select 1;\nend else begin\n  select 2;\nend";
+        assert_eq!(
+            split(&format!("{branches}\n\nselect 3;"), Kind::Mssql),
+            [branches, "select 3;"]
+        );
+    }
+
+    #[test]
+    fn an_oracle_subprogram_declared_in_a_block_does_not_end_it() {
+        let block = "declare\n  procedure p is\n  begin\n    null;\n  end;\nbegin\n  p;\nend;";
+        assert_eq!(
+            split(&format!("{block}\nselect 1 from dual;"), Kind::Oracle),
+            [block, "select 1 from dual;"]
+        );
+        let outer = "create or replace procedure outer is\n  function f return number is\n  \
+                     begin\n    return 1;\n  end;\n  procedure later;\nbegin\n  null;\nend;";
+        assert_eq!(
+            split(&format!("{outer}\n/\nselect 1 from dual;"), Kind::Oracle),
+            [outer, "select 1 from dual;"],
+            "a forward declaration has no end of its own"
+        );
+    }
+
+    #[test]
+    fn oracle_quotes_and_one_line_blocks_are_not_cut_inside() {
+        assert_eq!(
+            split("begin null; end;\nselect 1 from dual;", Kind::Oracle),
+            ["begin null; end;", "select 1 from dual;"],
+            "a block on one line closes itself"
+        );
+        assert_eq!(
+            split(
+                "select q'[it's; fine]' a from dual; select 2 from dual;",
+                Kind::Oracle
+            ),
+            ["select q'[it's; fine]' a from dual;", "select 2 from dual;"]
+        );
+        assert_eq!(
+            split("select 1 from dual; begin null; end;", Kind::Oracle),
+            ["select 1 from dual;", "begin null; end;"]
+        );
     }
 
     #[test]
@@ -1607,6 +1974,20 @@ select v from dual";
         );
     }
 
+    /// A driver counts a statement's lines from its own first, so each
+    /// piece of an Oracle line needs its own and not the whole run of them.
+    #[test]
+    fn two_oracle_statements_across_three_lines_are_each_on_their_own() {
+        let scratch = Scratch::new("select 1\nfrom dual; select 2\nfrom dual;");
+        assert_eq!(
+            scratch.statements(Kind::Oracle),
+            [
+                ("select 1\nfrom dual;".to_owned(), 0..2),
+                ("select 2\nfrom dual;".to_owned(), 1..3),
+            ]
+        );
+    }
+
     #[test]
     fn the_window_keeps_the_cursor_on_the_screen_both_ways() {
         let mut scratch = Scratch::new(
@@ -1631,6 +2012,13 @@ select v from dual";
             scratch.window(10, 20),
             (1, 180),
             "and a long line scrolls sideways"
+        );
+        scratch.show_from(1, 180);
+        scratch.cursor = (11, 3);
+        assert_eq!(
+            scratch.window(10, 20),
+            (2, 0),
+            "and back for a short one, which would otherwise show only `e 11`"
         );
     }
 
@@ -1704,8 +2092,15 @@ select v from dual";
     #[test]
     fn a_file_name_is_the_connection_name_and_nothing_that_climbs_out_of_the_directory() {
         assert_eq!(file_name("local mssql"), Some("local mssql.sql".to_owned()));
-        for name in ["", ".", "..", "../etc/passwd", "a/b", "a\\b"] {
-            assert_eq!(file_name(name), None, "{name:?}");
+        assert_eq!(file_name(""), None);
+        for (name, file) in [
+            (".", "%2E.sql"),
+            ("..", "%2E..sql"),
+            ("../etc/passwd", "%2E.%2Fetc%2Fpasswd.sql"),
+            ("prod/reporting", "prod%2Freporting.sql"),
+            ("a\\b", "a%5Cb.sql"),
+        ] {
+            assert_eq!(file_name(name).as_deref(), Some(file), "{name:?}");
         }
     }
 }

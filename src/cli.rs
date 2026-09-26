@@ -16,7 +16,7 @@ use std::io::Read as _;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::str::FromStr;
-use std::sync::mpsc::RecvTimeoutError;
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -92,7 +92,7 @@ pub enum Command {
         full: bool,
         /// The statements to run, split as the scratch pad splits them, or
         /// `-` to read them from stdin
-        #[arg(value_name = "SQL")]
+        #[arg(value_name = "SQL", allow_hyphen_values = true)]
         sql: String,
     },
     /// List the tables, views, procedures, functions, packages and sequences of a connection
@@ -133,7 +133,7 @@ pub enum Command {
         #[arg(long, value_name = "N", value_parser = at_least_one())]
         max_rows: Option<usize>,
         /// The statement to time, or `-` to read it from stdin
-        #[arg(value_name = "SQL")]
+        #[arg(value_name = "SQL", allow_hyphen_values = true)]
         sql: String,
     },
 }
@@ -143,9 +143,11 @@ impl Cli {
     /// [`crate::config::default_path`] says.
     #[must_use]
     pub fn config_path(&self) -> PathBuf {
+        // `--config=~/x` reaches us with its `~` still in it: no shell
+        // expands one after an `=`.
         self.config
-            .clone()
-            .unwrap_or_else(crate::config::default_path)
+            .as_deref()
+            .map_or_else(crate::config::default_path, crate::config::expand)
     }
 }
 
@@ -244,45 +246,101 @@ fn query(
     full: bool,
 ) -> Result<ExitCode> {
     let sql = statement(sql)?;
-    let Some(connection) = open(config, conn) else {
+    let Some(spec) = named(config, conn) else {
         return Ok(ExitCode::FAILURE);
     };
     // Split as the pad's F5 splits, so a script with `GO`s, or two Oracle
-    // statements on one line, runs here the way it runs there.
-    let statements = Scratch::new(&sql).statements(connection.kind());
+    // statements on one line, runs here the way it runs there — but from the
+    // text as it came, where a tab inside a literal is a tab.
+    let statements = Scratch::verbatim(&sql).statements(spec.kind);
+    if statements.is_empty() {
+        bail!("no statement given: only comments");
+    }
+    // A year is as good as for ever, and an `Instant` cannot go further.
+    let deadline = Instant::now() + Duration::from_secs(timeout.min(365 * 24 * 3600));
+    let timed_out = || eprintln!("query timed out after {timeout}s");
+    // Opened on a thread of its own so the timeout covers the connect too.
+    let (opened, connection) = mpsc::channel();
+    let (spec, owned) = (spec.clone(), config.clone());
+    std::thread::spawn(move || {
+        let _ = opened.send(db::Connection::open(&spec, &owned));
+    });
+    let connection =
+        match connection.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(Ok(connection)) => connection,
+            Ok(Err(error)) => {
+                eprintln!("{error}");
+                return Ok(ExitCode::FAILURE);
+            }
+            Err(_) => {
+                timed_out();
+                return Ok(ExitCode::FAILURE);
+            }
+        };
     let options = QueryOptions {
         max_rows: Some(max_rows),
         ..QueryOptions::default()
     };
-    let deadline = Instant::now() + Duration::from_secs(timeout);
     let mut answer = Answer::default();
+    // What each statement changed, so a failure further on can say what
+    // already happened: the servers commit each one as it goes.
+    let mut changed: Vec<(usize, u64)> = Vec::new();
     for (number, (sql, _)) in statements.iter().enumerate() {
         let one = match collect(&connection, sql, options, deadline) {
             Ok(one) => one,
-            Err(DbError::Timeout) => {
-                eprintln!("query timed out after {timeout}s");
-                return Ok(ExitCode::FAILURE);
-            }
-            Err(error) if statements.len() > 1 => {
-                eprintln!("statement {}: {error}", number + 1);
-                return Ok(ExitCode::FAILURE);
-            }
             Err(error) => {
-                eprintln!("{error}");
+                for (number, affected) in &changed {
+                    eprintln!("statement {number}: {} affected", rows_text(*affected));
+                }
+                match error {
+                    DbError::Timeout => {
+                        timed_out();
+                        // Its worker may be past a cancel's reach — asleep
+                        // in PL/SQL, or on a network that stopped — and the
+                        // answer is already given; waiting for it to let
+                        // go would be the timeout not holding.
+                        std::mem::forget(connection);
+                    }
+                    error if statements.len() > 1 => {
+                        eprintln!("statement {}: {error}", number + 1);
+                    }
+                    error => eprintln!("{error}"),
+                }
                 return Ok(ExitCode::FAILURE);
             }
         };
+        changed.extend(
+            one.affected
+                .iter()
+                .filter(|affected| **affected > 0)
+                .map(|affected| (number + 1, *affected)),
+        );
         answer.sets.extend(one.sets);
         answer.affected.extend(one.affected);
         answer.rows += one.rows;
         answer.truncated |= one.truncated;
+        answer.reset |= one.reset;
         answer.total += one.total;
+        let left = statements.len() - number - 1;
+        if one.reset && left > 0 {
+            for (number, affected) in &changed {
+                eprintln!("statement {number}: {} affected", rows_text(*affected));
+            }
+            eprintln!(
+                "statement {}: --max-rows cut its scan short, which ends a SQL Server \
+                 session, so the rest of the script — {} written for that session — did \
+                 not run. Raise --max-rows, or run the rest on its own.",
+                number + 1,
+                crate::app::results::counted(left as u64, "statement"),
+            );
+            return Ok(ExitCode::FAILURE);
+        }
     }
 
     let limit = (!full).then_some(export::CELL_LIMIT);
-    match format {
-        Format::Table => print_sets(&answer.sets, |set| export::table(&set.0, &set.1, limit)),
-        Format::Csv => print_sets(&answer.sets, |set| export::csv(&set.0, &set.1)),
+    let text = match format {
+        Format::Table => joined(&answer.sets, |set| export::table(&set.0, &set.1, limit)),
+        Format::Csv => joined(&answer.sets, |set| export::csv(&set.0, &set.1)),
         // Two result sets are two arrays; one is the array everything else
         // expects, so a `select` piped to a parser is never wrapped.
         Format::Json if answer.sets.len() > 1 => {
@@ -291,31 +349,51 @@ fn query(
                 .iter()
                 .map(|set| export::json(&set.0, &set.1).trim_end().to_owned())
                 .collect();
-            print!("[\n{}\n]\n", sets.join(",\n"));
+            format!("[\n{}\n]\n", sets.join(",\n"))
         }
-        Format::Json => print!(
-            "{}",
-            answer
-                .sets
-                .first()
-                .map_or_else(|| "[]\n".to_owned(), |set| export::json(&set.0, &set.1))
-        ),
-    }
+        Format::Json => answer
+            .sets
+            .first()
+            .map_or_else(|| "[]\n".to_owned(), |set| export::json(&set.0, &set.1)),
+    };
+    write_out(&text)?;
 
     for affected in &answer.affected {
         eprintln!("{} affected", rows_text(*affected));
     }
-    let cap = if answer.truncated {
-        format!(" (truncated at {max_rows})")
-    } else {
-        String::new()
+    let cap = match (answer.truncated, statements.len()) {
+        (false, _) => String::new(),
+        (true, 1) => format!(" (truncated at {max_rows})"),
+        (true, _) => format!(" (a statement was truncated at {max_rows})"),
     };
     eprintln!(
         "{}{cap} in {} ms",
         rows_text(answer.rows as u64),
         answer.total.as_millis()
     );
+    if answer.reset {
+        eprintln!(
+            "--max-rows ended the SQL Server session to stop the scan: the statement's own \
+             changes and any transaction still open were rolled back"
+        );
+    }
     Ok(ExitCode::SUCCESS)
+}
+
+/// The answer on stdout. A reader that stopped reading — `| head` — is the
+/// end of the output and not a failure, and never a panic.
+fn write_out(text: &str) -> Result<()> {
+    use std::io::Write as _;
+    let mut stdout = std::io::stdout().lock();
+    match stdout
+        .write_all(text.as_bytes())
+        .and_then(|()| stdout.flush())
+    {
+        Err(error) if error.kind() != std::io::ErrorKind::BrokenPipe => {
+            Err(error).context("writing to stdout")
+        }
+        _ => Ok(()),
+    }
 }
 
 /// Long enough for the slowest thing anyone benches on purpose — a million
@@ -348,10 +426,12 @@ fn bench(
     let mut first_row = Vec::new();
     let mut total = Vec::new();
     let mut rows = 0;
+    let mut reset = false;
     for _ in 0..runs {
         match collect(&connection, &sql, options, Instant::now() + BENCH_TIMEOUT) {
             Ok(answer) => {
                 rows = answer.rows;
+                reset |= answer.reset;
                 first_row.push(micros(answer.first_row));
                 total.push(micros(answer.total));
             }
@@ -367,22 +447,25 @@ fn bench(
         phase("first_row", &mut first_row),
         phase("total", &mut total),
     ];
-    print!(
-        "{}",
-        export::table(
-            &headings(&["phase", "min", "p50", "p95", "max"]),
-            &phases,
-            None
-        )
-    );
     // Over the whole run rather than off the median, and in microseconds, so
     // a query too fast to register a millisecond is still a real rate.
     let elapsed: u64 = total.iter().sum::<u64>().max(1);
     let per_second = rows as u64 * u64::from(runs) * 1_000_000 / elapsed;
-    println!(
-        "{}, {per_second} rows/s over {runs} runs",
+    write_out(&format!(
+        "{}{}, {per_second} rows/s over {runs} runs\n",
+        export::table(
+            &headings(&["phase", "min", "p50", "p95", "max"]),
+            &phases,
+            None
+        ),
         rows_text(rows as u64)
-    );
+    ))?;
+    if reset {
+        eprintln!(
+            "--max-rows cut every run short, which ends a SQL Server session: each run \
+             after the first connected again, inside its total"
+        );
+    }
     Ok(ExitCode::SUCCESS)
 }
 
@@ -420,13 +503,9 @@ fn rows_text(count: u64) -> String {
     }
 }
 
-fn print_sets(sets: &[ResultSet], format: impl Fn(&ResultSet) -> String) {
-    for (index, set) in sets.iter().enumerate() {
-        if index > 0 {
-            println!();
-        }
-        print!("{}", format(set));
-    }
+/// Every set formatted, a blank line between two.
+fn joined(sets: &[ResultSet], format: impl Fn(&ResultSet) -> String) -> String {
+    sets.iter().map(format).collect::<Vec<_>>().join("\n")
 }
 
 fn objects(
@@ -463,15 +542,17 @@ fn objects(
             ]
         })
         .collect();
-    print!(
-        "{}",
-        export::table(
-            &headings(&["schema", "kind", "name", "modified"]),
-            &rows,
-            None
-        )
-    );
-    ExitCode::SUCCESS
+    match write_out(&export::table(
+        &headings(&["schema", "kind", "name", "modified"]),
+        &rows,
+        None,
+    )) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("{error:#}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 fn source(config: &Config, conn: &str, object: &str) -> ExitCode {
@@ -499,7 +580,10 @@ fn source(config: &Config, conn: &str, object: &str) -> ExitCode {
     let object = match found {
         Ok(Some(object)) => object,
         Ok(None) => {
-            eprintln!("no such object: {schema}.{name}");
+            eprintln!(
+                "no such object: {schema}.{name} — no table, view, procedure, function, \
+                 package or sequence of that name"
+            );
             return ExitCode::FAILURE;
         }
         Err(error) => {
@@ -529,10 +613,13 @@ fn source(config: &Config, conn: &str, object: &str) -> ExitCode {
             .map(|source| format!("{}\n", source.trim_start_matches(['\r', '\n']).trim_end()))
     };
     match printed {
-        Ok(text) => {
-            print!("{text}");
-            ExitCode::SUCCESS
-        }
+        Ok(text) => match write_out(&text) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("{error:#}");
+                ExitCode::FAILURE
+            }
+        },
         Err(error) => {
             eprintln!("{error}");
             ExitCode::FAILURE
@@ -545,8 +632,14 @@ fn source(config: &Config, conn: &str, object: &str) -> ExitCode {
 fn object_name(text: &str) -> Option<(String, String)> {
     let mut parts = vec![String::new()];
     let mut closing = None;
-    for character in text.chars() {
+    let mut characters = text.chars().peekable();
+    while let Some(character) = characters.next() {
         match (closing, character) {
+            // Doubled, the closing mark is one of the name's own: `[a]]b]`.
+            (Some(end), _) if character == end && characters.peek() == Some(&end) => {
+                characters.next();
+                parts.last_mut()?.push(end);
+            }
             (Some(end), _) if character == end => closing = None,
             (None, '[') => closing = Some(']'),
             (None, '"') => closing = Some('"'),
@@ -577,6 +670,19 @@ fn headings(names: &[&str]) -> Vec<Column> {
 /// The connection `--conn` names, opened. [`None`] means it has already been
 /// explained on stderr.
 fn open(config: &Config, name: &str) -> Option<Connection> {
+    let spec = named(config, name)?;
+    match db::Connection::open(spec, config) {
+        Ok(connection) => Some(connection),
+        Err(error) => {
+            eprintln!("{error}");
+            None
+        }
+    }
+}
+
+/// The connection `--conn` names in the config. [`None`] means it has
+/// already been explained on stderr.
+fn named<'a>(config: &'a Config, name: &str) -> Option<&'a crate::config::Connection> {
     let Some(spec) = config.connection(name) else {
         let configured: Vec<&str> = config
             .connections
@@ -596,13 +702,7 @@ fn open(config: &Config, name: &str) -> Option<Connection> {
         }
         return None;
     };
-    match db::Connection::open(spec, config) {
-        Ok(connection) => Some(connection),
-        Err(error) => {
-            eprintln!("{error}");
-            None
-        }
-    }
+    Some(spec)
 }
 
 /// `-` is the statement on stdin, which is how a file or a heredoc gets in.
@@ -635,6 +735,8 @@ struct Answer {
     affected: Vec<u64>,
     rows: usize,
     truncated: bool,
+    /// Stopping at the cap ended the server session (SQL Server).
+    reset: bool,
     /// To the first row, or to the end for a statement that had none.
     first_row: Duration,
     total: Duration,
@@ -667,10 +769,14 @@ fn collect(
             }
             Ok(QueryEvent::RowsAffected(rows)) => answer.affected.push(rows),
             Ok(QueryEvent::Done {
-                rows, truncated, ..
+                rows,
+                truncated,
+                reset,
+                ..
             }) => {
                 answer.rows = rows;
                 answer.truncated = truncated;
+                answer.reset = reset;
                 answer.total = started.elapsed();
                 answer.first_row = first_row.unwrap_or(answer.total);
                 return Ok(answer);
@@ -858,6 +964,11 @@ mod tests {
         assert_eq!(
             object_name("\"BENCH\".\"Mixed.Case\""),
             pair("BENCH", "Mixed.Case")
+        );
+        assert_eq!(
+            object_name("[a]]b].\"say \"\"hi\"\"\""),
+            pair("a]b", "say \"hi\""),
+            "a doubled closing mark is the name's own"
         );
         for wrong in ["customers", "a.b.c", ".x", "x.", "[a.b"] {
             assert_eq!(object_name(wrong), None, "{wrong}");

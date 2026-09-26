@@ -9,7 +9,7 @@
 use std::borrow::Cow;
 use std::fmt::Write as _;
 
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::db::model::{Cell, Column};
 
@@ -21,13 +21,19 @@ pub const CELL_LIMIT: usize = 60;
 /// and this module both measure with, so a table and the pane it came from
 /// line up on the same glyphs. A CJK name is two columns per character, and
 /// a control character the one column of the glyph [`printable`] draws it as.
+/// Measured as a string and not a character at a time, the way ratatui
+/// draws it: `❤️` is two columns, and a family joined by ZWJs two, not six.
 #[must_use]
 pub fn width(text: &str) -> usize {
     // Printable ASCII is a column a byte, and most cells are nothing else.
     if text.bytes().all(|byte| (b' '..=b'~').contains(&byte)) {
         return text.len();
     }
-    text.chars().map(cells).sum()
+    if text.contains(char::is_control) {
+        UnicodeWidthStr::width(text.chars().map(printable).collect::<String>().as_str())
+    } else {
+        UnicodeWidthStr::width(text)
+    }
 }
 
 /// What a character is drawn as. A terminal skips a control character, so
@@ -45,7 +51,9 @@ pub fn printable(character: char) -> char {
     }
 }
 
-fn cells(character: char) -> usize {
+/// How many terminal columns a character is drawn in, as [`printable`]
+/// draws it.
+pub(crate) fn cells(character: char) -> usize {
     UnicodeWidthChar::width(printable(character)).unwrap_or(0)
 }
 
@@ -64,20 +72,34 @@ pub fn cut_to(text: &str, columns: usize) -> Cow<'_, str> {
     for (at, character) in text.char_indices() {
         used += cells(character);
         if used > room {
-            let mut cut: String = text[..kept].chars().map(printable).collect();
-            cut.push('…');
-            return Cow::Owned(cut);
+            return Cow::Owned(ended(&text[..kept], room));
         }
         if used < room {
             kept = at + character.len_utf8();
         }
         plain &= !character.is_control();
     }
-    if plain {
+    let whole = if plain {
         Cow::Borrowed(text)
     } else {
         Cow::Owned(text.chars().map(printable).collect())
+    };
+    // A character at a time is short of a glyph a VS16 widens.
+    if room < usize::MAX && width(&whole) > room {
+        Cow::Owned(ended(&text[..kept], room))
+    } else {
+        whole
     }
+}
+
+/// `text` printable and cut until it and a `…` fit in `room` columns.
+fn ended(text: &str, room: usize) -> String {
+    let mut cut: String = text.chars().map(printable).collect();
+    while !cut.is_empty() && width(&cut) >= room {
+        cut.pop();
+    }
+    cut.push('…');
+    cut
 }
 
 /// `text` padded to `columns` terminal columns, on the side that leaves the
@@ -307,14 +329,16 @@ fn keys(columns: &[Column]) -> Vec<String> {
 fn value(out: &mut String, cell: Option<&Cell>) {
     match cell {
         None | Some(Cell::Null) => out.push_str("null"),
-        Some(Cell::Int(number)) => {
+        // Past 2^53 a JavaScript reader rounds, the same as for a decimal.
+        Some(Cell::Int(number)) if number.unsigned_abs() <= 1 << 53 => {
             let _ = write!(out, "{number}");
+        }
+        Some(Cell::Int(number)) => {
+            let _ = write!(out, "\"{number}\"");
         }
         // JSON has no infinity and no NaN; a value that is neither a number
         // nor a string is the one thing left.
-        Some(Cell::Float(number)) if number.is_finite() => {
-            let _ = write!(out, "{number}");
-        }
+        Some(cell @ Cell::Float(number)) if number.is_finite() => out.push_str(&cell.display()),
         Some(Cell::Float(_)) => out.push_str("null"),
         Some(Cell::Bool(value)) => out.push_str(if *value { "true" } else { "false" }),
         // 2^53: past it a JavaScript reader rounds, which is the rounding a
@@ -490,6 +514,26 @@ mod tests {
         }
     }
 
+    /// A VS16 makes `❤` two columns and ZWJs make a family two, the way
+    /// ratatui draws them: a character at a time counted one and six, and
+    /// the column after them leaned.
+    #[test]
+    fn an_emoji_is_as_wide_as_it_is_drawn_and_a_cut_of_it_fits() {
+        let rows = vec![
+            vec![text("❤\u{fe0f}"), text("a")],
+            vec![text("👨\u{200d}👩\u{200d}👧"), text("b")],
+            vec![text("👍🏽"), text("c")],
+        ];
+        let table = table(&columns(&["e", "x"]), &rows, None);
+        assert_eq!(
+            table.lines().map(width).collect::<Vec<_>>(),
+            [5, 5, 5, 5, 5],
+            "{table}"
+        );
+        let cut = cut_to("❤\u{fe0f}❤\u{fe0f}❤\u{fe0f}", 4);
+        assert!(width(&cut) <= 4 && cut.ends_with('…'), "{cut:?}");
+    }
+
     #[test]
     fn nothing_at_all_is_not_a_panic() {
         assert_eq!(table(&[], &[], Some(CELL_LIMIT)), "");
@@ -536,7 +580,7 @@ mod tests {
     #[test]
     fn json_writes_numbers_as_numbers_and_everything_else_as_strings() {
         let json = json(
-            &columns(&["n", "f", "d", "w", "huge", "b", "t", "null", "bytes"]),
+            &columns(&["n", "f", "d", "w", "huge", "b", "t", "null", "bytes", "big"]),
             &[vec![
                 Cell::Int(-7),
                 Cell::Float(1.5),
@@ -547,13 +591,15 @@ mod tests {
                 text("hi"),
                 Cell::Null,
                 Cell::Bytes(vec![0x00, 0xff]),
+                Cell::Int(9_007_199_254_740_993),
             ]],
         );
         assert_eq!(
             json,
             "[\n  {\"n\": -7, \"f\": 1.5, \"d\": \"10.2500\", \"w\": -42, \
              \"huge\": \"12345678901234567890\", \"b\": true, \
-             \"t\": \"hi\", \"null\": null, \"bytes\": \"0x00ff\"}\n]\n"
+             \"t\": \"hi\", \"null\": null, \"bytes\": \"0x00ff\", \
+             \"big\": \"9007199254740993\"}\n]\n"
         );
     }
 

@@ -252,6 +252,38 @@ fn the_finder_lists_the_matches_with_their_kind_and_tab_and_marks_the_chosen_one
 }
 
 #[test]
+fn a_wide_name_in_the_finder_keeps_the_kind_and_tab_columns_in_line() {
+    let mut app = two_tabs();
+    app.tabs[0].objects.answer(
+        &CatalogRequest::Index,
+        &Ok(CatalogAnswer::Index(vec![
+            object("dbo", "顧客テーブル", ObjectKind::Table),
+            object("dbo", "orders_archive", ObjectKind::View),
+        ])),
+    );
+    app.handle(Event::Key(key("Ctrl-P")));
+    for character in "dbo.".chars() {
+        app.handle(Event::Key(key(&character.to_string())));
+    }
+    let terminal = frame(120, 40, &app);
+    // The cell each row's kind starts in, read cell by cell: the buffer
+    // keeps a blank under the second half of a wide glyph.
+    let buffer = terminal.backend().buffer();
+    let kind_at = |word: &str| {
+        (0..40u16)
+            .find_map(|y| {
+                (0..120u16).find(|x| {
+                    word.chars().enumerate().all(|(n, character)| {
+                        buffer[(x + n as u16, y)].symbol() == character.to_string()
+                    }) && buffer[(x - 1, y)].symbol() == " "
+                })
+            })
+            .unwrap_or_else(|| panic!("no {word} row in\n{}", text(&terminal)))
+    };
+    assert_eq!(kind_at("table"), kind_at("view"));
+}
+
+#[test]
 fn the_finder_says_when_there_is_nothing_indexed_and_when_nothing_matches() {
     let mut app = two_tabs();
     app.handle(Event::Key(key("Ctrl-P")));
