@@ -333,6 +333,25 @@ server's own message on stderr and nothing at all on stdout.
 `SQL_BENCH_TRACE=<file>` appends one tab-separated line per connect, query and
 frame; unset, no clock is read.
 
+## For agents: use agent-cli
+
+The subcommands above stay because this repository's own checks run on them
+(`scripts/qa/*.sh` read `query`, `objects` and `source`, and `scripts/perf.sh`
+times the driver with `bench`). A coding agent should use
+[agent-cli](https://github.com/jacobragsdale/agent-cli) instead: JSON only,
+one fixed result shape, a write guard and a deadline on every call. It reads
+its connections from `[[sql.connection]]` in its own `config.toml`, not from
+this one.
+
+| sql-bench | agent-cli |
+|---|---|
+| `sql-bench query --conn C 'select …'` | `agent-cli sql query run --conn C 'select …'` |
+| `sql-bench query --conn C -` | `agent-cli sql query run --conn C -` |
+| `sql-bench objects --conn C --schema S --kind procedure` | `agent-cli sql object list --conn C --schema S --kind procedure` |
+| `sql-bench source --conn C bench.sp_customer_orders` | `agent-cli sql object get --conn C bench.sp_customer_orders` |
+| `sql-bench bench --conn C --runs 20 'select 1'` | `agent-cli sql query bench --conn C --runs 20 'select 1'` |
+| the connection list in `config.toml` | `agent-cli sql connection list` |
+
 ## Replay
 
 `sql-bench --replay FILE --size 100x28 --frames-dir DIR` drives the real loop,
